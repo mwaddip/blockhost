@@ -80,19 +80,14 @@ d-i grub-installer/with_other_os boolean false
 d-i grub-installer/bootdev string default
 
 #
-# Finishing
+# Finishing - force reboot (not poweroff)
 #
 d-i finish-install/reboot_in_progress note
+d-i debian-installer/exit/poweroff boolean false
+d-i finish-install/halt boolean false
 
 #
 # Late commands - install BlockHost
+# Use sh -c with semicolons for reliability (backslash continuations can fail)
 #
-d-i preseed/late_command string \
-    mkdir -p /target/opt/blockhost && \
-    cp -r /cdrom/blockhost/installer /target/opt/blockhost/ && \
-    cp /cdrom/blockhost/first-boot.sh /target/opt/blockhost/ && \
-    chmod +x /target/opt/blockhost/first-boot.sh && \
-    cp /cdrom/blockhost/blockhost-firstboot.service /target/lib/systemd/system/ && \
-    mkdir -p /target/etc/systemd/system/multi-user.target.wants && \
-    ln -sf /lib/systemd/system/blockhost-firstboot.service /target/etc/systemd/system/multi-user.target.wants/blockhost-firstboot.service && \
-    mkdir -p /target/var/lib/blockhost
+d-i preseed/late_command string sh -c 'mkdir -p /target/opt/blockhost; mkdir -p /target/var/lib/blockhost; mkdir -p /target/var/log; echo "late_command started" > /target/var/log/blockhost-install.log; CDROM=""; for p in /cdrom /media/cdrom /media/cdrom0; do if [ -d "$p/blockhost" ]; then CDROM="$p"; break; fi; done; echo "CDROM found at: $CDROM" >> /target/var/log/blockhost-install.log; if [ -n "$CDROM" ]; then cp -r "$CDROM/blockhost/installer" /target/opt/blockhost/ 2>>/target/var/log/blockhost-install.log; cp "$CDROM/blockhost/first-boot.sh" /target/opt/blockhost/ 2>>/target/var/log/blockhost-install.log; chmod +x /target/opt/blockhost/first-boot.sh; cp "$CDROM/blockhost/blockhost-firstboot.service" /target/lib/systemd/system/ 2>>/target/var/log/blockhost-install.log; mkdir -p /target/etc/systemd/system/multi-user.target.wants; ln -sf /lib/systemd/system/blockhost-firstboot.service /target/etc/systemd/system/multi-user.target.wants/blockhost-firstboot.service; echo "Files copied successfully" >> /target/var/log/blockhost-install.log; else echo "ERROR: Could not find blockhost directory on CDROM" >> /target/var/log/blockhost-install.log; fi; ls -la /target/opt/blockhost/ >> /target/var/log/blockhost-install.log 2>&1'

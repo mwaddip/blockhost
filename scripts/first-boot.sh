@@ -33,6 +33,9 @@ if [ -f "$MARKER_FILE" ]; then
     exit 0
 fi
 
+# Wait for system to settle
+sleep 10
+
 # Create directories
 mkdir -p "$STATE_DIR" "$RUN_DIR"
 
@@ -46,8 +49,12 @@ export PYTHONPATH="${BLOCKHOST_DIR}:${PYTHONPATH}"
 #
 # Step 1: Configure hostname for Proxmox
 #
+# CRITICAL: Proxmox requires the hostname to resolve to the real IP address,
+# NOT to 127.0.1.1 (which Debian preseed creates by default).
+# If /etc/hosts has "127.0.1.1 hostname", pve-cluster service will fail.
+#
 if [ ! -f "$STEP_HOSTNAME" ]; then
-    log "Step 1: Configuring hostname..."
+    log "Step 1: Configuring hostname for Proxmox..."
 
     # Wait for network with retry
     for i in {1..30}; do
@@ -65,11 +72,24 @@ if [ ! -f "$STEP_HOSTNAME" ]; then
     HOSTNAME=$(hostname)
     FQDN="${HOSTNAME}.local"
 
-    # Update /etc/hosts for Proxmox
-    if ! grep -q "$FQDN" /etc/hosts; then
-        echo "$CURRENT_IP $FQDN $HOSTNAME" >> /etc/hosts
-        log "Updated /etc/hosts: $CURRENT_IP $FQDN $HOSTNAME"
-    fi
+    # Fix /etc/hosts for Proxmox:
+    # 1. Remove any 127.0.1.1 line (Debian default that breaks Proxmox)
+    # 2. Ensure hostname resolves to real IP (required by pve-cluster)
+    log "Fixing /etc/hosts for Proxmox (IP: $CURRENT_IP)..."
+
+    # Remove the 127.0.1.1 line that Debian creates
+    sed -i '/^127\.0\.1\.1/d' /etc/hosts
+
+    # Remove any existing line for our hostname (in case of re-run with different IP)
+    sed -i "/[[:space:]]${HOSTNAME}$/d" /etc/hosts
+    sed -i "/[[:space:]]${HOSTNAME}[[:space:]]/d" /etc/hosts
+
+    # Add correct entry with real IP (must be before localhost for Proxmox)
+    # Insert after the 127.0.0.1 localhost line
+    sed -i "/^127\.0\.0\.1/a ${CURRENT_IP}\t${FQDN}\t${HOSTNAME}" /etc/hosts
+
+    log "Updated /etc/hosts:"
+    cat /etc/hosts | tee -a "$LOG_FILE"
 
     touch "$STEP_HOSTNAME"
     log "Step 1 complete."
@@ -200,20 +220,21 @@ PVE_URL="https://${CURRENT_IP}:8006/"
 pkill -f "installer.web.app" 2>/dev/null || true
 sleep 1
 
-# Start Flask in background
+# Start Flask in background using setsid to fully detach from this session
+# Explicitly pass PYTHONPATH to ensure module is found
 cd "$BLOCKHOST_DIR"
 if [ "$SCHEME" = "https" ]; then
-    nohup python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
+    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
 else
-    nohup python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
+    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
 fi
 
-FLASK_PID=$!
-echo $FLASK_PID > "$RUN_DIR/flask.pid"
-sleep 2
+sleep 3
 
-# Verify Flask started
-if kill -0 $FLASK_PID 2>/dev/null; then
+# Verify Flask started by checking port
+if ss -tlnp | grep -q ":${PORT}.*python"; then
+    FLASK_PID=$(pgrep -f "installer.web.app" | head -1)
+    echo "$FLASK_PID" > "$RUN_DIR/flask.pid"
     log "Web installer running (PID: $FLASK_PID)"
 else
     log "ERROR: Web installer failed to start"

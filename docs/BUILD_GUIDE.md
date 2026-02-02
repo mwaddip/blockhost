@@ -202,6 +202,128 @@ sudo virt-install \
 
 ---
 
+## Critical Implementation Notes
+
+These issues were discovered during testing and MUST be handled correctly:
+
+### 1. /etc/hosts - Proxmox Hostname Resolution (CRITICAL)
+
+**Problem**: Debian preseed creates `/etc/hosts` with:
+```
+127.0.1.1    blockhost.local    blockhost
+```
+
+This causes `pve-cluster.service` to fail because Proxmox requires the hostname to resolve to the **real IP address**, not a loopback.
+
+**Symptoms**: After reboot, console shows:
+```
+[FAILED] Failed to start pve-cluster.service - The Proxmox VE cluster filesystem.
+[FAILED] Failed to start pvestatd.service - PVE Status Daemon.
+[FAILED] Failed to start pve-firewall.service - Proxmox VE firewall.
+... (cascade of failures)
+```
+
+**Fix in first-boot.sh**:
+```bash
+# Remove the 127.0.1.1 line that Debian creates
+sed -i '/^127\.0\.1\.1/d' /etc/hosts
+
+# Add correct entry with real IP
+sed -i "/^127\.0\.0\.1/a ${CURRENT_IP}\t${FQDN}\t${HOSTNAME}" /etc/hosts
+```
+
+**Correct /etc/hosts**:
+```
+127.0.0.1       localhost
+192.168.1.100   blockhost.local    blockhost
+```
+
+---
+
+### 2. Systemd Service - TTY and Getty Conflict
+
+**Problem**: The service gets SIGHUP because getty is also trying to use tty1.
+
+**Symptoms**: Service fails with:
+```
+Process: ExecStartPre=/bin/sleep 10 (code=killed, signal=HUP)
+```
+
+**Fix**: Add `Conflicts=getty@tty1.service` and proper TTY settings:
+```ini
+[Unit]
+Conflicts=getty@tty1.service
+
+[Service]
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+```
+
+---
+
+### 3. Flask Process Dies When Script Exits
+
+**Problem**: Using `nohup ... &` isn't enough - Flask dies when first-boot.sh exits because it's still in the same session.
+
+**Fix**: Use `setsid` with explicit PYTHONPATH:
+```bash
+PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port 80 >> "$LOG_FILE" 2>&1 &
+```
+
+---
+
+### 4. Web Wizard - DHCP Error When Network Already Configured
+
+**Problem**: Clicking "Apply & Continue" with DHCP selected fails with "No DHCP client available" because dhclient is already running.
+
+**Fix in app.py**: Check if network is already working before running DHCP:
+```python
+if method == 'dhcp':
+    current_ip = net_manager.get_current_ip()
+    if current_ip and net_manager.test_connectivity():
+        flash(f'Network already configured: {current_ip}', 'success')
+        return redirect(url_for('wizard_storage'))
+    # ... else run DHCP
+```
+
+---
+
+### 5. VM Shuts Down Instead of Rebooting After Installation
+
+**Problem**: libvirt/QEMU interprets the guest's reboot request as shutdown during installation.
+
+**This is a VM testing limitation, not a BlockHost bug.**
+
+**Workaround for testing**: Manually start the VM after installation:
+```bash
+sudo virsh start blockhost-test
+```
+
+On real hardware, the system reboots normally.
+
+---
+
+### 6. Install Step Stuck at 50%
+
+**Problem**: The `/api/install/status` endpoint was a placeholder always returning `status: 'running'`.
+
+**Fix**: Since Proxmox is already installed by first-boot.sh, the install endpoint should just mark setup complete:
+```python
+@app.route('/api/install/status/<job_id>')
+def api_install_status(job_id):
+    return jsonify({
+        'status': 'completed',
+        'progress': 100,
+        'message': 'Setup complete!',
+    })
+```
+
+---
+
 ## Troubleshooting
 
 ### No OTP on Console
@@ -214,6 +336,22 @@ Check: `journalctl -u blockhost-firstboot`
 
 ### DHCP Failed, No Console Wizard
 The script needs TTY access. Check the systemd service has `TTYPath=/dev/tty1`.
+
+### Proxmox Services Failing After Reboot
+Check `/etc/hosts` - hostname must resolve to real IP, not 127.0.1.1:
+```bash
+cat /etc/hosts
+# Should have: 192.168.x.x  blockhost.local  blockhost
+# Should NOT have: 127.0.1.1  blockhost.local  blockhost
+```
+
+### Flask Not Running After First Boot
+Check if process survived:
+```bash
+ps aux | grep flask
+ss -tlnp | grep :80
+```
+If not running, check `/var/log/blockhost-firstboot.log` for errors.
 
 ---
 

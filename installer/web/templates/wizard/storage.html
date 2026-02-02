@@ -28,11 +28,12 @@
 
 <div class="card">
     <h2>Storage Configuration</h2>
-    <p class="text-muted mb-2">Select the disk for installation. All data on the selected disk will be erased.</p>
+    <p class="text-muted mb-2">Review detected storage devices. Proxmox VE is already installed on your system disk.</p>
 
     <form method="POST" action="{{ url_for('wizard_storage') }}">
         {% if disks %}
         <div class="form-group">
+            <label style="font-weight: 500; margin-bottom: 0.5rem; display: block;">Detected Disks:</label>
             {% for disk in disks %}
             <label class="disk-option" onclick="selectDisk(this)">
                 <input type="radio" name="disk" value="{{ disk.path }}"
@@ -42,13 +43,18 @@
                     <div class="disk-details">
                         {{ disk.size }} - {{ disk.model }}
                         {% if disk.mountpoint %}
-                        <span style="color: var(--warning);">(mounted at {{ disk.mountpoint }})</span>
+                        <span style="color: var(--success);">(system disk)</span>
+                        {% else %}
+                        <span style="color: var(--text-muted);">(available for VM storage)</span>
                         {% endif %}
                     </div>
                 </div>
             </label>
             {% endfor %}
         </div>
+        <p class="text-muted" style="font-size: 0.9rem; margin-top: 1rem;">
+            Additional disks can be configured for VM storage in Proxmox after setup completes.
+        </p>
         {% else %}
         <div class="alert alert-error">
             No disks detected. Please check your hardware configuration.

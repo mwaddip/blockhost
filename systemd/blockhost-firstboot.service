@@ -2,17 +2,19 @@
 Description=BlockHost First-Boot Installer
 After=network-online.target
 Wants=network-online.target
+Conflicts=getty@tty1.service
 ConditionPathExists=!/var/lib/blockhost/.setup-complete
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sleep 10
 ExecStart=/opt/blockhost/first-boot.sh
-StandardOutput=journal
-StandardError=journal
 TimeoutStartSec=3600
-TTYPath=/dev/tty1
 StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
 
 [Install]
 WantedBy=multi-user.target

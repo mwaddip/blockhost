@@ -131,6 +131,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
             interface = request.form.get('interface')
 
             if method == 'dhcp':
+                # Check if we already have a working network
+                current_ip = net_manager.get_current_ip()
+                if current_ip and net_manager.test_connectivity():
+                    flash(f'Network already configured: {current_ip}', 'success')
+                    return redirect(url_for('wizard_storage'))
+
                 success, msg = net_manager.run_dhcp(interface)
                 if success:
                     flash(f'DHCP configured: {msg}', 'success')
@@ -269,19 +275,26 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_install_start():
         """Start installation process."""
-        # This will be implemented to kick off the actual installation
+        # Proxmox is already installed, just mark setup complete
+        marker_dir = Path('/var/lib/blockhost')
+        marker_file = marker_dir / '.setup-complete'
+        try:
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            marker_file.touch()
+        except Exception:
+            pass
         return jsonify({'status': 'started', 'job_id': 'install-001'})
 
     @app.route('/api/install/status/<job_id>')
     @require_auth
     def api_install_status(job_id):
         """Get installation status."""
-        # Placeholder for installation progress tracking
+        # Proxmox is already installed, return completed
         return jsonify({
             'job_id': job_id,
-            'status': 'running',
-            'progress': 50,
-            'message': 'Installing packages...',
+            'status': 'completed',
+            'progress': 100,
+            'message': 'Setup complete!',
         })
 
     @app.route('/api/complete', methods=['POST'])
@@ -294,6 +307,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
         try:
             marker_dir.mkdir(parents=True, exist_ok=True)
             marker_file.touch()
+            return jsonify({'success': True})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @app.route('/api/reboot', methods=['POST'])
+    @require_auth
+    def api_reboot():
+        """Reboot the system."""
+        try:
+            subprocess.Popen(['shutdown', '-r', 'now'])
             return jsonify({'success': True})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
