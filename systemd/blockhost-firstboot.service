@@ -1,8 +1,7 @@
 [Unit]
 Description=BlockHost First-Boot Installer
-After=network-online.target
+After=network-online.target getty@tty1.service
 Wants=network-online.target
-Conflicts=getty@tty1.service
 ConditionPathExists=!/var/lib/blockhost/.setup-complete
 
 [Service]

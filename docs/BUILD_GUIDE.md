@@ -242,17 +242,27 @@ sed -i "/^127\.0\.0\.1/a ${CURRENT_IP}\t${FQDN}\t${HOSTNAME}" /etc/hosts
 
 ### 2. Systemd Service - TTY and Getty Conflict
 
-**Problem**: The service gets SIGHUP because getty is also trying to use tty1.
+**Problem**: The service needs tty1 but getty is also trying to use it.
 
-**Symptoms**: Service fails with:
-```
-Process: ExecStartPre=/bin/sleep 10 (code=killed, signal=HUP)
+**Symptoms**: Service fails with SIGHUP, or getty doesn't start after setup completes.
+
+**Important**: Do NOT use `Conflicts=getty@tty1.service` in the unit file. When combined
+with `ConditionPathExists`, it can prevent getty from starting even when the condition
+fails and the service doesn't run.
+
+**Fix**: Handle getty manually in the script:
+```bash
+# At start of first-boot.sh:
+systemctl stop getty@tty1.service 2>/dev/null || true
+
+# At end of first-boot.sh:
+systemctl start getty@tty1.service 2>/dev/null || true
 ```
 
-**Fix**: Add `Conflicts=getty@tty1.service` and proper TTY settings:
+And use `After=getty@tty1.service` in the unit file so our service runs after getty starts:
 ```ini
 [Unit]
-Conflicts=getty@tty1.service
+After=network-online.target getty@tty1.service
 
 [Service]
 StandardInput=tty

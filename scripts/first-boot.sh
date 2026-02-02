@@ -36,6 +36,10 @@ fi
 # Wait for system to settle
 sleep 10
 
+# Stop getty on tty1 so we can use the console
+# We'll restart it at the end of the script
+systemctl stop getty@tty1.service 2>/dev/null || true
+
 # Create directories
 mkdir -p "$STATE_DIR" "$RUN_DIR"
 
@@ -277,5 +281,9 @@ EOF
 
 log "Setup display complete. Web installer running at $URL"
 log "OTP: $OTP_CODE"
+
+# Restart getty on tty1 so user can log in
+# (Flask is running in background, so this is safe)
+systemctl start getty@tty1.service 2>/dev/null || true
 
 exit 0
