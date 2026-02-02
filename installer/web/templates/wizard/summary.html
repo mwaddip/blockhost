@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Summary - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Packages</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step active">
+        <span class="step-number">4</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Installation Summary</h2>
+    <p class="text-muted mb-2">Review your configuration before proceeding.</p>
+
+    <table>
+        <tbody>
+            <tr>
+                <th style="width: 200px;">Network</th>
+                <td>
+                    IP: <strong>{{ summary.network.ip or 'Not configured' }}</strong><br>
+                    Gateway: {{ summary.network.gateway or 'N/A' }}
+                </td>
+            </tr>
+            <tr>
+                <th>Target Disk</th>
+                <td><strong>{{ summary.disk }}</strong></td>
+            </tr>
+            <tr>
+                <th>Packages</th>
+                <td>
+                    {% if summary.packages %}
+                    {% for pkg in summary.packages %}
+                    <span style="background: var(--bg-input); padding: 0.25rem 0.5rem; border-radius: 0.25rem; margin-right: 0.5rem;">{{ pkg }}</span>
+                    {% endfor %}
+                    {% else %}
+                    <em class="text-muted">None selected</em>
+                    {% endif %}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="alert alert-error" style="margin-top: 2rem;">
+        <strong>Warning:</strong> All data on {{ summary.disk }} will be permanently erased.
+        This action cannot be undone.
+    </div>
+
+    <form method="POST" action="{{ url_for('wizard_summary') }}">
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ url_for('wizard_packages') }}" class="btn btn-secondary">Back</a>
+            <div>
+                <button type="submit" name="confirm" value="no" class="btn btn-secondary">Cancel</button>
+                <button type="submit" name="confirm" value="yes" class="btn btn-primary"
+                        onclick="return confirm('Are you sure you want to proceed? All data on the selected disk will be erased.')">
+                    Install
+                </button>
+            </div>
+        </div>
+    </form>
+</div>
+{% endblock %}

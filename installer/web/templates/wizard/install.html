@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Installing - BlockHost Installer{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width: 600px; margin: 2rem auto; text-align: center;">
+    <h2>Installing BlockHost</h2>
+    <p class="text-muted mb-2">Please wait while the installation completes. Do not turn off your computer.</p>
+
+    <div style="margin: 2rem 0;">
+        <div id="progress-bar" style="background: var(--bg-input); border-radius: 0.5rem; height: 1.5rem; overflow: hidden;">
+            <div id="progress-fill" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.5s;"></div>
+        </div>
+        <div id="progress-text" class="mt-1">0%</div>
+    </div>
+
+    <div id="status-message" class="text-muted">
+        Initializing...
+    </div>
+
+    <div id="completion" style="display: none; margin-top: 2rem;">
+        <div class="alert alert-success">
+            Installation completed successfully!
+        </div>
+        <p class="mb-2">The system will now reboot. You can access Proxmox VE at:</p>
+        <p style="font-size: 1.25rem;">
+            <a href="https://{{ request.host.split(':')[0] }}:8006" style="color: var(--primary);">
+                https://{{ request.host.split(':')[0] }}:8006
+            </a>
+        </p>
+        <button onclick="reboot()" class="btn btn-primary mt-2">Reboot Now</button>
+    </div>
+
+    <div id="error" style="display: none; margin-top: 2rem;">
+        <div class="alert alert-error">
+            Installation failed. Please check the console for details.
+        </div>
+        <a href="{{ url_for('wizard_summary') }}" class="btn btn-secondary mt-2">Back to Summary</a>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let pollInterval;
+
+function startInstallation() {
+    fetch('/api/install/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.job_id) {
+            pollProgress(data.job_id);
+        }
+    })
+    .catch(error => {
+        showError(error.message);
+    });
+}
+
+function pollProgress(jobId) {
+    pollInterval = setInterval(() => {
+        fetch(`/api/install/status/${jobId}`)
+        .then(response => response.json())
+        .then(data => {
+            updateProgress(data.progress, data.message);
+
+            if (data.status === 'completed') {
+                clearInterval(pollInterval);
+                showCompletion();
+            } else if (data.status === 'failed') {
+                clearInterval(pollInterval);
+                showError(data.message);
+            }
+        })
+        .catch(error => {
+            clearInterval(pollInterval);
+            showError(error.message);
+        });
+    }, 1000);
+}
+
+function updateProgress(percent, message) {
+    document.getElementById('progress-fill').style.width = percent + '%';
+    document.getElementById('progress-text').textContent = percent + '%';
+    document.getElementById('status-message').textContent = message || 'Installing...';
+}
+
+function showCompletion() {
+    document.getElementById('completion').style.display = 'block';
+    document.getElementById('status-message').style.display = 'none';
+
+    // Mark setup as complete
+    fetch('/api/complete', {method: 'POST'});
+}
+
+function showError(message) {
+    document.getElementById('error').style.display = 'block';
+    document.getElementById('status-message').textContent = 'Error: ' + message;
+}
+
+function reboot() {
+    fetch('/api/reboot', {method: 'POST'})
+    .then(() => {
+        document.getElementById('status-message').textContent = 'Rebooting...';
+    });
+}
+
+// Start installation on page load
+document.addEventListener('DOMContentLoaded', startInstallation);
+</script>
+{% endblock %}

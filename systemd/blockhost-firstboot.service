@@ -1,0 +1,18 @@
+[Unit]
+Description=BlockHost First-Boot Installer
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/blockhost/.setup-complete
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 10
+ExecStart=/opt/blockhost/first-boot.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+TTYPath=/dev/tty1
+StandardInput=tty
+
+[Install]
+WantedBy=multi-user.target

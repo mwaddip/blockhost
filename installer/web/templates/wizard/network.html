@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block title %}Network Configuration - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step active">
+        <span class="step-number">1</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">2</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">3</span>
+        <span>Packages</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">4</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Network Configuration</h2>
+
+    {% if current_ip %}
+    <div class="alert alert-info">
+        Current IP: <strong>{{ current_ip }}</strong>
+        {% if current_gateway %}| Gateway: <strong>{{ current_gateway }}</strong>{% endif %}
+    </div>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('wizard_network') }}" id="network-form">
+        <div class="form-group">
+            <label for="interface">Network Interface</label>
+            <select name="interface" id="interface">
+                {% for iface in interfaces %}
+                <option value="{{ iface.name }}"
+                        {% if iface.has_carrier %}selected{% endif %}>
+                    {{ iface.name }} - {{ iface.mac }}
+                    {% if iface.has_carrier %}[CONNECTED]{% else %}[no link]{% endif %}
+                    {% if iface.ipv4 %}({{ iface.ipv4[0] }}){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>Configuration Method</label>
+            <div style="display: flex; gap: 1rem;">
+                <label class="checkbox-group" style="flex: 1; cursor: pointer;">
+                    <input type="radio" name="method" value="dhcp" checked onchange="toggleStaticFields()">
+                    <div class="checkbox-label">
+                        <h4>DHCP (Automatic)</h4>
+                        <p>Obtain IP address automatically</p>
+                    </div>
+                </label>
+                <label class="checkbox-group" style="flex: 1; cursor: pointer;">
+                    <input type="radio" name="method" value="static" onchange="toggleStaticFields()">
+                    <div class="checkbox-label">
+                        <h4>Static IP</h4>
+                        <p>Configure manually</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+
+        <div id="static-fields" style="display: none;">
+            <div class="form-group">
+                <label for="address">IP Address</label>
+                <input type="text" name="address" id="address" placeholder="192.168.1.100">
+            </div>
+
+            <div class="form-group">
+                <label for="netmask">Netmask</label>
+                <input type="text" name="netmask" id="netmask" placeholder="255.255.255.0" value="255.255.255.0">
+            </div>
+
+            <div class="form-group">
+                <label for="gateway">Gateway</label>
+                <input type="text" name="gateway" id="gateway" placeholder="192.168.1.1">
+            </div>
+
+            <div class="form-group">
+                <label for="dns">DNS Servers (comma-separated)</label>
+                <input type="text" name="dns" id="dns" placeholder="8.8.8.8, 8.8.4.4" value="8.8.8.8, 8.8.4.4">
+            </div>
+        </div>
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <span></span>
+            <button type="submit" class="btn btn-primary">Apply & Continue</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleStaticFields() {
+    const method = document.querySelector('input[name="method"]:checked').value;
+    const staticFields = document.getElementById('static-fields');
+    staticFields.style.display = method === 'static' ? 'block' : 'none';
+}
+</script>
+{% endblock %}

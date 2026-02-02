@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Storage Configuration - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step active">
+        <span class="step-number">2</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">3</span>
+        <span>Packages</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">4</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Storage Configuration</h2>
+    <p class="text-muted mb-2">Select the disk for installation. All data on the selected disk will be erased.</p>
+
+    <form method="POST" action="{{ url_for('wizard_storage') }}">
+        {% if disks %}
+        <div class="form-group">
+            {% for disk in disks %}
+            <label class="disk-option" onclick="selectDisk(this)">
+                <input type="radio" name="disk" value="{{ disk.path }}"
+                       {% if loop.first %}checked{% endif %}>
+                <div class="disk-info">
+                    <div class="disk-name">{{ disk.path }}</div>
+                    <div class="disk-details">
+                        {{ disk.size }} - {{ disk.model }}
+                        {% if disk.mountpoint %}
+                        <span style="color: var(--warning);">(mounted at {{ disk.mountpoint }})</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-error">
+            No disks detected. Please check your hardware configuration.
+        </div>
+        {% endif %}
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ url_for('wizard_network') }}" class="btn btn-secondary">Back</a>
+            <button type="submit" class="btn btn-primary" {% if not disks %}disabled{% endif %}>
+                Continue
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function selectDisk(element) {
+    document.querySelectorAll('.disk-option').forEach(el => el.classList.remove('selected'));
+    element.classList.add('selected');
+    element.querySelector('input[type="radio"]').checked = true;
+}
+
+// Initialize selected state
+document.addEventListener('DOMContentLoaded', function() {
+    const checked = document.querySelector('.disk-option input:checked');
+    if (checked) {
+        checked.closest('.disk-option').classList.add('selected');
+    }
+});
+</script>
+{% endblock %}
