@@ -1,5 +1,20 @@
 # BlockHost - Custom Proxmox VE Image Project
 
+## Submodule Separation (CRITICAL RULE)
+
+**You CANNOT modify files in submodules.** The following directories are submodules with their own Claude sessions:
+
+- `libpam-web3/`
+- `blockhost-common/`
+- `blockhost-provisioner/`
+- `blockhost-engine/`
+- `blockhost-broker/`
+
+**When changes to a submodule are needed:**
+1. Do NOT attempt to edit files in submodule directories
+2. Instead, provide the user with a complete prompt to send to that submodule's Claude session
+3. Format the prompt clearly so the user can copy-paste it directly
+
 ## Documentation Requirements (PERSISTENT RULE)
 
 **Every change made in this project MUST be documented in `docs/BUILD_GUIDE.md`:**
@@ -48,3 +63,18 @@ blockhost/
 - **OTP**: Time-based or session-based one-time password
 - **Web Installer**: Lightweight Python (Flask) or Go binary
 - **Console Fallback**: whiptail/dialog for network config
+
+## Submodule Packages
+
+Packages built from submodules during first-boot:
+
+| Submodule | Build Command | Package(s) | Install Location |
+|-----------|---------------|------------|------------------|
+| libpam-web3 | `packaging/build-deb-tools.sh` | libpam-web3-tools | Proxmox host |
+| libpam-web3 | `packaging/build-deb.sh` | libpam-web3 | VM template dir |
+| blockhost-common | `build.sh` | blockhost-common | Proxmox host |
+| blockhost-provisioner | `build-deb.sh` | blockhost-provisioner | Proxmox host |
+| blockhost-engine | `packaging/build.sh` | blockhost-engine | Proxmox host |
+| blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Proxmox host |
+
+**Note**: `libpam-web3` (the PAM module, not tools) is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the Proxmox host.

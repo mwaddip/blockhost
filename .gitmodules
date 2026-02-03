@@ -1,0 +1,15 @@
+[submodule "libpam-web3"]
+	path = libpam-web3
+	url = https://github.com/mwaddip/libpam-web3
+[submodule "blockhost-common"]
+	path = blockhost-common
+	url = https://github.com/mwaddip/blockhost-common
+[submodule "blockhost-provisioner"]
+	path = blockhost-provisioner
+	url = https://github.com/mwaddip/blockhost-provisioner
+[submodule "blockhost-engine"]
+	path = blockhost-engine
+	url = https://github.com/mwaddip/blockhost-engine
+[submodule "blockhost-broker"]
+	path = blockhost-broker
+	url = https://github.com/mwaddip/blockhost-broker

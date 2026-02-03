@@ -54,6 +54,7 @@ sudo apt install -y \
     whiptail
 ```
 
+
 ---
 
 ## How It Works
@@ -377,3 +378,89 @@ If not running, check `/var/log/blockhost-firstboot.log` for errors.
 - Self-signed certs cause browser warnings
 - Private networks are trusted
 - Reduces friction for home/lab use
+
+---
+
+## BlockHost Packages
+
+BlockHost consists of several packages built from submodules:
+
+### Package Overview
+
+| Package | Source | Install Location | Purpose |
+|---------|--------|------------------|---------|
+| libpam-web3-tools | libpam-web3 | Proxmox host | Admin tools, signing page generator |
+| libpam-web3 | libpam-web3 | VM template | PAM module for VMs |
+| blockhost-common | blockhost-common | Proxmox host | Shared config and database modules |
+| blockhost-provisioner | blockhost-provisioner | Proxmox host | VM creation scripts |
+| blockhost-engine | blockhost-engine | Proxmox host | Blockchain event monitor |
+| blockhost-broker-client | blockhost-broker | Proxmox host | Broker client for requests |
+
+### Building Packages
+
+From the blockhost root directory:
+
+```bash
+./scripts/build-packages.sh
+```
+
+This builds all packages and places them in:
+- `packages/host/` - Packages for the Proxmox host
+- `packages/template/` - Packages for VM templates (libpam-web3)
+
+### Build Prerequisites
+
+```bash
+# For libpam-web3 (Rust)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# For blockhost-engine (Node.js)
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# For all packages
+sudo apt install -y dpkg-deb
+```
+
+### Individual Build Commands
+
+Each submodule has its own build script:
+
+```bash
+# libpam-web3-tools (for host)
+cd libpam-web3 && ./packaging/build-deb-tools.sh
+
+# libpam-web3 (for VM template)
+cd libpam-web3 && ./packaging/build-deb.sh
+
+# blockhost-common
+cd blockhost-common && ./build.sh
+
+# blockhost-provisioner
+cd blockhost-provisioner && ./build-deb.sh
+
+# blockhost-engine
+cd blockhost-engine && ./packaging/build.sh
+
+# blockhost-broker-client
+cd blockhost-broker/scripts && ./build-deb.sh
+```
+
+### Installation During First Boot
+
+The `first-boot.sh` script automatically installs packages after Proxmox installation:
+
+1. Installs host packages from `/opt/blockhost/packages/host/`
+2. Copies template packages to `/var/lib/blockhost/template-packages/`
+
+Installation order respects dependencies:
+1. blockhost-common (no deps)
+2. libpam-web3-tools (no deps)
+3. blockhost-provisioner (depends on common, tools)
+4. blockhost-engine (depends on common, tools)
+5. blockhost-broker-client (no deps)
+
+### Template Package Usage
+
+The `libpam-web3` package is stored at `/var/lib/blockhost/template-packages/` and is used when building VM templates with `blockhost-build-template`. It gets installed inside VMs to enable NFT-based authentication

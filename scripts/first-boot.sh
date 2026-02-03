@@ -36,8 +36,8 @@ fi
 # Wait for system to settle
 sleep 10
 
-# Stop getty on tty1 so we can use the console
-# We'll restart it at the end of the script
+# Stop getty on tty1 so we can use the console exclusively
+# (Conflicts= in systemd should handle this, but belt and suspenders)
 systemctl stop getty@tty1.service 2>/dev/null || true
 
 # Create directories
@@ -107,6 +107,13 @@ fi
 if [ ! -f "$STEP_PROXMOX" ]; then
     log "Step 2: Installing Proxmox VE..."
 
+    # Configure apt proxy if available (for faster installs during testing)
+    APT_PROXY="http://192.168.122.1:3142"
+    if curl -s --connect-timeout 2 "$APT_PROXY" >/dev/null 2>&1; then
+        log "Using apt proxy: $APT_PROXY"
+        echo "Acquire::http::Proxy \"$APT_PROXY\";" > /etc/apt/apt.conf.d/00proxy
+    fi
+
     # Add Proxmox repository
     if [ ! -f /etc/apt/sources.list.d/pve-install-repo.list ]; then
         log "Adding Proxmox VE repository..."
@@ -133,6 +140,44 @@ if [ ! -f "$STEP_PROXMOX" ]; then
     log "Step 2 complete - Proxmox VE installed!"
 else
     log "Step 2: Proxmox VE already installed, skipping."
+fi
+
+#
+# Step 2b: Install BlockHost packages
+#
+STEP_PACKAGES="${STATE_DIR}/.step-packages"
+if [ ! -f "$STEP_PACKAGES" ]; then
+    log "Step 2b: Installing BlockHost packages..."
+
+    if [ -x "$BLOCKHOST_DIR/scripts/install-packages.sh" ]; then
+        "$BLOCKHOST_DIR/scripts/install-packages.sh" 2>&1 | tee -a "$LOG_FILE"
+    elif [ -d "$BLOCKHOST_DIR/packages/host" ]; then
+        # Fallback: install packages directly
+        log "Installing host packages..."
+        for pkg in blockhost-common libpam-web3-tools blockhost-provisioner blockhost-engine blockhost-broker-client; do
+            DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "${pkg}_*.deb" -type f 2>/dev/null | head -1)
+            if [ -n "$DEB" ] && [ -f "$DEB" ]; then
+                log "Installing: $(basename "$DEB")"
+                dpkg -i "$DEB" || apt-get install -f -y
+            fi
+        done
+
+        # Copy template packages
+        TEMPLATE_SRC="$BLOCKHOST_DIR/packages/template"
+        TEMPLATE_DEST="/var/lib/blockhost/template-packages"
+        if [ -d "$TEMPLATE_SRC" ] && ls "$TEMPLATE_SRC"/*.deb >/dev/null 2>&1; then
+            mkdir -p "$TEMPLATE_DEST"
+            cp "$TEMPLATE_SRC"/*.deb "$TEMPLATE_DEST/"
+            log "Template packages copied to $TEMPLATE_DEST"
+        fi
+    else
+        log "No packages found to install, skipping."
+    fi
+
+    touch "$STEP_PACKAGES"
+    log "Step 2b complete - BlockHost packages installed!"
+else
+    log "Step 2b: Packages already installed, skipping."
 fi
 
 #

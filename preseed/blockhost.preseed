@@ -17,12 +17,12 @@ d-i netcfg/get_domain string local
 d-i netcfg/hostname string blockhost
 
 #
-# Mirror
+# Mirror (using apt-cacher-ng proxy on host for faster installs)
 #
 d-i mirror/country string manual
 d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
-d-i mirror/http/proxy string
+d-i mirror/http/proxy string http://192.168.122.1:3142
 
 #
 # Clock and Timezone
