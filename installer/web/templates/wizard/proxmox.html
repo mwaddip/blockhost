@@ -90,6 +90,23 @@
             </div>
         </div>
 
+        <!-- VM Template Configuration -->
+        <div class="form-section">
+            <h3>VM Template</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                Configure the base VM template used for provisioning.
+            </p>
+
+            <div class="form-group">
+                <label for="template_vmid">Template VMID</label>
+                <input type="number" id="template_vmid" name="template_vmid"
+                       value="9001" min="100" max="999999">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    VMID for the base Debian template with libpam-web3. Default: 9001
+                </p>
+            </div>
+        </div>
+
         <!-- VM Pool Configuration -->
         <div class="form-section">
             <h3>VM Pool Configuration</h3>

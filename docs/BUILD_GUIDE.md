@@ -1386,3 +1386,331 @@ if wallet_mode == 'import':
 else:
     deployer_key = request.form.get('deployer_key')
 ```
+
+---
+
+## VM Template Building (2026-02-04)
+
+### Overview
+
+The VM template building implementation automates the creation of a base Debian VM template with libpam-web3 during wizard finalization, enabling automated VM provisioning via Terraform.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    First-Boot (Step 2d)                      │
+│    Install Terraform + libguestfs-tools from HashiCorp repo  │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                   Web Wizard Finalization                    │
+│                                                              │
+│  1. keypair                                                  │
+│  2. wallet                                                   │
+│  3. contracts                                                │
+│  4. config                                                   │
+│  5. token         → Creates Proxmox API token               │
+│  6. terraform     → NEW: Sets up Terraform provider          │
+│  7. ipv6          → Broker/manual IPv6 config               │
+│  8. template      → UPDATED: Builds VM template locally      │
+│  9. services                                                 │
+│  10. finalize                                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Step 2d: Terraform Installation (first-boot.sh)
+
+Added after Foundry installation to set up Terraform and libguestfs-tools:
+
+```bash
+#
+# Step 2d: Install Terraform and libguestfs-tools
+#
+STEP_TERRAFORM="${STATE_DIR}/.step-terraform"
+if [ ! -f "$STEP_TERRAFORM" ]; then
+    log "Step 2d: Installing Terraform and libguestfs-tools..."
+
+    # Add HashiCorp GPG key and repository
+    if [ ! -f /usr/share/keyrings/hashicorp-archive-keyring.gpg ]; then
+        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list
+        apt-get update
+    fi
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y terraform libguestfs-tools
+
+    touch "$STEP_TERRAFORM"
+fi
+```
+
+### Step 6: Terraform Finalization (_finalize_terraform)
+
+New finalization step that configures Terraform for VM provisioning:
+
+**Actions**:
+1. Creates `/var/lib/blockhost/terraform/` directory
+2. Generates SSH keypair at `/etc/blockhost/terraform_ssh_key` (ed25519)
+3. Adds public key to `/root/.ssh/authorized_keys`
+4. Writes `provider.tf.json` with bpg/proxmox provider configuration
+5. Writes `variables.tf.json` with wizard values
+6. Runs `terraform init`
+
+**provider.tf.json**:
+```json
+{
+  "terraform": {
+    "required_providers": {
+      "proxmox": {
+        "source": "bpg/proxmox",
+        "version": ">= 0.50.0"
+      }
+    }
+  },
+  "provider": {
+    "proxmox": {
+      "endpoint": "https://127.0.0.1:8006",
+      "api_token": "${var.proxmox_api_token}",
+      "insecure": true,
+      "ssh": {
+        "agent": false,
+        "private_key": "${file(\"/etc/blockhost/terraform_ssh_key\")}",
+        "node": [
+          {
+            "name": "blockhost",
+            "address": "127.0.0.1"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+**variables.tf.json**:
+```json
+{
+  "variable": {
+    "proxmox_api_token": { "type": "string", "sensitive": true },
+    "proxmox_node": { "type": "string", "default": "blockhost" },
+    "proxmox_storage": { "type": "string", "default": "local-lvm" },
+    "proxmox_bridge": { "type": "string", "default": "vmbr0" },
+    "template_vmid": { "type": "number", "default": 9001 },
+    "vmid_start": { "type": "number", "default": 100 },
+    "vmid_end": { "type": "number", "default": 999 }
+  }
+}
+```
+
+### Step 8: Template Building (_finalize_template)
+
+Updated to build VM template locally with environment variables:
+
+**Changes**:
+1. Checks if template already exists (via `qm status <VMID>`)
+2. Finds libpam-web3 .deb in `/var/lib/blockhost/template-packages/`
+3. Passes environment variables to build-template.sh:
+   - `TEMPLATE_VMID` - VMID for the template (default: 9001)
+   - `STORAGE` - Storage pool name
+   - `LIBPAM_WEB3_DEB` - Path to libpam-web3 package
+   - `PROXMOX_HOST` - Set to `localhost` for local execution
+
+```python
+def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
+    proxmox = config.get('proxmox', {})
+    template_vmid = proxmox.get('template_vmid', 9001)
+    storage = proxmox.get('storage', 'local-lvm')
+
+    # Check if template already exists
+    template_check = subprocess.run(
+        ['qm', 'status', str(template_vmid)],
+        capture_output=True, text=True, timeout=10
+    )
+    if template_check.returncode == 0:
+        return True, None  # Skip if exists
+
+    # Find libpam-web3 .deb
+    template_pkg_dir = Path('/var/lib/blockhost/template-packages')
+    debs = list(template_pkg_dir.glob('libpam-web3_*.deb'))
+    libpam_deb = str(sorted(debs, key=lambda p: p.stat().st_mtime, reverse=True)[0]) if debs else None
+
+    # Build template with environment variables
+    env = os.environ.copy()
+    env['TEMPLATE_VMID'] = str(template_vmid)
+    env['STORAGE'] = storage
+    env['PROXMOX_HOST'] = 'localhost'
+    if libpam_deb:
+        env['LIBPAM_WEB3_DEB'] = libpam_deb
+
+    result = subprocess.run(
+        ['/opt/blockhost-provisioner/scripts/build-template.sh'],
+        env=env, capture_output=True, text=True, timeout=1800
+    )
+```
+
+### Proxmox Wizard: Template VMID Field
+
+Added new form field in `installer/web/templates/wizard/proxmox.html`:
+
+```html
+<!-- VM Template Configuration -->
+<div class="form-section">
+    <h3>VM Template</h3>
+    <div class="form-group">
+        <label for="template_vmid">Template VMID</label>
+        <input type="number" id="template_vmid" name="template_vmid"
+               value="9001" min="100" max="999999">
+        <p class="text-muted">
+            VMID for the base Debian template with libpam-web3. Default: 9001
+        </p>
+    </div>
+</div>
+```
+
+### Updated Finalization Step Order
+
+The finalization now has 10 steps (was 9):
+
+| # | Step ID | Name |
+|---|---------|------|
+| 1 | keypair | Generate server keypair |
+| 2 | wallet | Configure deployer wallet |
+| 3 | contracts | Deploy/verify contracts |
+| 4 | config | Write configuration files |
+| 5 | token | Create Proxmox API token |
+| 6 | **terraform** | **NEW: Configure Terraform provider** |
+| 7 | ipv6 | Configure IPv6 |
+| 8 | template | Build VM template (updated) |
+| 9 | services | Start services |
+| 10 | finalize | Finalize setup |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `scripts/first-boot.sh` | Added Step 2d: Install Terraform + libguestfs-tools |
+| `installer/web/app.py` | Added `_finalize_terraform()`, updated `_finalize_template()`, updated step order, added `terraform` to SetupState |
+| `installer/web/templates/wizard/proxmox.html` | Added template_vmid field |
+
+### Submodule Changes Required (blockhost-provisioner)
+
+The `scripts/build-template.sh` in the blockhost-provisioner submodule needs updates for local execution:
+
+1. Default `PROXMOX_HOST` to `localhost` instead of SSH target
+2. Default `LIBPAM_WEB3_DEB` to `/var/lib/blockhost/template-packages/libpam-web3_*.deb`
+3. Remove SSH/SCP operations (script runs locally now)
+4. Execute `qm` commands directly instead of via SSH
+
+**See "Submodule Change Prompt" section for the full prompt to send to the blockhost-provisioner Claude session.**
+
+### Verification
+
+After implementation, verify:
+
+1. **After first-boot**:
+```bash
+terraform --version  # Should show Terraform version
+virt-customize --version  # Should show libguestfs version
+```
+
+2. **After finalization**:
+```bash
+ls -la /var/lib/blockhost/terraform/
+# Should show: provider.tf.json, variables.tf.json, .terraform/
+
+ls -la /etc/blockhost/terraform_ssh_key*
+# Should show: terraform_ssh_key, terraform_ssh_key.pub
+
+qm list
+# Should show template VM at VMID 9001 (or configured VMID)
+```
+
+3. **End-to-end test**:
+```bash
+blockhost-vm-create test-vm --owner-wallet 0x...
+# Should create VM from template
+```
+
+### Troubleshooting
+
+**Terraform init fails**:
+- Check network connectivity to Terraform registry
+- Verify HashiCorp apt repository was added correctly
+- Check `/var/log/blockhost-firstboot.log` for errors
+
+**SSH key not in authorized_keys**:
+- Check `/etc/blockhost/terraform_ssh_key.pub` exists
+- Verify `/root/.ssh/authorized_keys` contains the key
+- Check file permissions (600 for private key, 644 for public)
+
+**Template build fails**:
+- Verify libpam-web3 .deb exists in `/var/lib/blockhost/template-packages/`
+- Check build-template.sh supports the new environment variables
+- Review provisioner script output for specific errors
+
+**Template VMID conflict**:
+- If VMID 9001 is already in use, change the template_vmid in wizard
+- The finalization will skip building if the VMID already exists
+
+### Submodule Change Prompt (blockhost-provisioner)
+
+Copy and paste the following prompt to the blockhost-provisioner Claude session:
+
+---
+
+**Update `scripts/build-template.sh` for local execution on Proxmox host**
+
+The script currently runs remotely via SSH. Update it to run locally when called from the BlockHost web wizard finalization.
+
+**Requirements:**
+
+1. **Environment Variables** (with sensible defaults):
+   - `PROXMOX_HOST` - Default to `localhost` (previously hardcoded SSH target)
+   - `TEMPLATE_VMID` - Default to `9001`
+   - `STORAGE` - Default to `local-lvm`
+   - `LIBPAM_WEB3_DEB` - Default to `/var/lib/blockhost/template-packages/libpam-web3_*.deb`
+
+2. **Local Execution Mode**:
+   - When `PROXMOX_HOST=localhost`, execute `qm`, `pvesm`, and `virt-customize` commands directly
+   - Remove SSH wrapper for local commands
+   - Remove SCP operations (files are already local)
+
+3. **Remote Execution Mode** (preserve for development):
+   - When `PROXMOX_HOST` is not `localhost`, use SSH as before
+   - This allows testing from a development machine
+
+4. **Command Changes**:
+   - Replace `ssh root@$PROXMOX_HOST 'qm ...'` with conditional: if localhost, run `qm ...` directly
+   - Replace `scp file root@$PROXMOX_HOST:path` with conditional: if localhost, `cp file path`
+
+5. **Example Pattern**:
+```bash
+run_on_host() {
+    if [ "$PROXMOX_HOST" = "localhost" ]; then
+        "$@"
+    else
+        ssh "root@$PROXMOX_HOST" "$@"
+    fi
+}
+
+copy_to_host() {
+    local src="$1"
+    local dest="$2"
+    if [ "$PROXMOX_HOST" = "localhost" ]; then
+        cp "$src" "$dest"
+    else
+        scp "$src" "root@$PROXMOX_HOST:$dest"
+    fi
+}
+
+# Usage:
+run_on_host qm create "$TEMPLATE_VMID" --name "debian-template" --memory 2048
+copy_to_host "$LIBPAM_WEB3_DEB" "/tmp/libpam-web3.deb"
+```
+
+6. **Expected Environment When Called**:
+   - Running as root on Proxmox host
+   - `TEMPLATE_VMID`, `STORAGE`, `LIBPAM_WEB3_DEB` set by caller
+   - `PROXMOX_HOST=localhost` set by caller
+
+---

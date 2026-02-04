@@ -242,6 +242,44 @@ else
 fi
 
 #
+# Step 2d: Install Terraform and libguestfs-tools
+#
+STEP_TERRAFORM="${STATE_DIR}/.step-terraform"
+if [ ! -f "$STEP_TERRAFORM" ]; then
+    log "Step 2d: Installing Terraform and libguestfs-tools..."
+
+    # Add HashiCorp GPG key and repository
+    if [ ! -f /usr/share/keyrings/hashicorp-archive-keyring.gpg ]; then
+        log "Adding HashiCorp repository..."
+        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list
+        apt-get update
+    fi
+
+    # Install Terraform and libguestfs-tools
+    log "Installing Terraform and libguestfs-tools..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y terraform libguestfs-tools
+
+    # Verify installation
+    if command -v terraform &> /dev/null; then
+        log "Terraform installed: $(terraform --version | head -1)"
+    else
+        log "WARNING: Terraform installation may have failed"
+    fi
+
+    if command -v virt-customize &> /dev/null; then
+        log "libguestfs-tools installed: virt-customize available"
+    else
+        log "WARNING: libguestfs-tools installation may have failed"
+    fi
+
+    touch "$STEP_TERRAFORM"
+    log "Step 2d complete - Terraform and libguestfs-tools installed!"
+else
+    log "Step 2d: Terraform already installed, skipping."
+fi
+
+#
 # Step 3: Verify Network
 #
 if [ ! -f "$STEP_NETWORK" ]; then

@@ -83,6 +83,7 @@ class SetupState:
                 'contracts': {'status': 'pending', 'error': None, 'completed_at': None},
                 'config': {'status': 'pending', 'error': None, 'completed_at': None},
                 'token': {'status': 'pending', 'error': None, 'completed_at': None},
+                'terraform': {'status': 'pending', 'error': None, 'completed_at': None},
                 'ipv6': {'status': 'pending', 'error': None, 'completed_at': None},
                 'template': {'status': 'pending', 'error': None, 'completed_at': None},
                 'services': {'status': 'pending', 'error': None, 'completed_at': None},
@@ -118,7 +119,7 @@ class SetupState:
 
     def get_next_step(self) -> Optional[str]:
         """Return the next step to run (first non-completed step)."""
-        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'ipv6', 'template', 'services', 'finalize']
+        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'ipv6', 'template', 'services', 'finalize']
         for step_id in step_order:
             if self.state['steps'][step_id]['status'] not in ('completed',):
                 return step_id
@@ -166,7 +167,7 @@ class SetupState:
         """Convert state to API response format."""
         completed = self.get_completed_steps()
         failed_step = self.get_failed_step()
-        progress = int((len(completed) / 9) * 100) if self.state['status'] != 'completed' else 100
+        progress = int((len(completed) / 10) * 100) if self.state['status'] != 'completed' else 100
 
         return {
             'status': self.state['status'],
@@ -369,6 +370,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'storage': request.form.get('pve_storage'),
                 'bridge': request.form.get('pve_bridge'),
                 'user': request.form.get('pve_user'),
+                'template_vmid': int(request.form.get('template_vmid', 9001)),
                 'vmid_start': int(request.form.get('vmid_start', 100)),
                 'vmid_end': int(request.form.get('vmid_end', 999)),
                 'ip_network': request.form.get('ip_network'),
@@ -1289,6 +1291,7 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
         ('contracts', 'Handling contracts', _finalize_contracts),
         ('config', 'Writing configuration files', _finalize_config),
         ('token', 'Creating Proxmox API token', _finalize_token),
+        ('terraform', 'Configuring Terraform provider', _finalize_terraform),
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
         ('template', 'Building VM template', _finalize_template),
         ('services', 'Starting services', _finalize_services),
@@ -1655,6 +1658,147 @@ def _finalize_token(config: dict) -> tuple[bool, Optional[str]]:
         return False, str(e)
 
 
+def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
+    """Configure Terraform with bpg/proxmox provider for VM provisioning."""
+    try:
+        terraform_dir = Path('/var/lib/blockhost/terraform')
+        terraform_dir.mkdir(parents=True, exist_ok=True)
+
+        config_dir = Path('/etc/blockhost')
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        proxmox = config.get('proxmox', {})
+        node_name = proxmox.get('node', socket.gethostname())
+
+        # Generate SSH keypair for Terraform to use
+        ssh_key_file = config_dir / 'terraform_ssh_key'
+        ssh_pub_file = config_dir / 'terraform_ssh_key.pub'
+
+        if not ssh_key_file.exists():
+            result = subprocess.run(
+                ['ssh-keygen', '-t', 'ed25519', '-f', str(ssh_key_file), '-N', '', '-C', 'terraform@blockhost'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                return False, f'SSH keygen failed: {result.stderr}'
+
+            # Set correct permissions
+            ssh_key_file.chmod(0o600)
+            ssh_pub_file.chmod(0o644)
+
+        # Add public key to root's authorized_keys
+        authorized_keys = Path('/root/.ssh/authorized_keys')
+        authorized_keys.parent.mkdir(parents=True, exist_ok=True)
+
+        pub_key = ssh_pub_file.read_text().strip()
+
+        # Check if key already exists
+        existing_keys = ''
+        if authorized_keys.exists():
+            existing_keys = authorized_keys.read_text()
+
+        if pub_key not in existing_keys:
+            with open(authorized_keys, 'a') as f:
+                f.write(f'\n{pub_key}\n')
+            authorized_keys.chmod(0o600)
+
+        # Write provider.tf.json with bpg/proxmox provider
+        provider_config = {
+            "terraform": {
+                "required_providers": {
+                    "proxmox": {
+                        "source": "bpg/proxmox",
+                        "version": ">= 0.50.0"
+                    }
+                }
+            },
+            "provider": {
+                "proxmox": {
+                    "endpoint": "https://127.0.0.1:8006",
+                    "api_token": "${var.proxmox_api_token}",
+                    "insecure": True,
+                    "ssh": {
+                        "agent": False,
+                        "private_key": "${file(\"/etc/blockhost/terraform_ssh_key\")}",
+                        "node": [
+                            {
+                                "name": node_name,
+                                "address": "127.0.0.1"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        provider_file = terraform_dir / 'provider.tf.json'
+        provider_file.write_text(json.dumps(provider_config, indent=2))
+
+        # Write variables.tf.json with wizard values
+        variables_config = {
+            "variable": {
+                "proxmox_api_token": {
+                    "type": "string",
+                    "description": "Proxmox API token in format user@realm!tokenid=secret",
+                    "sensitive": True
+                },
+                "proxmox_node": {
+                    "type": "string",
+                    "description": "Proxmox node name",
+                    "default": node_name
+                },
+                "proxmox_storage": {
+                    "type": "string",
+                    "description": "Storage pool for VM disks",
+                    "default": proxmox.get('storage', 'local-lvm')
+                },
+                "proxmox_bridge": {
+                    "type": "string",
+                    "description": "Network bridge for VMs",
+                    "default": proxmox.get('bridge', 'vmbr0')
+                },
+                "template_vmid": {
+                    "type": "number",
+                    "description": "VMID of the base VM template",
+                    "default": proxmox.get('template_vmid', 9001)
+                },
+                "vmid_start": {
+                    "type": "number",
+                    "description": "Start of VMID range for provisioned VMs",
+                    "default": proxmox.get('vmid_start', 100)
+                },
+                "vmid_end": {
+                    "type": "number",
+                    "description": "End of VMID range for provisioned VMs",
+                    "default": proxmox.get('vmid_end', 999)
+                }
+            }
+        }
+
+        variables_file = terraform_dir / 'variables.tf.json'
+        variables_file.write_text(json.dumps(variables_config, indent=2))
+
+        # Run terraform init
+        result = subprocess.run(
+            ['terraform', 'init'],
+            cwd=terraform_dir,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        if result.returncode != 0:
+            return False, f'Terraform init failed: {result.stderr}'
+
+        return True, None
+    except subprocess.TimeoutExpired:
+        return False, 'Terraform init timed out'
+    except Exception as e:
+        return False, str(e)
+
+
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
     """Configure IPv6 tunnel if using broker."""
     try:
@@ -1733,31 +1877,59 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
 
 
 def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
-    """Build VM template."""
+    """Build VM template with libpam-web3."""
     try:
+        proxmox = config.get('proxmox', {})
+        template_vmid = proxmox.get('template_vmid', 9001)
+        storage = proxmox.get('storage', 'local-lvm')
+
         # Check if template already exists
         template_check = subprocess.run(
-            ['qm', 'list'],
+            ['qm', 'status', str(template_vmid)],
             capture_output=True,
             text=True,
             timeout=10
         )
 
+        if template_check.returncode == 0:
+            # Template VM already exists, skip building
+            return True, None
+
+        # Find libpam-web3 .deb in template-packages directory
+        template_pkg_dir = Path('/var/lib/blockhost/template-packages')
+        libpam_deb = None
+
+        if template_pkg_dir.exists():
+            debs = list(template_pkg_dir.glob('libpam-web3_*.deb'))
+            if debs:
+                # Use the most recent one if multiple exist
+                libpam_deb = str(sorted(debs, key=lambda p: p.stat().st_mtime, reverse=True)[0])
+
         # Build template
         build_script = Path('/opt/blockhost-provisioner/scripts/build-template.sh')
         if build_script.exists():
+            # Set up environment for build script
+            env = os.environ.copy()
+            env['TEMPLATE_VMID'] = str(template_vmid)
+            env['STORAGE'] = storage
+            env['PROXMOX_HOST'] = 'localhost'
+
+            if libpam_deb:
+                env['LIBPAM_WEB3_DEB'] = libpam_deb
+
             result = subprocess.run(
                 [str(build_script)],
                 capture_output=True,
                 text=True,
-                timeout=1800  # 30 minutes
+                timeout=1800,  # 30 minutes
+                env=env
             )
 
             if result.returncode != 0:
                 return False, result.stderr or 'Template build failed'
         else:
             # Template build script not found - skip for now
-            time.sleep(2)
+            return True, None
 
         return True, None
     except subprocess.TimeoutExpired:
