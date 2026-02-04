@@ -343,7 +343,8 @@ async function checkBalance() {
     btn.textContent = 'Checking...';
 
     try {
-        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.generatedAddress)}`);
+        const rpcUrl = document.getElementById('rpc_url').value;
+        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.generatedAddress)}&rpc_url=${encodeURIComponent(rpcUrl)}`);
         const data = await response.json();
 
         if (data.success) {
@@ -453,7 +454,8 @@ async function checkImportedBalance() {
     const statusDiv = document.getElementById('import-status');
 
     try {
-        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.importedAddress)}`);
+        const rpcUrl = document.getElementById('rpc_url').value;
+        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.importedAddress)}&rpc_url=${encodeURIComponent(rpcUrl)}`);
         const data = await response.json();
 
         if (data.success) {

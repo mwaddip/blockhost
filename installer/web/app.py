@@ -561,9 +561,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if not address or not _is_valid_address(address):
             return jsonify({'success': False, 'error': 'Invalid address'}), 400
 
-        # Get RPC URL from session or use default
-        blockchain = session.get('blockchain', {})
-        rpc_url = blockchain.get('rpc_url', 'https://ethereum-sepolia-rpc.publicnode.com')
+        # Get RPC URL from query param, then session, then default
+        rpc_url = request.args.get('rpc_url', '').strip()
+        if not rpc_url:
+            blockchain = session.get('blockchain', {})
+            rpc_url = blockchain.get('rpc_url', 'https://ethereum-sepolia-rpc.publicnode.com')
 
         balance = _get_wallet_balance(address, rpc_url)
         if balance is not None:
@@ -1129,7 +1131,10 @@ def _get_wallet_balance(address: str, rpc_url: str) -> Optional[int]:
         req = urllib.request.Request(
             rpc_url,
             data=payload,
-            headers={'Content-Type': 'application/json'},
+            headers={
+                'Content-Type': 'application/json',
+                'User-Agent': 'BlockHost-Installer/1.0',
+            },
             method='POST'
         )
 
