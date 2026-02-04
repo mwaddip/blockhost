@@ -1,7 +1,7 @@
 # BlockHost Build Guide
 
 **Version**: 0.1.0
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-03
 **Base**: Proxmox VE 8.4
 
 ---
@@ -464,3 +464,925 @@ Installation order respects dependencies:
 ### Template Package Usage
 
 The `libpam-web3` package is stored at `/var/lib/blockhost/template-packages/` and is used when building VM templates with `blockhost-build-template`. It gets installed inside VMs to enable NFT-based authentication
+
+---
+
+## Web Wizard - Package Configuration
+
+After first-boot installs Proxmox VE and BlockHost packages, the web wizard guides users through package configuration. This section documents the wizard steps and configuration files created.
+
+### Wizard Flow (6 Steps)
+
+```
+1. Network     → DHCP or static IP
+2. Storage     → Disk selection
+3. Blockchain  → Chain, wallet, contracts
+4. Proxmox     → Storage, bridge, VM pools
+5. IPv6        → Broker or manual prefix
+6. Summary     → Review and finalize
+```
+
+### Step 3: Blockchain Configuration
+
+**Template**: `installer/web/templates/wizard/blockchain.html`
+
+**User Inputs**:
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Chain ID | 11155111 | Blockchain network (Sepolia, Mainnet, Polygon) |
+| RPC URL | Public endpoint | JSON-RPC endpoint for blockchain access |
+| Wallet Mode | Generate | Generate new or import existing private key |
+| Contract Mode | Deploy | Deploy new contracts or use existing addresses |
+
+**API Endpoints**:
+- `POST /api/blockchain/generate-wallet` - Generate secp256k1 keypair
+- `POST /api/blockchain/validate-key` - Validate imported private key
+- `POST /api/blockchain/deploy` - Start async contract deployment
+- `GET /api/blockchain/deploy-status/<job_id>` - Check deployment progress
+- `POST /api/blockchain/set-contracts` - Set existing contract addresses
+
+### Step 4: Proxmox Configuration
+
+**Template**: `installer/web/templates/wizard/proxmox.html`
+
+**User Inputs**:
+| Setting | Default | Description |
+|---------|---------|-------------|
+| API URL | https://127.0.0.1:8006 | Auto-detected |
+| Node Name | (hostname) | Auto-detected |
+| Storage | local-lvm | Dropdown from pvesm |
+| Bridge | vmbr0 | Dropdown from ip link |
+| VMID Range | 100-999 | Pool for auto-provisioned VMs |
+| IP Pool | 192.168.122.200-250 | Private IPs for VMs |
+| Gateway | 192.168.122.1 | VM network gateway |
+
+**API Endpoints**:
+- `GET /api/proxmox/detect` - Auto-detect storage pools, bridges, node name
+
+### Step 5: IPv6 Configuration
+
+**Template**: `installer/web/templates/wizard/ipv6.html`
+
+IPv6 is **required** - each VM needs a public IPv6 address for direct client access.
+
+**User Inputs**:
+| Setting | Description |
+|---------|-------------|
+| Mode | Broker (request from network) or Manual (own prefix) |
+| Broker Registry | Contract address for broker network |
+| Manual Prefix | IPv6 prefix if not using broker (e.g., 2001:db8::/48) |
+| Allocation Size | Prefix length per VM (/64 recommended) |
+
+**API Endpoints**:
+- `POST /api/ipv6/broker-request` - Request allocation from broker network
+- `POST /api/ipv6/manual` - Set manual IPv6 prefix
+- `GET /api/ipv6/status` - Check allocation status
+
+### Step 6: Summary & Finalization
+
+**Template**: `installer/web/templates/wizard/summary.html`
+
+The summary page shows all configuration and runs the finalization process:
+
+**Finalization Steps**:
+1. **keypair** - Generate server secp256k1 keypair (`/etc/blockhost/server.key`)
+2. **wallet** - Save deployer wallet (`/etc/blockhost/deployer.key`)
+3. **contracts** - Deploy contracts or verify existing addresses
+4. **config** - Write configuration files (see below)
+5. **token** - Create Proxmox API token via pveum
+6. **ipv6** - Configure WireGuard tunnel (if using broker)
+7. **template** - Build VM template (runs build-template.sh)
+8. **services** - Enable and start blockhost-engine
+9. **finalize** - Create `.setup-complete` marker, disable first-boot service
+
+**API Endpoints**:
+- `POST /api/finalize` - Start async finalization
+- `GET /api/finalize/status/<job_id>` - Check progress (returns current_step, completed_steps, progress)
+
+### Configuration Files Created
+
+| File | Created By | Contents |
+|------|------------|----------|
+| `/etc/blockhost/db.yaml` | Wizard | VMID pool, IP pool, IPv6 prefix |
+| `/etc/blockhost/web3-defaults.yaml` | Wizard | Chain ID, RPC URL, contract addresses |
+| `/etc/blockhost/blockhost.yaml` | Wizard | Server pubkey, deployer ref, Proxmox settings |
+| `/etc/blockhost/server.key` | Wizard | Server private key (mode 600) |
+| `/etc/blockhost/deployer.key` | Wizard | Deployer private key (mode 600) |
+| `/var/lib/blockhost/terraform/terraform.tfvars` | Wizard | Proxmox API credentials |
+| `/etc/blockhost/broker-allocation.json` | Wizard | IPv6 allocation info (if broker mode) |
+
+**Example db.yaml**:
+```yaml
+terraform_dir: "/var/lib/blockhost/terraform"
+vmid_pool:
+  start: 100
+  end: 999
+ip_pool:
+  network: "192.168.122.0/24"
+  start: "192.168.122.200"
+  end: "192.168.122.250"
+  gateway: "192.168.122.1"
+ipv6:
+  prefix: "2001:db8:400::/48"
+  allocation_size: 64
+```
+
+**Example web3-defaults.yaml**:
+```yaml
+chain_id: 11155111
+rpc_url: "https://ethereum-sepolia-rpc.publicnode.com"
+contracts:
+  nft: "0x1234567890abcdef..."
+  subscription: "0xfedcba0987654321..."
+```
+
+**Example blockhost.yaml**:
+```yaml
+server:
+  address: "0xServerAddress..."
+  key_file: "/etc/blockhost/server.key"
+deployer:
+  key_file: "/etc/blockhost/deployer.key"
+proxmox:
+  node: "blockhost"
+  storage: "local-lvm"
+  bridge: "vmbr0"
+```
+
+**Example terraform.tfvars**:
+```hcl
+proxmox_api_url = "https://127.0.0.1:8006/api2/json"
+proxmox_api_token_id = "root@pam!blockhost"
+proxmox_api_token_secret = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node = "blockhost"
+proxmox_storage = "local-lvm"
+proxmox_bridge = "vmbr0"
+```
+
+### Post-Setup Architecture
+
+After the wizard completes, the system operates autonomously:
+
+```
+User → Blockchain (purchase subscription)
+              ↓
+       Smart Contract emits event
+              ↓
+       blockhost-engine (monitors events)
+              ↓
+       blockhost-provisioner (creates VM via Terraform)
+              ↓
+       VM with NFT auth (libpam-web3)
+              ↓
+       User connects via IPv6 + NFT signature
+```
+
+**No manual VM management** - everything is driven by blockchain events.
+
+### Web Installer Files Modified
+
+| File | Changes |
+|------|---------|
+| `installer/web/app.py` | Added wizard routes (blockchain, proxmox, ipv6), API endpoints, config writers, finalization logic |
+| `installer/web/templates/base.html` | Added CSS styles for radio groups, status indicators, progress lists |
+| `installer/web/templates/wizard/blockchain.html` | New - blockchain configuration step |
+| `installer/web/templates/wizard/proxmox.html` | New - Proxmox configuration step |
+| `installer/web/templates/wizard/ipv6.html` | New - IPv6 configuration step |
+| `installer/web/templates/wizard/summary.html` | Updated - comprehensive summary with finalization progress |
+| `installer/web/templates/wizard/packages.html` | Replaced by blockchain.html |
+
+### Troubleshooting
+
+**Wallet generation fails**:
+- Check if eth-keys library is installed: `pip3 install eth-keys`
+- Fallback uses hashlib but won't produce valid Ethereum addresses
+
+**Contract deployment stuck**:
+- Check deployer wallet has sufficient funds for gas
+- Verify RPC endpoint is accessible
+- Check `/var/log/blockhost-firstboot.log` for hardhat errors
+
+**Proxmox resources not detected**:
+- Ensure pvesm and ip commands are available
+- Check Proxmox services are running: `systemctl status pve-cluster`
+
+**IPv6 broker request fails**:
+- Verify blockhost-broker-client is installed
+- Check broker registry contract address is correct for the chain
+- Ensure network connectivity to blockchain RPC
+
+**Template build times out**:
+- Template building can take up to 30 minutes
+- Check disk space and network connectivity
+- Review build script output: `/opt/blockhost-provisioner/scripts/build-template.sh`
+
+---
+
+## Bug Fixes (2026-02-03)
+
+### Issue 1: Network/Storage pages had old 4-step breadcrumbs
+
+**Files Modified**: `installer/web/templates/wizard/network.html`, `installer/web/templates/wizard/storage.html`
+
+**Problem**: Network and Storage pages showed old 4-step breadcrumbs (Network → Storage → Packages → Summary) instead of the new 6-step flow.
+
+**Fix**: Updated progress steps to match blockchain.html: Network → Storage → Blockchain → Proxmox → IPv6 → Summary
+
+### Issue 2: Copy button doesn't work in Firefox/Waterfox
+
+**File Modified**: `installer/web/templates/wizard/blockchain.html`
+
+**Problem**: `navigator.clipboard.writeText()` fails silently in Firefox because the Clipboard API requires a secure context (HTTPS) or specific user gesture handling.
+
+**Fix**: Added fallback using `document.execCommand('copy')` with a temporary textarea element:
+```javascript
+function fallbackCopyToClipboard(text, btn) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+}
+```
+
+### Issue 3: Wallet generator doesn't show private key
+
+**File Modified**: `installer/web/templates/wizard/blockchain.html`
+
+**Problem**: Only shows deployer address, not the private key needed for backup.
+
+**Fix**: Added a visible field to display the generated private key with its own copy button:
+```html
+<label>Private Key <span style="color: var(--danger);">*</span></label>
+<div class="address-box">
+    <span id="deployer-private-key">-</span>
+    <button onclick="copyToClipboard('deployer-private-key', this)">Copy</button>
+</div>
+```
+
+### Issue 4: No confirmation to save private key before continuing
+
+**File Modified**: `installer/web/templates/wizard/blockchain.html`
+
+**Problem**: User can click Continue without being reminded to save the private key.
+
+**Fix**: Added confirmation dialog on form submit:
+```javascript
+if (!confirm('Have you saved your private key?\n\nThis private key cannot be recovered later...')) {
+    e.preventDefault();
+    return;
+}
+```
+
+### Issue 5: Proxmox API endpoint field unnecessary
+
+**File Modified**: `installer/web/templates/wizard/proxmox.html`
+
+**Problem**: Shows editable API endpoint field, but it's always local (https://127.0.0.1:8006).
+
+**Fix**: Removed the visible field and replaced with hidden input:
+```html
+<input type="hidden" name="pve_api_url" value="https://127.0.0.1:8006">
+<input type="hidden" name="pve_user" value="root@pam">
+```
+
+### Issue 7: API Authentication section unnecessary
+
+**File Modified**: `installer/web/templates/wizard/proxmox.html`
+
+**Problem**: Shows API auth options but we're running as root locally.
+
+**Fix**: Removed the entire API Authentication section. Token is created automatically during finalization without user input.
+
+### Issue 8: Add wallet balance check before proceeding
+
+**Files Modified**: `installer/web/templates/wizard/blockchain.html`, `installer/web/app.py`
+
+**Problem**: User can proceed without funding wallet, causing contract deployment to fail.
+
+**Fix**:
+1. Added balance display section that polls every 10 seconds
+2. Continue button disabled until balance > 0 (when deploying new contracts)
+3. New API endpoint: `GET /api/blockchain/balance?address=0x...`
+
+```python
+@app.route('/api/blockchain/balance')
+def api_blockchain_balance():
+    # Uses JSON-RPC eth_getBalance to check wallet balance
+    balance = _get_wallet_balance(address, rpc_url)
+    return jsonify({'balance': str(balance / 1e18), ...})
+```
+
+### Issue 9: Fetch broker registry contract from GitHub
+
+**Files Modified**: `installer/web/templates/wizard/ipv6.html`, `installer/web/app.py`
+
+**Problem**: Broker registry address is hardcoded placeholder.
+
+**Fix**: Added API endpoint to fetch from GitHub:
+```python
+@app.route('/api/ipv6/broker-registry')
+def api_ipv6_broker_registry():
+    # Fetches from https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry.json
+    registry = _fetch_broker_registry_from_github(chain_id)
+    return jsonify({'registry': registry, ...})
+```
+
+Added "Auto-fetch from GitHub" button in the UI.
+
+### Issue 10 & 11: Remove broker request button from IPv6 step
+
+**File Modified**: `installer/web/templates/wizard/ipv6.html`
+
+**Problem**: "Request IPv6 Allocation" button fails because client isn't installed and contracts aren't deployed yet. Continue button was blocked without successful request.
+
+**Fix**:
+1. Removed the broker request button and result display
+2. Simplified to just mode selection (broker vs manual) + registry address input
+3. Added note explaining allocation happens during finalization
+4. Allow Continue with just mode selection - actual broker request happens during finalization step
+
+### Summary of API Changes
+
+**New Endpoints Added**:
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/blockchain/balance` | GET | Check wallet balance via RPC |
+| `/api/ipv6/broker-registry` | GET | Fetch broker registry from GitHub |
+
+**New Helper Functions**:
+| Function | Purpose |
+|----------|---------|
+| `_get_wallet_balance(address, rpc_url)` | JSON-RPC call to eth_getBalance |
+| `_fetch_broker_registry_from_github(chain_id)` | Fetch registry.json from GitHub |
+
+---
+
+## Finalization System (2026-02-03)
+
+### Persistent State Management
+
+The finalization process now uses disk-based state persistence to track progress and enable recovery from failures.
+
+**State File**: `/var/lib/blockhost/setup-state.json`
+
+**State Structure**:
+```json
+{
+  "status": "running",
+  "started_at": "2026-02-03T10:00:00",
+  "completed_at": null,
+  "current_step": "config",
+  "steps": {
+    "keypair": {"status": "completed", "error": null, "completed_at": "..."},
+    "wallet": {"status": "completed", "error": null, "completed_at": "..."},
+    "contracts": {"status": "completed", "error": null, "completed_at": "..."},
+    "config": {"status": "in_progress", "error": null, "completed_at": null},
+    "token": {"status": "pending", "error": null, "completed_at": null},
+    "ipv6": {"status": "pending", "error": null, "completed_at": null},
+    "template": {"status": "pending", "error": null, "completed_at": null},
+    "services": {"status": "pending", "error": null, "completed_at": null},
+    "finalize": {"status": "pending", "error": null, "completed_at": null}
+  },
+  "config": { /* stored configuration from session */ }
+}
+```
+
+### Finalization Steps
+
+| Step ID | Name | Description |
+|---------|------|-------------|
+| `keypair` | Generate server keypair | Creates `/etc/blockhost/server.key` |
+| `wallet` | Configure deployer wallet | Saves deployer key to `/etc/blockhost/deployer.key` |
+| `contracts` | Deploy/verify contracts | Deploys new contracts or validates existing addresses |
+| `config` | Write configuration | Creates db.yaml, web3-defaults.yaml, blockhost.yaml |
+| `token` | Create Proxmox API token | Creates API token via `pveum` and writes terraform.tfvars |
+| `ipv6` | Configure IPv6 | Sets up broker allocation or manual prefix |
+| `template` | Build VM template | Runs build-template.sh (may take several minutes) |
+| `services` | Start services | Enables and starts blockhost-engine |
+| `finalize` | Finalize setup | Creates `.setup-complete` marker, disables first-boot |
+
+### API Endpoints
+
+**New/Updated Finalization Endpoints**:
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/finalize` | POST | Start or resume finalization |
+| `/api/finalize/status` | GET | Get current state (from disk) |
+| `/api/finalize/retry` | POST | Retry failed step or resume |
+| `/api/finalize/reset` | POST | Reset state and start over |
+
+**POST /api/finalize Request Body**:
+```json
+{
+  "resume": true,      // Optional: resume from stored config
+  "retry_step": "token" // Optional: specific step to retry
+}
+```
+
+**GET /api/finalize/status Response**:
+```json
+{
+  "status": "running",
+  "progress": 44,
+  "current_step": "config",
+  "completed_steps": ["keypair", "wallet", "contracts"],
+  "steps": { /* detailed step states */ },
+  "failed_step": null,
+  "error": null
+}
+```
+
+### Resume Capability
+
+If the finalization process is interrupted (browser close, network issue, etc.):
+
+1. On page reload, the wizard checks `/api/finalize/status`
+2. If partial progress exists, shows "Resume Setup" option
+3. User can resume from where they left off
+4. Configuration is stored in state file, not just session
+
+### Retry Capability
+
+If a step fails:
+
+1. The error is displayed with details
+2. A "Retry" button appears on the failed step
+3. User can retry just that step (other completed steps are preserved)
+4. Alternatively, user can "Start Over" to reset all progress
+
+### UI Features
+
+**Progress Display**:
+- Overall progress bar (percentage)
+- Per-step status indicators:
+  - ○ Pending (gray circle)
+  - ⟳ In Progress (spinning animation)
+  - ✓ Completed (green checkmark)
+  - ✗ Failed (red X with error message)
+
+**Error Handling**:
+- Failed step highlighted in red
+- Error message displayed in dedicated section
+- "Retry Failed Step" and "Start Over" buttons
+
+**State Recovery**:
+- Automatic state detection on page load
+- "Previous setup incomplete" notice if interrupted
+- Resume or restart options
+
+### SetupState Class
+
+The `SetupState` class in `app.py` manages state persistence:
+
+```python
+class SetupState:
+    def __init__(self):
+        self.state = self._load()  # Load from disk
+
+    def save(self):
+        # Write to /var/lib/blockhost/setup-state.json
+
+    def reset(self):
+        # Reset to default state
+
+    def get_completed_steps(self) -> list:
+        # Return list of completed step IDs
+
+    def get_failed_step(self) -> Optional[str]:
+        # Return failed step ID if any
+
+    def get_next_step(self) -> Optional[str]:
+        # Return next pending step
+
+    def mark_step_running(self, step_id: str):
+        # Mark step as in_progress and save
+
+    def mark_step_completed(self, step_id: str):
+        # Mark step as completed with timestamp
+
+    def mark_step_failed(self, step_id: str, error: str):
+        # Mark step as failed with error message
+
+    def to_api_response(self) -> dict:
+        # Convert to API response format
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `installer/web/app.py` | Added SetupState class, updated finalization endpoints |
+| `installer/web/templates/wizard/summary.html` | Complete rewrite with step tracking, retry UI |
+
+### Troubleshooting
+
+**Setup stuck at a step**:
+- Check `/var/lib/blockhost/setup-state.json` for current state
+- Check `/var/log/blockhost-firstboot.log` for detailed errors
+- Use "Retry" button or API to retry failed step
+
+**State file corrupted**:
+- Delete `/var/lib/blockhost/setup-state.json`
+- Reload wizard page to start fresh
+
+**Step keeps failing on retry**:
+- Check underlying service/command that the step runs
+- Some steps may have dependencies (e.g., template build needs network)
+- Use "Start Over" to reset and try again with different configuration
+
+---
+
+## Contract Deployment (2026-02-03)
+
+### Architecture
+
+Smart contracts are compiled in submodules during .deb package builds, then deployed during the web wizard finalization step using Foundry.
+
+**Contract Sources**:
+| Contract | Source Submodule | Package |
+|----------|------------------|---------|
+| AccessCredentialNFT | libpam-web3/contracts/ | libpam-web3-tools |
+| BlockHostSubscription | blockhost-engine/contracts/ | blockhost-engine |
+
+**Build Flow**:
+```
+1. Submodule builds .deb with compiled contracts in /usr/share/blockhost/contracts/
+2. build-iso.sh extracts contracts from .deb packages to /blockhost/contracts/
+3. first-boot.sh installs Foundry and copies contracts to /var/lib/blockhost/contracts/
+4. Web wizard finalization deploys contracts using `cast send --create`
+```
+
+### Foundry Installation (first-boot.sh)
+
+Added Step 2c to install Foundry tools during first-boot:
+
+```bash
+# Step 2c: Install Foundry (for contract deployment)
+STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
+if [ ! -f "$STEP_FOUNDRY" ]; then
+    log "Step 2c: Installing Foundry..."
+
+    # Install foundryup
+    curl -L https://foundry.paradigm.xyz | bash
+    export PATH="$HOME/.foundry/bin:$PATH"
+    foundryup
+
+    # Add to system-wide path
+    ln -sf "$HOME/.foundry/bin/forge" /usr/local/bin/forge
+    ln -sf "$HOME/.foundry/bin/cast" /usr/local/bin/cast
+    ln -sf "$HOME/.foundry/bin/anvil" /usr/local/bin/anvil
+
+    # Copy contract artifacts
+    cp -r "$BLOCKHOST_DIR/contracts"/* "/var/lib/blockhost/contracts/"
+
+    touch "$STEP_FOUNDRY"
+fi
+```
+
+### Contract Artifacts on ISO (build-iso.sh)
+
+Added `add_contracts()` function to extract contract artifacts from .deb packages:
+
+```bash
+add_contracts() {
+    mkdir -p "${ISO_EXTRACT}/blockhost/contracts"
+    TEMP_EXTRACT=$(mktemp -d)
+
+    # Extract from libpam-web3-tools (NFT contract)
+    TOOLS_DEB=$(find "${PROJECT_DIR}/packages/host" -name "libpam-web3-tools_*.deb" | head -1)
+    if [ -n "$TOOLS_DEB" ]; then
+        dpkg-deb -x "$TOOLS_DEB" "$TEMP_EXTRACT"
+        cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/"
+    fi
+
+    # Extract from blockhost-engine (Subscription contract)
+    ENGINE_DEB=$(find "${PROJECT_DIR}/packages/host" -name "blockhost-engine_*.deb" | head -1)
+    if [ -n "$ENGINE_DEB" ]; then
+        dpkg-deb -x "$ENGINE_DEB" "$TEMP_EXTRACT"
+        cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/"
+    fi
+
+    rm -rf "$TEMP_EXTRACT"
+}
+```
+
+### Contract Deployment (app.py)
+
+The `_finalize_contracts()` function deploys contracts using Foundry's `cast` tool:
+
+```python
+def _finalize_contracts(config: dict) -> tuple[bool, Optional[str]]:
+    if blockchain.get('contract_mode') == 'existing':
+        # Use provided addresses
+        config['contracts'] = {
+            'nft': blockchain.get('nft_contract'),
+            'subscription': blockchain.get('subscription_contract'),
+        }
+    else:
+        # Deploy new contracts using Foundry
+        nft_address, err = _deploy_contract_with_forge(
+            contracts_dir / 'AccessCredentialNFT.json',
+            rpc_url, deployer_key, constructor_args=[]
+        )
+
+        sub_address, err = _deploy_contract_with_forge(
+            contracts_dir / 'BlockHostSubscription.json',
+            rpc_url, deployer_key, constructor_args=[nft_address]
+        )
+
+        config['contracts'] = {'nft': nft_address, 'subscription': sub_address}
+```
+
+**Deployment Method** (`_deploy_contract_with_forge`):
+1. Load contract artifact JSON (contains ABI and bytecode)
+2. If constructor args needed, ABI-encode them with `cast abi-encode`
+3. Append encoded args to bytecode
+4. Deploy with `cast send --rpc-url $RPC --private-key $KEY --create $BYTECODE --json`
+5. Parse contract address from JSON output
+
+### Contract Artifact Format
+
+Expected JSON format (Foundry output):
+```json
+{
+  "contractName": "AccessCredentialNFT",
+  "abi": [...],
+  "bytecode": {
+    "object": "0x608060405234801561001057600080fd5b50..."
+  }
+}
+```
+
+Or Hardhat format:
+```json
+{
+  "contractName": "AccessCredentialNFT",
+  "abi": [...],
+  "bytecode": "0x608060405234801561001057600080fd5b50..."
+}
+```
+
+### Submodule Changes Required
+
+**For libpam-web3** - Update `packaging/build-deb-tools.sh`:
+```bash
+# Compile contracts
+cd contracts
+forge build
+
+# Include in package
+mkdir -p "$PKG_DIR/usr/share/blockhost/contracts"
+cp out/AccessCredentialNFT.sol/AccessCredentialNFT.json \
+   "$PKG_DIR/usr/share/blockhost/contracts/"
+```
+
+**For blockhost-engine** - Update `packaging/build.sh`:
+```bash
+# Compile contracts
+cd contracts
+forge build
+
+# Include in package
+mkdir -p "$PKG_DIR/usr/share/blockhost/contracts"
+cp out/BlockHostSubscription.sol/BlockHostSubscription.json \
+   "$PKG_DIR/usr/share/blockhost/contracts/"
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `scripts/first-boot.sh` | Added Step 2c for Foundry installation |
+| `scripts/build-iso.sh` | Added `add_contracts()` function |
+| `installer/web/app.py` | Updated `_finalize_contracts()` with real deployment, added `_deploy_contract_with_forge()` |
+
+### Troubleshooting
+
+**"Contract artifact not found"**:
+- Ensure submodule packages include compiled contracts
+- Check `/var/lib/blockhost/contracts/` for .json files
+- Rebuild packages with `forge build` step
+
+**"No bytecode found in artifact"**:
+- Verify artifact JSON has `bytecode` or `bytecode.object` field
+- Check contract compiled successfully (no Solidity errors)
+
+**"Deployment failed" / timeout**:
+- Check wallet has sufficient ETH for gas
+- Verify RPC endpoint is responsive: `cast block-number --rpc-url $RPC`
+- Check network connectivity from VM
+
+**"Could not parse deployed address"**:
+- Check `cast` output format matches expected JSON
+- Verify Foundry version is recent: `cast --version`
+
+---
+
+## Bug Fixes (2026-02-03 - Batch 2)
+
+### Issue 1: Storage Pool displays "0.0 GB"
+
+**File Modified**: `installer/web/app.py`
+
+**Problem**: The Proxmox step Storage Pool dropdown showed "local (dir) - 0.0 GB" instead of actual available space.
+
+**Root Cause**: `pvesm status` output format:
+```
+Name             Type     Status           Total            Used       Available        %
+local             dir     active       102297016        8654608        88423628    8.46%
+```
+The values are in **KB (kibibytes)**, not bytes. The code was treating the value as bytes and dividing by 1024³, resulting in near-zero values.
+
+**Fix**: Updated `_detect_proxmox_resources()` to multiply KB values by 1024 before converting to GB:
+```python
+# Available is in KB, convert to bytes then to GB
+try:
+    avail_kb = int(parts[avail_col])
+    avail_bytes = avail_kb * 1024  # KB to bytes
+    avail_gb = avail_bytes / (1024**3)
+except (ValueError, IndexError):
+    avail_bytes = 0
+    avail_gb = 0.0
+```
+
+### Issue 2: Contract artifact not found during deployment (BLOCKING)
+
+**Files Modified**:
+- `preseed/blockhost.preseed`
+- `installer/web/app.py`
+
+**Problem**: During the finalization step "Deploy smart contracts", the error occurred:
+```
+NFT contract deployment failed: Contract artifact not found: /var/lib/blockhost/contracts/AccessCredentialNFT.json
+```
+
+**Root Cause**: The preseed `late_command` only copied `installer/` and `first-boot.sh` to `/opt/blockhost/`, but NOT:
+- `contracts/` directory
+- `packages/` directory
+- `scripts/` directory
+
+**Fix 1** - Updated preseed late_command to copy all required directories:
+```bash
+# Old (missing directories):
+cp -r "$CDROM/blockhost/installer" /target/opt/blockhost/
+cp "$CDROM/blockhost/first-boot.sh" /target/opt/blockhost/
+
+# New (includes all directories):
+cp -r "$CDROM/blockhost/installer" /target/opt/blockhost/
+cp -r "$CDROM/blockhost/contracts" /target/opt/blockhost/
+cp -r "$CDROM/blockhost/packages" /target/opt/blockhost/
+cp -r "$CDROM/blockhost/scripts" /target/opt/blockhost/
+cp "$CDROM/blockhost/first-boot.sh" /target/opt/blockhost/
+```
+
+**Fix 2** - Updated contract path in `_finalize_contracts()`:
+```python
+# Old:
+contracts_dir = Path('/var/lib/blockhost/contracts')
+
+# New (matches preseed destination):
+contracts_dir = Path('/opt/blockhost/contracts')
+```
+
+### Verification Steps
+
+After applying these fixes:
+
+1. **Rebuild ISO**:
+```bash
+./scripts/build-iso.sh --testing
+```
+
+2. **Recreate test VM**:
+```bash
+sudo virsh destroy blockhost-test 2>/dev/null
+sudo virsh undefine blockhost-test --remove-all-storage 2>/dev/null
+sudo virt-install \
+    --name blockhost-test \
+    --ram 4096 \
+    --vcpus 2 \
+    --disk size=32 \
+    --cdrom build/blockhost-pve_*.iso \
+    --network network=default \
+    --graphics vnc
+```
+
+3. **Complete wizard flow** and verify:
+   - Storage pool shows actual available space (e.g., "84.3 GB")
+   - Contract deployment succeeds without "artifact not found" error
+
+4. **Check files were copied correctly** (on installed system):
+```bash
+ls -la /opt/blockhost/
+# Should show: contracts/  installer/  packages/  scripts/  first-boot.sh
+```
+
+### Issue 3: Foundry `cast` not installed (contract deployment fails)
+
+**File Modified**: `scripts/first-boot.sh`
+
+**Problem**: The Foundry installation step used `curl -L https://foundry.paradigm.xyz | bash` which requires interactive shell and doesn't work in the non-interactive first-boot environment.
+
+**Error**: `NFT contract deployment failed: [Errno 2] No such file or directory: 'cast'`
+
+**Fix**: Download pre-built Foundry binaries directly from GitHub releases instead of using the interactive installer:
+
+```bash
+# Download pre-built binaries directly (non-interactive)
+FOUNDRY_DIR="/usr/local/lib/foundry"
+mkdir -p "$FOUNDRY_DIR"
+
+# Get latest release from GitHub
+FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+# Download and extract
+FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
+curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz
+tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
+
+# Create symlinks
+for tool in forge cast anvil chisel; do
+    ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
+done
+```
+
+### Issue 4: NFT contract constructor requires arguments
+
+**File Modified**: `installer/web/app.py`
+
+**Problem**: Contract deployment failed with "execution reverted" because the NFT contract constructor requires 3 string arguments but we passed none.
+
+**Constructor signature**: `(string name, string symbol, string defaultImageUri)`
+
+**Fix**: Pass constructor arguments to the NFT deployment:
+```python
+nft_address, err = _deploy_contract_with_forge(
+    contracts_dir / 'AccessCredentialNFT.json',
+    rpc_url,
+    deployer_key,
+    constructor_args=['BlockHost Access', 'BHAC', '']
+)
+```
+
+### Issue 5: Wrong wallet address shown in wizard
+
+**File Modified**: `installer/web/app.py`
+
+**Problem**: The wizard showed a different wallet address than `cast wallet address` for the same private key.
+
+**Root Cause**: The `_get_address_from_key()` fallback used SHA256 instead of proper secp256k1/keccak256 derivation when eth-keys library wasn't available.
+
+**Fix**: Use Foundry's `cast wallet address` as the fallback:
+```python
+# Fallback: use Foundry's cast if available
+result = subprocess.run(
+    ['cast', 'wallet', 'address', '--private-key', '0x' + key],
+    capture_output=True, text=True, timeout=10
+)
+if result.returncode == 0:
+    return result.stdout.strip()
+```
+
+### Issue 6: Broker IPv6 request not automated
+
+**File Modified**: `installer/web/app.py`
+
+**Problem**: The `_finalize_ipv6` step only saved config but didn't actually request an IPv6 allocation from the broker network.
+
+**Fix**: Updated `_finalize_ipv6` to call `broker-client request` with the deployed NFT contract address and registry:
+```python
+cmd = [
+    'broker-client', 'request',
+    '--registry-contract', registry,
+    '--nft-contract', nft_contract,
+    '--wallet-key', '/etc/blockhost/deployer.key',
+    '--configure-wg',
+]
+result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+```
+
+### Issue 7: Imported wallet key not used (wrong key saved)
+
+**File Modified**: `installer/web/app.py`
+
+**Problem**: When user generates a wallet, then switches to "Import" mode and enters their own key, the generated key is used instead of the imported one.
+
+**Root Cause**: The form has two fields:
+- `deployer_key` (hidden) - filled when "Generate Wallet" is clicked
+- `import_key` - filled when importing
+
+The code used `request.form.get('deployer_key') or request.form.get('import_key')`, but if the user clicked Generate before switching to Import, `deployer_key` was non-empty and took precedence.
+
+**Fix**: Check `wallet_mode` to determine which field to use:
+```python
+wallet_mode = request.form.get('wallet_mode')
+if wallet_mode == 'import':
+    deployer_key = request.form.get('import_key')
+else:
+    deployer_key = request.form.get('deployer_key')
+```

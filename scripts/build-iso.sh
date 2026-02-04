@@ -20,6 +20,10 @@ VERSION="${VERSION:-0.1.0}"
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
 OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 
+# Testing mode settings
+TESTING_MODE=false
+APT_PROXY="http://192.168.122.1:3142"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,6 +33,36 @@ NC='\033[0m'
 log() { echo -e "${GREEN}[BUILD]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --testing    Enable testing mode (apt proxy, SSH root login)"
+    echo "  --help       Show this help message"
+    echo ""
+    echo "Testing mode enables:"
+    echo "  - apt proxy at $APT_PROXY for faster package downloads"
+    echo "  - PermitRootLogin yes in sshd_config for easier debugging"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --testing)
+                TESTING_MODE=true
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                error "Unknown option: $1\nUse --help for usage"
+                ;;
+        esac
+    done
+}
 
 check_dependencies() {
     log "Checking dependencies..."
@@ -122,10 +156,147 @@ add_blockhost_files() {
     cp "${PROJECT_DIR}/scripts/first-boot.sh" "${ISO_EXTRACT}/blockhost/"
     chmod +x "${ISO_EXTRACT}/blockhost/first-boot.sh"
 
+    # Copy install-packages script
+    mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
+    cp "${PROJECT_DIR}/scripts/install-packages.sh" "${ISO_EXTRACT}/blockhost/scripts/"
+    chmod +x "${ISO_EXTRACT}/blockhost/scripts/install-packages.sh"
+
     # Copy systemd service
     cp "${PROJECT_DIR}/systemd/blockhost-firstboot.service" "${ISO_EXTRACT}/blockhost/"
 
     log "BlockHost files added to /blockhost/"
+}
+
+add_packages() {
+    log "Adding BlockHost packages..."
+
+    # Check if packages exist
+    HOST_PKG_DIR="${PROJECT_DIR}/packages/host"
+    TEMPLATE_PKG_DIR="${PROJECT_DIR}/packages/template"
+
+    if [ ! -d "$HOST_PKG_DIR" ] || [ -z "$(ls -A $HOST_PKG_DIR/*.deb 2>/dev/null)" ]; then
+        warn "No host packages found in $HOST_PKG_DIR"
+        warn "Run ./scripts/build-packages.sh first"
+        return 1
+    fi
+
+    # Create package directories on ISO
+    mkdir -p "${ISO_EXTRACT}/blockhost/packages/host"
+    mkdir -p "${ISO_EXTRACT}/blockhost/packages/template"
+
+    # Copy host packages
+    cp "$HOST_PKG_DIR"/*.deb "${ISO_EXTRACT}/blockhost/packages/host/"
+    log "Added host packages:"
+    ls -la "${ISO_EXTRACT}/blockhost/packages/host/"
+
+    # Copy template packages if they exist
+    if [ -d "$TEMPLATE_PKG_DIR" ] && ls "$TEMPLATE_PKG_DIR"/*.deb >/dev/null 2>&1; then
+        cp "$TEMPLATE_PKG_DIR"/*.deb "${ISO_EXTRACT}/blockhost/packages/template/"
+        log "Added template packages:"
+        ls -la "${ISO_EXTRACT}/blockhost/packages/template/"
+    fi
+
+    log "Packages added to ISO"
+}
+
+add_contracts() {
+    log "Adding contract artifacts..."
+
+    mkdir -p "${ISO_EXTRACT}/blockhost/contracts"
+
+    # Extract contract artifacts from .deb packages
+    TEMP_EXTRACT=$(mktemp -d)
+
+    # Extract from libpam-web3-tools (NFT contract)
+    TOOLS_DEB=$(find "${PROJECT_DIR}/packages/host" -name "libpam-web3-tools_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$TOOLS_DEB" ] && [ -f "$TOOLS_DEB" ]; then
+        dpkg-deb -x "$TOOLS_DEB" "$TEMP_EXTRACT"
+        if [ -d "$TEMP_EXTRACT/usr/share/blockhost/contracts" ]; then
+            cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
+            log "Extracted NFT contract from libpam-web3-tools"
+        fi
+    fi
+
+    # Extract from blockhost-engine (Subscription/PoS contract)
+    ENGINE_DEB=$(find "${PROJECT_DIR}/packages/host" -name "blockhost-engine_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$ENGINE_DEB" ] && [ -f "$ENGINE_DEB" ]; then
+        rm -rf "$TEMP_EXTRACT"/*
+        dpkg-deb -x "$ENGINE_DEB" "$TEMP_EXTRACT"
+        if [ -d "$TEMP_EXTRACT/usr/share/blockhost/contracts" ]; then
+            cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
+            log "Extracted Subscription contract from blockhost-engine"
+        fi
+    fi
+
+    rm -rf "$TEMP_EXTRACT"
+
+    # Also check for contracts in project directory (fallback)
+    if [ -d "${PROJECT_DIR}/contracts" ]; then
+        cp -r "${PROJECT_DIR}/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
+        log "Copied contracts from project directory"
+    fi
+
+    # List what we have
+    if ls "${ISO_EXTRACT}/blockhost/contracts"/*.json >/dev/null 2>&1; then
+        log "Contract artifacts:"
+        ls -la "${ISO_EXTRACT}/blockhost/contracts/"
+    else
+        warn "No contract artifacts found - deployment will fail"
+        warn "Ensure submodule packages include compiled contracts in /usr/share/blockhost/contracts/"
+    fi
+}
+
+configure_testing_mode() {
+    if [ "$TESTING_MODE" != "true" ]; then
+        return
+    fi
+
+    log "Configuring testing mode..."
+
+    # Ensure apt proxy is set in preseed
+    PRESEED_FILE="${ISO_EXTRACT}/preseed.cfg"
+    if [ -f "$PRESEED_FILE" ]; then
+        # Update or add apt proxy
+        if grep -q "mirror/http/proxy" "$PRESEED_FILE"; then
+            sed -i "s|d-i mirror/http/proxy string.*|d-i mirror/http/proxy string ${APT_PROXY}|" "$PRESEED_FILE"
+        else
+            echo "d-i mirror/http/proxy string ${APT_PROXY}" >> "$PRESEED_FILE"
+        fi
+        log "Set apt proxy to: $APT_PROXY"
+    fi
+
+    # Add late_command to enable SSH root login
+    # We need to append to the existing late_command or create a new one
+    if [ -f "$PRESEED_FILE" ]; then
+        # Create a script that will be run during late_command to configure SSH
+        mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
+        cat > "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh" << 'TESTING_EOF'
+#!/bin/bash
+# Testing mode configuration
+
+# Enable SSH root login with password
+if [ -f /etc/ssh/sshd_config ]; then
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    # Also handle sshd_config.d directory if it exists
+    if [ -d /etc/ssh/sshd_config.d ]; then
+        echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/99-testing.conf
+    fi
+fi
+
+# Set apt proxy for post-install
+mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::http::Proxy "http://192.168.122.1:3142";' > /etc/apt/apt.conf.d/00proxy
+
+echo "Testing mode configured" >> /var/log/blockhost-install.log
+TESTING_EOF
+        chmod +x "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh"
+
+        # Add to the late_command - append script execution
+        # We need to modify the preseed to also run our testing script
+        sed -i "s|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log; if [ -f \"\$CDROM/blockhost/scripts/configure-testing.sh\" ]; then cp \"\$CDROM/blockhost/scripts/configure-testing.sh\" /target/tmp/; in-target /bin/bash /tmp/configure-testing.sh; fi|" "$PRESEED_FILE"
+
+        log "Added SSH root login and apt proxy configuration"
+    fi
 }
 
 rebuild_iso() {
@@ -163,13 +334,24 @@ cleanup() {
 }
 
 main() {
+    parse_args "$@"
+
     log "BlockHost ISO Builder v${VERSION}"
     log "Building from Debian 12 base"
+
+    if [ "$TESTING_MODE" = "true" ]; then
+        log "TESTING MODE ENABLED"
+        log "  - apt proxy: $APT_PROXY"
+        log "  - SSH root login: enabled"
+    fi
 
     check_dependencies
     extract_iso
     add_preseed
     add_blockhost_files
+    add_packages
+    add_contracts
+    configure_testing_mode
     rebuild_iso
     cleanup
 
@@ -178,6 +360,14 @@ main() {
     log "Build complete!"
     log "=========================================="
     log "Output: $OUTPUT_ISO"
+
+    if [ "$TESTING_MODE" = "true" ]; then
+        log ""
+        log "Testing mode features:"
+        log "  - Root password: blockhost"
+        log "  - SSH root login: enabled"
+        log "  - apt proxy: $APT_PROXY"
+    fi
 }
 
 main "$@"

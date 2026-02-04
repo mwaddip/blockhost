@@ -1,0 +1,539 @@
+{% extends "base.html" %}
+
+{% block title %}Blockchain Setup - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step active">
+        <span class="step-number">3</span>
+        <span>Blockchain</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">4</span>
+        <span>Proxmox</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">5</span>
+        <span>IPv6</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">6</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Blockchain Configuration</h2>
+    <p class="text-muted mb-2">Configure the blockchain network and smart contract settings for VM provisioning.</p>
+
+    <form id="blockchain-form" method="POST" action="{{ url_for('wizard_blockchain') }}">
+        <!-- Network Selection -->
+        <div class="form-section">
+            <h3>Network Selection</h3>
+            <div class="form-group">
+                <label for="chain_id">Blockchain Network</label>
+                <select id="chain_id" name="chain_id" onchange="updateRpcEndpoint()">
+                    <option value="11155111" data-rpc="https://ethereum-sepolia-rpc.publicnode.com">Sepolia Testnet (recommended for testing)</option>
+                    <option value="1" data-rpc="https://ethereum-rpc.publicnode.com">Ethereum Mainnet</option>
+                    <option value="137" data-rpc="https://polygon-rpc.com">Polygon Mainnet</option>
+                    <option value="80001" data-rpc="https://rpc-mumbai.maticvigil.com">Polygon Mumbai Testnet</option>
+                    <option value="custom">Custom Network</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="rpc_url">RPC Endpoint</label>
+                <input type="text" id="rpc_url" name="rpc_url"
+                       value="https://ethereum-sepolia-rpc.publicnode.com"
+                       placeholder="https://...">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    Public endpoints have rate limits. For production, use Infura/Alchemy.
+                </p>
+            </div>
+        </div>
+
+        <!-- Deployer Wallet -->
+        <div class="form-section">
+            <h3>Deployer Wallet</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                This wallet pays gas fees for contract deployment and server operations.
+            </p>
+
+            <div class="radio-group mb-2">
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="wallet_mode" value="generate" checked>
+                    <div class="radio-label">
+                        <h4>Generate new wallet</h4>
+                        <p>Create a new wallet automatically</p>
+                    </div>
+                </label>
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="wallet_mode" value="import">
+                    <div class="radio-label">
+                        <h4>Import existing wallet</h4>
+                        <p>Use an existing private key</p>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Generate wallet section -->
+            <div id="wallet-generate" class="mb-2">
+                <button type="button" class="btn btn-secondary" onclick="generateWallet()" id="generate-btn">
+                    Generate Wallet
+                </button>
+                <div id="wallet-generated" class="hidden" style="margin-top: 1rem;">
+                    <div class="alert alert-warning">
+                        <strong>Important:</strong> Save your private key securely! It cannot be recovered later.
+                    </div>
+                    <label>Deployer Address</label>
+                    <div class="address-box">
+                        <span id="deployer-address">-</span>
+                        <button type="button" class="btn btn-small copy-btn" onclick="copyToClipboard('deployer-address', this)">Copy</button>
+                    </div>
+                    <label style="margin-top: 1rem;">Private Key <span style="color: var(--danger);">*</span></label>
+                    <div class="address-box">
+                        <span id="deployer-private-key" style="font-family: monospace; word-break: break-all;">-</span>
+                        <button type="button" class="btn btn-small copy-btn" onclick="copyToClipboard('deployer-private-key', this)">Copy</button>
+                    </div>
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        Store this private key in a secure location. You will need it to manage your contracts.
+                    </p>
+                    <input type="hidden" name="deployer_key" id="deployer-key-hidden">
+
+                    <!-- Balance check section -->
+                    <div id="balance-section" style="margin-top: 1rem; padding: 1rem; background: var(--bg-secondary); border-radius: 4px;">
+                        <label>Wallet Balance</label>
+                        <div style="display: flex; align-items: center; gap: 1rem;">
+                            <span id="wallet-balance" style="font-size: 1.25rem; font-weight: 500;">0 ETH</span>
+                            <button type="button" class="btn btn-small btn-secondary" onclick="checkBalance()" id="check-balance-btn">
+                                Refresh
+                            </button>
+                        </div>
+                        <p class="text-muted mt-1" style="font-size: 0.75rem;" id="balance-hint">
+                            Fund this wallet with testnet ETH to continue. Balance is checked automatically.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Import wallet section -->
+            <div id="wallet-import" class="hidden">
+                <div class="form-group">
+                    <label for="import_key">Private Key</label>
+                    <input type="password" id="import_key" name="import_key"
+                           placeholder="0x..." autocomplete="off">
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        64 hex characters (with or without 0x prefix)
+                    </p>
+                </div>
+                <button type="button" class="btn btn-secondary btn-small" onclick="validateImportKey()">
+                    Validate Key
+                </button>
+                <div id="import-status" class="hidden" style="margin-top: 0.5rem;"></div>
+            </div>
+        </div>
+
+        <!-- Contract Deployment -->
+        <div class="form-section">
+            <h3>Smart Contracts</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                BlockHost requires NFT and Subscription contracts for VM access control.
+            </p>
+
+            <div class="radio-group mb-2">
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="contract_mode" value="deploy" checked>
+                    <div class="radio-label">
+                        <h4>Deploy new contracts</h4>
+                        <p>Deploy fresh contracts (requires funded wallet)</p>
+                    </div>
+                </label>
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="contract_mode" value="existing">
+                    <div class="radio-label">
+                        <h4>Use existing contracts</h4>
+                        <p>Enter addresses of already-deployed contracts</p>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Existing contracts section -->
+            <div id="contracts-existing" class="hidden">
+                <div class="two-col">
+                    <div class="form-group">
+                        <label for="nft_contract">NFT Contract Address</label>
+                        <input type="text" id="nft_contract" name="nft_contract"
+                               placeholder="0x...">
+                    </div>
+                    <div class="form-group">
+                        <label for="subscription_contract">Subscriptions Contract Address</label>
+                        <input type="text" id="subscription_contract" name="subscription_contract"
+                               placeholder="0x...">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Deploy status (shown during deployment) -->
+            <div id="deploy-status" class="hidden" style="margin-top: 1rem;">
+                <div class="status-indicator loading">
+                    <div class="spinner"></div>
+                    <span id="deploy-status-text">Deploying contracts...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ url_for('wizard_storage') }}" class="btn btn-secondary">Back</a>
+            <button type="submit" class="btn btn-primary" id="continue-btn">Continue</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Toggle sections based on radio selection
+function selectRadio(element) {
+    const radio = element.querySelector('input[type="radio"]');
+    radio.checked = true;
+
+    // Update styling
+    const group = element.closest('.radio-group');
+    group.querySelectorAll('.radio-option').forEach(opt => opt.classList.remove('selected'));
+    element.classList.add('selected');
+
+    // Toggle visibility based on selection
+    if (radio.name === 'wallet_mode') {
+        document.getElementById('wallet-generate').classList.toggle('hidden', radio.value !== 'generate');
+        document.getElementById('wallet-import').classList.toggle('hidden', radio.value !== 'import');
+        // Clear the hidden deployer_key field when switching modes to prevent stale data
+        if (radio.value === 'import') {
+            document.getElementById('deployer-key-hidden').value = '';
+        }
+    } else if (radio.name === 'contract_mode') {
+        document.getElementById('contracts-existing').classList.toggle('hidden', radio.value !== 'existing');
+    }
+
+    // Update continue button state after any radio change
+    updateContinueButton();
+}
+
+// Update RPC endpoint when network changes
+function updateRpcEndpoint() {
+    const select = document.getElementById('chain_id');
+    const option = select.options[select.selectedIndex];
+    const rpcInput = document.getElementById('rpc_url');
+
+    if (option.value !== 'custom' && option.dataset.rpc) {
+        rpcInput.value = option.dataset.rpc;
+    }
+}
+
+// Generate new wallet
+async function generateWallet() {
+    const btn = document.getElementById('generate-btn');
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+
+    try {
+        const response = await fetch('/api/blockchain/generate-wallet', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            document.getElementById('deployer-address').textContent = data.address;
+            document.getElementById('deployer-private-key').textContent = data.private_key;
+            document.getElementById('deployer-key-hidden').value = data.private_key;
+            document.getElementById('wallet-generated').classList.remove('hidden');
+            btn.textContent = 'Regenerate';
+
+            // Reset balance and start checking
+            document.getElementById('wallet-balance').textContent = '0 ETH';
+            window.generatedAddress = data.address;
+            startBalancePolling();
+            updateContinueButton();
+        } else {
+            alert('Failed to generate wallet: ' + data.error);
+            btn.textContent = 'Generate Wallet';
+        }
+    } catch (error) {
+        alert('Error generating wallet: ' + error.message);
+        btn.textContent = 'Generate Wallet';
+    }
+
+    btn.disabled = false;
+}
+
+// Copy to clipboard with fallback for Firefox
+function copyToClipboard(elementId, btn) {
+    const text = document.getElementById(elementId).textContent;
+
+    // Try modern clipboard API first
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+            showCopySuccess(btn);
+        }).catch(() => {
+            // Fallback for Firefox/secure context issues
+            fallbackCopyToClipboard(text, btn);
+        });
+    } else {
+        // Fallback for older browsers
+        fallbackCopyToClipboard(text, btn);
+    }
+}
+
+// Fallback copy method using execCommand
+function fallbackCopyToClipboard(text, btn) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    try {
+        const successful = document.execCommand('copy');
+        if (successful) {
+            showCopySuccess(btn);
+        } else {
+            btn.textContent = 'Failed';
+            setTimeout(() => btn.textContent = 'Copy', 2000);
+        }
+    } catch (err) {
+        btn.textContent = 'Failed';
+        setTimeout(() => btn.textContent = 'Copy', 2000);
+    }
+
+    document.body.removeChild(textarea);
+}
+
+function showCopySuccess(btn) {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+}
+
+// Balance checking
+let balancePollingInterval = null;
+let currentBalance = 0;
+
+async function checkBalance() {
+    if (!window.generatedAddress) return;
+
+    const btn = document.getElementById('check-balance-btn');
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+
+    try {
+        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.generatedAddress)}`);
+        const data = await response.json();
+
+        if (data.success) {
+            currentBalance = parseFloat(data.balance) || 0;
+            document.getElementById('wallet-balance').textContent = `${data.balance_formatted || data.balance} ETH`;
+
+            if (currentBalance > 0) {
+                document.getElementById('balance-hint').textContent = 'Wallet funded! You can proceed with contract deployment.';
+                document.getElementById('balance-hint').style.color = 'var(--success)';
+                stopBalancePolling();
+            }
+            updateContinueButton();
+        }
+    } catch (error) {
+        console.error('Balance check error:', error);
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+}
+
+function startBalancePolling() {
+    stopBalancePolling();
+    checkBalance();
+    balancePollingInterval = setInterval(checkBalance, 10000); // Check every 10 seconds
+}
+
+function stopBalancePolling() {
+    if (balancePollingInterval) {
+        clearInterval(balancePollingInterval);
+        balancePollingInterval = null;
+    }
+}
+
+// Update continue button state based on balance and contract mode
+function updateContinueButton() {
+    const continueBtn = document.getElementById('continue-btn');
+    const contractMode = document.querySelector('input[name="contract_mode"]:checked')?.value;
+    const walletMode = document.querySelector('input[name="wallet_mode"]:checked')?.value;
+
+    // If using existing contracts, balance doesn't matter
+    if (contractMode === 'existing') {
+        continueBtn.disabled = false;
+        return;
+    }
+
+    // If importing wallet, check if validated and has balance (when deploying)
+    if (walletMode === 'import') {
+        const statusDiv = document.getElementById('import-status');
+        const isValidated = statusDiv && statusDiv.innerHTML.includes('Valid - Address');
+        if (!isValidated) {
+            continueBtn.disabled = true;
+            return;
+        }
+        // If deploying contracts, also need balance
+        if (contractMode === 'deploy') {
+            continueBtn.disabled = currentBalance <= 0;
+        } else {
+            continueBtn.disabled = false;
+        }
+        return;
+    }
+
+    // If deploying new contracts with generated wallet, need balance
+    if (walletMode === 'generate' && contractMode === 'deploy') {
+        const hasWallet = document.getElementById('deployer-key-hidden').value;
+        continueBtn.disabled = !hasWallet || currentBalance <= 0;
+    }
+}
+
+// Validate imported private key
+async function validateImportKey() {
+    const keyInput = document.getElementById('import_key');
+    const statusDiv = document.getElementById('import-status');
+
+    try {
+        const response = await fetch('/api/blockchain/validate-key', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({private_key: keyInput.value})
+        });
+
+        const data = await response.json();
+        statusDiv.classList.remove('hidden');
+
+        if (data.valid) {
+            statusDiv.innerHTML = `<div class="status-indicator success">Valid - Address: ${data.address}</div>`;
+            // Store the validated address for balance checking
+            window.importedAddress = data.address;
+            // Start checking balance
+            checkImportedBalance();
+        } else {
+            statusDiv.innerHTML = `<div class="status-indicator error">Invalid key: ${data.error}</div>`;
+        }
+    } catch (error) {
+        statusDiv.classList.remove('hidden');
+        statusDiv.innerHTML = `<div class="status-indicator error">Error: ${error.message}</div>`;
+    }
+
+    updateContinueButton();
+}
+
+// Check balance for imported wallet
+async function checkImportedBalance() {
+    if (!window.importedAddress) return;
+
+    const statusDiv = document.getElementById('import-status');
+
+    try {
+        const response = await fetch(`/api/blockchain/balance?address=${encodeURIComponent(window.importedAddress)}`);
+        const data = await response.json();
+
+        if (data.success) {
+            currentBalance = parseFloat(data.balance) || 0;
+            const balanceText = currentBalance > 0
+                ? `<span style="color: var(--success);">${data.balance_formatted} ETH</span>`
+                : `<span style="color: var(--warning);">0 ETH - fund wallet to deploy contracts</span>`;
+            statusDiv.innerHTML = `<div class="status-indicator success">Valid - Address: ${window.importedAddress}<br>Balance: ${balanceText}</div>`;
+            updateContinueButton();
+        }
+    } catch (error) {
+        console.error('Balance check error:', error);
+    }
+}
+
+// Form validation before submit
+document.getElementById('blockchain-form').addEventListener('submit', function(e) {
+    const walletMode = document.querySelector('input[name="wallet_mode"]:checked').value;
+    const contractMode = document.querySelector('input[name="contract_mode"]:checked').value;
+
+    // Validate wallet
+    if (walletMode === 'generate') {
+        const key = document.getElementById('deployer-key-hidden').value;
+        if (!key) {
+            e.preventDefault();
+            alert('Please generate a wallet first.');
+            return;
+        }
+
+        // Confirm user has saved private key
+        if (!confirm('Have you saved your private key?\n\nThis private key cannot be recovered later. Make sure you have copied and securely stored it before continuing.')) {
+            e.preventDefault();
+            return;
+        }
+
+        // Check balance if deploying new contracts
+        if (contractMode === 'deploy' && currentBalance <= 0) {
+            e.preventDefault();
+            alert('Please fund your wallet with testnet ETH before deploying contracts.\n\nIf you want to use existing contracts instead, select "Use existing contracts" above.');
+            return;
+        }
+    } else if (walletMode === 'import') {
+        const key = document.getElementById('import_key').value;
+        if (!key || key.length < 64) {
+            e.preventDefault();
+            alert('Please enter a valid private key.');
+            return;
+        }
+    }
+
+    // Validate contracts if using existing
+    if (contractMode === 'existing') {
+        const nft = document.getElementById('nft_contract').value;
+        const sub = document.getElementById('subscription_contract').value;
+        if (!nft || !sub || !nft.startsWith('0x') || !sub.startsWith('0x')) {
+            e.preventDefault();
+            alert('Please enter valid contract addresses.');
+            return;
+        }
+    }
+
+    // Stop balance polling when leaving page
+    stopBalancePolling();
+});
+
+// Initialize radio button styling
+document.querySelectorAll('input[type="radio"]:checked').forEach(radio => {
+    radio.closest('.radio-option')?.classList.add('selected');
+});
+
+// Update continue button when contract mode changes
+document.querySelectorAll('input[name="contract_mode"]').forEach(radio => {
+    radio.addEventListener('change', updateContinueButton);
+});
+
+document.querySelectorAll('input[name="wallet_mode"]').forEach(radio => {
+    radio.addEventListener('change', updateContinueButton);
+});
+
+// Initial state
+updateContinueButton();
+</script>
+{% endblock %}

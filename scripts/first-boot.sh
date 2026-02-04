@@ -16,6 +16,7 @@ STATE_DIR="/var/lib/blockhost"
 RUN_DIR="/run/blockhost"
 MARKER_FILE="${STATE_DIR}/.setup-complete"
 LOG_FILE="/var/log/blockhost-firstboot.log"
+CONSOLE="/dev/tty1"
 
 # Step markers
 STEP_HOSTNAME="${STATE_DIR}/.step-hostname"
@@ -23,8 +24,19 @@ STEP_PROXMOX="${STATE_DIR}/.step-proxmox"
 STEP_NETWORK="${STATE_DIR}/.step-network"
 STEP_OTP="${STATE_DIR}/.step-otp"
 
+# Trap SIGHUP to prevent premature termination from TTY issues
+trap '' HUP
+
+# Create directories early (needed for logging)
+mkdir -p "$STATE_DIR" "$RUN_DIR"
+
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$msg" >> "$LOG_FILE"
+    # Also output to console if available
+    if [ -e "$CONSOLE" ]; then
+        echo "$msg" > "$CONSOLE" 2>/dev/null || true
+    fi
 }
 
 # Check if already completed
@@ -33,15 +45,14 @@ if [ -f "$MARKER_FILE" ]; then
     exit 0
 fi
 
-# Wait for system to settle
-sleep 10
+log "First-boot script starting..."
 
 # Stop getty on tty1 so we can use the console exclusively
-# (Conflicts= in systemd should handle this, but belt and suspenders)
 systemctl stop getty@tty1.service 2>/dev/null || true
 
-# Create directories
-mkdir -p "$STATE_DIR" "$RUN_DIR"
+# Wait for system to settle
+log "Waiting for system to settle..."
+sleep 5
 
 log "=========================================="
 log "BlockHost First-Boot Starting"
@@ -181,6 +192,56 @@ else
 fi
 
 #
+# Step 2c: Install Foundry (for contract deployment)
+#
+STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
+if [ ! -f "$STEP_FOUNDRY" ]; then
+    log "Step 2c: Installing Foundry..."
+
+    if ! command -v cast &> /dev/null; then
+        log "Downloading Foundry binaries..."
+
+        # Download pre-built binaries directly (non-interactive)
+        FOUNDRY_DIR="/usr/local/lib/foundry"
+        mkdir -p "$FOUNDRY_DIR"
+
+        # Get latest release from GitHub
+        FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [ -z "$FOUNDRY_VERSION" ]; then
+            FOUNDRY_VERSION="nightly"
+        fi
+        log "Installing Foundry version: $FOUNDRY_VERSION"
+
+        # Download and extract
+        FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
+        log "Downloading from: $FOUNDRY_URL"
+
+        if curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz 2>&1; then
+            tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
+            rm /tmp/foundry.tar.gz
+
+            # Create symlinks in /usr/local/bin
+            for tool in forge cast anvil chisel; do
+                if [ -f "$FOUNDRY_DIR/$tool" ]; then
+                    chmod +x "$FOUNDRY_DIR/$tool"
+                    ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
+                    log "Installed: $tool"
+                fi
+            done
+        else
+            log "WARNING: Failed to download Foundry, contract deployment may fail"
+        fi
+    else
+        log "Foundry already installed: $(cast --version 2>/dev/null || echo 'unknown version')"
+    fi
+
+    touch "$STEP_FOUNDRY"
+    log "Step 2c complete - Foundry installed!"
+else
+    log "Step 2c: Foundry already installed, skipping."
+fi
+
+#
 # Step 3: Verify Network
 #
 if [ ! -f "$STEP_NETWORK" ]; then
@@ -291,10 +352,9 @@ else
 fi
 
 #
-# Display OTP on console
+# Display OTP on console via /etc/issue (persists with getty)
 #
-clear
-cat << EOF
+cat > /etc/issue << EOF
 
   ╔══════════════════════════════════════════════════════════════╗
   ║                   BlockHost Installer                        ║
@@ -319,16 +379,13 @@ cat << EOF
 
   Code expires in 4 hours. Max 10 attempts.
 
-  Web installer is running in background.
-  You can log in to this console as root.
-
 EOF
 
 log "Setup display complete. Web installer running at $URL"
 log "OTP: $OTP_CODE"
 
 # Restart getty on tty1 so user can log in
-# (Flask is running in background, so this is safe)
+# Getty will display /etc/issue above the login prompt
 systemctl start getty@tty1.service 2>/dev/null || true
 
 exit 0

@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+
+{% block title %}IPv6 Configuration - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Blockchain</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Proxmox</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step active">
+        <span class="step-number">5</span>
+        <span>IPv6</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">6</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>IPv6 Configuration</h2>
+    <p class="text-muted mb-2">Each VM requires a public IPv6 address for direct client access.</p>
+
+    <form id="ipv6-form" method="POST" action="{{ url_for('wizard_ipv6') }}">
+        <div class="alert alert-info mb-2">
+            <strong>Why IPv6?</strong> VMs are accessed directly by clients using IPv6 addresses.
+            This enables true decentralized hosting without NAT or port forwarding.
+        </div>
+
+        <!-- IPv6 Source Selection -->
+        <div class="form-section">
+            <h3>IPv6 Source</h3>
+
+            <div class="radio-group mb-2">
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="ipv6_mode" value="broker" checked>
+                    <div class="radio-label">
+                        <h4>Request from Broker Network</h4>
+                        <p>Automatically obtain an IPv6 prefix from the BlockHost broker network</p>
+                    </div>
+                </label>
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="ipv6_mode" value="manual">
+                    <div class="radio-label">
+                        <h4>Enter prefix manually</h4>
+                        <p>Use an IPv6 prefix you already own or control</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+
+        <!-- Broker Option -->
+        <div id="ipv6-broker" class="form-section">
+            <h3>Broker Configuration</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                The broker network provides IPv6 prefixes via WireGuard tunnels.
+                Allocation will be requested during the finalization step.
+            </p>
+
+            <div class="form-group">
+                <label for="broker_registry">Broker Registry Contract</label>
+                <input type="text" id="broker_registry" name="broker_registry"
+                       value="{{ broker_registry or '' }}"
+                       placeholder="0x...">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    The registry contract address on the selected blockchain network.
+                </p>
+                <button type="button" class="btn btn-small btn-secondary" onclick="fetchBrokerRegistry()" style="margin-top: 0.5rem;">
+                    Auto-fetch from GitHub
+                </button>
+            </div>
+
+            <div class="alert alert-info" style="margin-top: 1rem;">
+                <strong>Note:</strong> IPv6 allocation from the broker will be requested automatically
+                during the finalization step, after all packages are configured and contracts are deployed.
+            </div>
+
+            <!-- Hidden fields for form submission -->
+            <input type="hidden" name="broker_prefix" id="broker-prefix-hidden" value="">
+            <input type="hidden" name="broker_node" id="broker-node-hidden" value="">
+            <input type="hidden" name="broker_wg_config" id="broker-wg-hidden" value="">
+        </div>
+
+        <!-- Manual Option -->
+        <div id="ipv6-manual" class="form-section hidden">
+            <h3>Manual IPv6 Configuration</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                Enter an IPv6 prefix that you own or have been delegated.
+            </p>
+
+            <div class="form-group">
+                <label for="manual_prefix">IPv6 Prefix</label>
+                <input type="text" id="manual_prefix" name="manual_prefix"
+                       placeholder="2001:db8:1234::/48">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    You must have control over this prefix for routing to work.
+                </p>
+            </div>
+
+            <div class="form-group">
+                <label for="allocation_size">Allocation Size Per VM</label>
+                <select id="allocation_size" name="allocation_size">
+                    <option value="64">/64 (recommended - standard subnet)</option>
+                    <option value="128">/128 (single address per VM)</option>
+                    <option value="56">/56 (larger subnet, fewer VMs)</option>
+                </select>
+            </div>
+
+            <div class="alert alert-warning">
+                <strong>Note:</strong> You are responsible for ensuring proper routing of this prefix
+                to your server. This typically requires configuration at your upstream provider.
+            </div>
+        </div>
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ url_for('wizard_proxmox') }}" class="btn btn-secondary">Back</a>
+            <button type="submit" class="btn btn-primary" id="continue-btn">Continue</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Toggle sections based on radio selection
+function selectRadio(element) {
+    const radio = element.querySelector('input[type="radio"]');
+    radio.checked = true;
+
+    // Update styling
+    const group = element.closest('.radio-group');
+    group.querySelectorAll('.radio-option').forEach(opt => opt.classList.remove('selected'));
+    element.classList.add('selected');
+
+    // Toggle visibility based on selection
+    if (radio.name === 'ipv6_mode') {
+        document.getElementById('ipv6-broker').classList.toggle('hidden', radio.value !== 'broker');
+        document.getElementById('ipv6-manual').classList.toggle('hidden', radio.value !== 'manual');
+    }
+}
+
+// Fetch broker registry address from GitHub
+async function fetchBrokerRegistry() {
+    const chainId = '{{ session.get("blockchain", {}).get("chain_id", "11155111") }}';
+
+    try {
+        const response = await fetch(`/api/ipv6/broker-registry?chain_id=${chainId}`);
+        const data = await response.json();
+
+        if (data.success && data.registry) {
+            document.getElementById('broker_registry').value = data.registry;
+        } else {
+            alert('Could not fetch registry address: ' + (data.error || 'Registry not found for this chain'));
+        }
+    } catch (error) {
+        alert('Error fetching registry: ' + error.message);
+    }
+}
+
+// Validate form before submit
+document.getElementById('ipv6-form').addEventListener('submit', function(e) {
+    const mode = document.querySelector('input[name="ipv6_mode"]:checked').value;
+
+    if (mode === 'broker') {
+        const registry = document.getElementById('broker_registry').value;
+        if (!registry || !registry.startsWith('0x') || registry.length !== 42) {
+            e.preventDefault();
+            alert('Please enter a valid broker registry contract address.');
+            return;
+        }
+    } else if (mode === 'manual') {
+        const prefix = document.getElementById('manual_prefix').value;
+        // Basic IPv6 prefix validation
+        const ipv6Regex = /^([0-9a-fA-F:]+)\/(\d{1,3})$/;
+        if (!prefix || !ipv6Regex.test(prefix)) {
+            e.preventDefault();
+            alert('Please enter a valid IPv6 prefix (e.g., 2001:db8::/48).');
+            return;
+        }
+    }
+});
+
+// Initialize radio button styling
+document.querySelectorAll('input[type="radio"]:checked').forEach(radio => {
+    radio.closest('.radio-option')?.classList.add('selected');
+});
+</script>
+{% endblock %}

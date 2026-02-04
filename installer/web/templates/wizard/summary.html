@@ -17,63 +17,673 @@
     <div class="step-connector completed"></div>
     <div class="step completed">
         <span class="step-number">&#10003;</span>
-        <span>Packages</span>
+        <span>Blockchain</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Proxmox</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>IPv6</span>
     </div>
     <div class="step-connector completed"></div>
     <div class="step active">
-        <span class="step-number">4</span>
+        <span class="step-number">6</span>
         <span>Summary</span>
     </div>
 </div>
 
-<div class="card">
-    <h2>Installation Summary</h2>
-    <p class="text-muted mb-2">Review your configuration before proceeding.</p>
+<div class="card" id="summary-card">
+    <h2>Configuration Summary</h2>
+    <p class="text-muted mb-2">Review your configuration before finalizing setup.</p>
 
-    <table>
-        <tbody>
-            <tr>
-                <th style="width: 200px;">Network</th>
-                <td>
-                    IP: <strong>{{ summary.network.ip or 'Not configured' }}</strong><br>
-                    Gateway: {{ summary.network.gateway or 'N/A' }}
-                </td>
-            </tr>
-            <tr>
-                <th>Target Disk</th>
-                <td><strong>{{ summary.disk }}</strong></td>
-            </tr>
-            <tr>
-                <th>Packages</th>
-                <td>
-                    {% if summary.packages %}
-                    {% for pkg in summary.packages %}
-                    <span style="background: var(--bg-input); padding: 0.25rem 0.5rem; border-radius: 0.25rem; margin-right: 0.5rem;">{{ pkg }}</span>
-                    {% endfor %}
-                    {% else %}
-                    <em class="text-muted">None selected</em>
-                    {% endif %}
-                </td>
-            </tr>
-        </tbody>
-    </table>
-
-    <div class="alert alert-error" style="margin-top: 2rem;">
-        <strong>Warning:</strong> All data on {{ summary.disk }} will be permanently erased.
-        This action cannot be undone.
+    <!-- Network Summary -->
+    <div class="summary-section">
+        <h3>Network</h3>
+        <div class="summary-item">
+            <span class="summary-label">IP Address</span>
+            <span class="summary-value">{{ summary.network.ip or 'Not configured' }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Gateway</span>
+            <span class="summary-value">{{ summary.network.gateway or 'N/A' }}</span>
+        </div>
     </div>
 
-    <form method="POST" action="{{ url_for('wizard_summary') }}">
+    <!-- Blockchain Summary -->
+    <div class="summary-section">
+        <h3>Blockchain</h3>
+        <div class="summary-item">
+            <span class="summary-label">Network</span>
+            <span class="summary-value">{{ summary.blockchain.network_name }} (Chain ID: {{ summary.blockchain.chain_id }})</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">RPC Endpoint</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.rpc_url | truncate(50) }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Deployer Address</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.deployer_address }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Contracts</span>
+            <span class="summary-value">{{ 'Deploy new' if summary.blockchain.deploy_contracts else 'Use existing' }}</span>
+        </div>
+        {% if not summary.blockchain.deploy_contracts %}
+        <div class="summary-item">
+            <span class="summary-label">NFT Contract</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.nft_contract }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Subscriptions</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.subscription_contract }}</span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Proxmox Summary -->
+    <div class="summary-section">
+        <h3>Proxmox</h3>
+        <div class="summary-item">
+            <span class="summary-label">Node</span>
+            <span class="summary-value">{{ summary.proxmox.node }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Storage</span>
+            <span class="summary-value">{{ summary.proxmox.storage }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Network Bridge</span>
+            <span class="summary-value">{{ summary.proxmox.bridge }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">VMID Range</span>
+            <span class="summary-value">{{ summary.proxmox.vmid_start }} - {{ summary.proxmox.vmid_end }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">IP Pool</span>
+            <span class="summary-value">{{ summary.proxmox.ip_start }} - {{ summary.proxmox.ip_end }}</span>
+        </div>
+    </div>
+
+    <!-- IPv6 Summary -->
+    <div class="summary-section">
+        <h3>IPv6</h3>
+        <div class="summary-item">
+            <span class="summary-label">Source</span>
+            <span class="summary-value">{{ 'Broker Network' if summary.ipv6.mode == 'broker' else 'Manual' }}</span>
+        </div>
+        {% if summary.ipv6.mode == 'broker' %}
+        <div class="summary-item">
+            <span class="summary-label">Broker Registry</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.ipv6.broker_registry or 'Will be fetched' }}</span>
+        </div>
+        {% else %}
+        <div class="summary-item">
+            <span class="summary-label">Prefix</span>
+            <span class="summary-value">{{ summary.ipv6.prefix }}</span>
+        </div>
+        {% endif %}
+    </div>
+
+    <form method="POST" action="{{ url_for('wizard_summary') }}" id="summary-form">
         <div class="flex justify-between" style="margin-top: 2rem;">
-            <a href="{{ url_for('wizard_packages') }}" class="btn btn-secondary">Back</a>
+            <a href="{{ url_for('wizard_ipv6') }}" class="btn btn-secondary">Back</a>
             <div>
                 <button type="submit" name="confirm" value="no" class="btn btn-secondary">Cancel</button>
-                <button type="submit" name="confirm" value="yes" class="btn btn-primary"
-                        onclick="return confirm('Are you sure you want to proceed? All data on the selected disk will be erased.')">
-                    Install
+                <button type="submit" name="confirm" value="yes" class="btn btn-primary" id="finalize-btn">
+                    Finalize Setup
                 </button>
             </div>
         </div>
     </form>
 </div>
+
+<!-- Progress Card (shown during finalization) -->
+<div class="card hidden" id="progress-card" style="max-width: 700px; margin: 0 auto;">
+    <h2>Finalizing Setup</h2>
+    <p class="text-muted mb-2">Please wait while BlockHost is configured. This may take several minutes.</p>
+
+    <div style="margin: 2rem 0;">
+        <div id="progress-bar" style="background: var(--bg-input); border-radius: 0.5rem; height: 1.5rem; overflow: hidden;">
+            <div id="progress-fill" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.5s;"></div>
+        </div>
+        <div id="progress-text" class="mt-1 text-center">0%</div>
+    </div>
+
+    <ul class="progress-list" id="progress-steps">
+        <li id="step-keypair" data-step="keypair">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Generate server keypair</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('keypair')">Retry</button>
+        </li>
+        <li id="step-wallet" data-step="wallet">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Configure deployer wallet</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('wallet')">Retry</button>
+        </li>
+        <li id="step-contracts" data-step="contracts">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name" id="step-contracts-text">Deploy smart contracts</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('contracts')">Retry</button>
+        </li>
+        <li id="step-config" data-step="config">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Write configuration files</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('config')">Retry</button>
+        </li>
+        <li id="step-token" data-step="token">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Create Proxmox API token</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('token')">Retry</button>
+        </li>
+        <li id="step-ipv6" data-step="ipv6">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Configure IPv6</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('ipv6')">Retry</button>
+        </li>
+        <li id="step-template" data-step="template">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Build VM template</span>
+                <span class="step-status"></span>
+                <span class="step-hint">(this may take several minutes)</span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('template')">Retry</button>
+        </li>
+        <li id="step-services" data-step="services">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Start blockhost-engine</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('services')">Retry</button>
+        </li>
+        <li id="step-finalize" data-step="finalize">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Finalize setup</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('finalize')">Retry</button>
+        </li>
+    </ul>
+
+    <div id="error-section" class="hidden" style="margin-top: 2rem;">
+        <div class="alert alert-error">
+            <strong>Step failed:</strong> <span id="error-step-name"></span>
+            <p id="error-message" style="margin-top: 0.5rem; font-family: monospace; font-size: 0.85rem;"></p>
+        </div>
+        <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary" onclick="retryFailed()">Retry Failed Step</button>
+            <button class="btn btn-secondary" onclick="resetAndRestart()">Start Over</button>
+        </div>
+    </div>
+
+    <div id="resume-section" class="hidden" style="margin-top: 2rem;">
+        <div class="alert alert-info">
+            <strong>Previous setup incomplete.</strong> You can resume from where you left off.
+        </div>
+        <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary" onclick="resumeSetup()">Resume Setup</button>
+            <button class="btn btn-secondary" onclick="resetAndRestart()">Start Over</button>
+        </div>
+    </div>
+</div>
+
+<!-- Completion Card -->
+<div class="card hidden" id="completion-card" style="max-width: 600px; margin: 0 auto; text-align: center;">
+    <h2 class="text-success">Setup Complete!</h2>
+    <p class="text-muted mb-2">BlockHost has been configured successfully.</p>
+
+    <div class="alert alert-success" style="margin: 2rem 0;">
+        <strong>Important:</strong> The system is now operational. VMs will be provisioned automatically
+        when users purchase subscriptions on the blockchain.
+    </div>
+
+    <div class="summary-section" style="text-align: left;">
+        <h3>What's Next?</h3>
+        <ul style="list-style: disc; padding-left: 1.5rem; color: var(--text-muted);">
+            <li>Access Proxmox VE at <a href="https://{{ request.host.split(':')[0] }}:8006" style="color: var(--primary);">https://{{ request.host.split(':')[0] }}:8006</a></li>
+            <li>The blockhost-engine is monitoring the blockchain for subscription events</li>
+            <li>VMs will be created automatically when subscriptions are purchased</li>
+            <li>Users connect to their VMs using NFT-based authentication</li>
+        </ul>
+    </div>
+
+    <div style="margin-top: 2rem;">
+        <button onclick="reboot()" class="btn btn-primary">Reboot System</button>
+        <a href="https://{{ request.host.split(':')[0] }}:8006" class="btn btn-secondary" style="margin-left: 0.5rem;">
+            Open Proxmox
+        </a>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.progress-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.progress-list li {
+    display: flex;
+    align-items: flex-start;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+    gap: 0.75rem;
+}
+
+.progress-list li:last-child {
+    border-bottom: none;
+}
+
+.step-icon {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 1rem;
+}
+
+.step-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.step-name {
+    font-weight: 500;
+}
+
+.step-status {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+.step-hint {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.progress-list li.completed .step-icon {
+    color: var(--success);
+}
+
+.progress-list li.in-progress .step-icon {
+    color: var(--primary);
+}
+
+.progress-list li.failed .step-icon {
+    color: var(--danger);
+}
+
+.progress-list li.failed .step-status {
+    color: var(--danger);
+}
+
+.btn-retry {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    background: var(--warning);
+    border-color: var(--warning);
+}
+
+.btn-retry:hover {
+    background: #d97706;
+}
+
+.spinner-small {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--primary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let pollInterval;
+const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'ipv6', 'template', 'services', 'finalize'];
+const stepNames = {
+    'keypair': 'Generate server keypair',
+    'wallet': 'Configure deployer wallet',
+    'contracts': 'Deploy smart contracts',
+    'config': 'Write configuration files',
+    'token': 'Create Proxmox API token',
+    'ipv6': 'Configure IPv6',
+    'template': 'Build VM template',
+    'services': 'Start blockhost-engine',
+    'finalize': 'Finalize setup'
+};
+
+// Check for existing state on page load
+document.addEventListener('DOMContentLoaded', function() {
+    checkExistingState();
+});
+
+function checkExistingState() {
+    fetch('/api/finalize/status')
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'completed') {
+            // Already complete, show completion
+            showCompletion();
+        } else if (data.status === 'running') {
+            // Currently running, show progress and poll
+            showProgressCard();
+            updateProgress(data);
+            startPolling();
+        } else if (data.status === 'failed') {
+            // Failed, show progress with error
+            showProgressCard();
+            updateProgress(data);
+            showError(data.failed_step, data.error);
+        } else if (data.completed_steps && data.completed_steps.length > 0) {
+            // Partially complete, offer to resume
+            showProgressCard();
+            updateProgress(data);
+            document.getElementById('resume-section').classList.remove('hidden');
+        }
+        // Otherwise, show summary card (default)
+    })
+    .catch(error => {
+        console.error('Error checking state:', error);
+        // Show summary card on error
+    });
+}
+
+// Handle form submission
+document.getElementById('summary-form').addEventListener('submit', function(e) {
+    if (e.submitter.value !== 'yes') return;
+
+    e.preventDefault();
+    startFinalization();
+});
+
+function showProgressCard() {
+    document.getElementById('summary-card').classList.add('hidden');
+    document.getElementById('progress-card').classList.remove('hidden');
+
+    // Update contracts step text based on mode
+    {% if not summary.blockchain.deploy_contracts %}
+    document.getElementById('step-contracts-text').textContent = 'Verify contract addresses';
+    {% endif %}
+}
+
+function startFinalization() {
+    showProgressCard();
+
+    // Start the finalization process
+    fetch('/api/finalize', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'running' || data.status === 'completed') {
+            startPolling();
+        } else if (data.error) {
+            showError(null, data.error);
+        }
+    })
+    .catch(error => {
+        showError(null, error.message);
+    });
+}
+
+function resumeSetup() {
+    document.getElementById('resume-section').classList.add('hidden');
+    document.getElementById('error-section').classList.add('hidden');
+
+    fetch('/api/finalize/retry', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'running') {
+            startPolling();
+        } else if (data.error) {
+            showError(null, data.error);
+        }
+    })
+    .catch(error => {
+        showError(null, error.message);
+    });
+}
+
+function retryStep(stepId) {
+    document.getElementById('error-section').classList.add('hidden');
+
+    // Reset step UI
+    const li = document.getElementById('step-' + stepId);
+    li.classList.remove('failed');
+    li.querySelector('.step-status').textContent = '';
+    li.querySelector('.btn-retry').classList.add('hidden');
+
+    fetch('/api/finalize/retry', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({step_id: stepId})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'running') {
+            startPolling();
+        } else if (data.error) {
+            showError(stepId, data.error);
+        }
+    })
+    .catch(error => {
+        showError(stepId, error.message);
+    });
+}
+
+function retryFailed() {
+    document.getElementById('error-section').classList.add('hidden');
+
+    fetch('/api/finalize/retry', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'running') {
+            startPolling();
+        } else if (data.error) {
+            showError(null, data.error);
+        }
+    })
+    .catch(error => {
+        showError(null, error.message);
+    });
+}
+
+function resetAndRestart() {
+    if (!confirm('This will reset all progress and start the configuration from the beginning. Continue?')) {
+        return;
+    }
+
+    fetch('/api/finalize/reset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(response => response.json())
+    .then(data => {
+        // Reset UI
+        stepOrder.forEach(step => {
+            const li = document.getElementById('step-' + step);
+            li.classList.remove('completed', 'in-progress', 'failed');
+            li.querySelector('.step-icon').innerHTML = '&#9675;';
+            li.querySelector('.step-status').textContent = '';
+            li.querySelector('.btn-retry').classList.add('hidden');
+        });
+
+        document.getElementById('progress-fill').style.width = '0%';
+        document.getElementById('progress-text').textContent = '0%';
+        document.getElementById('error-section').classList.add('hidden');
+        document.getElementById('resume-section').classList.add('hidden');
+
+        // Start fresh
+        startFinalization();
+    })
+    .catch(error => {
+        alert('Error resetting state: ' + error.message);
+    });
+}
+
+function startPolling() {
+    stopPolling();
+    pollInterval = setInterval(pollStatus, 2000);
+    pollStatus(); // Immediate first poll
+}
+
+function stopPolling() {
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+}
+
+function pollStatus() {
+    fetch('/api/finalize/status')
+    .then(response => response.json())
+    .then(data => {
+        updateProgress(data);
+
+        if (data.status === 'completed') {
+            stopPolling();
+            showCompletion();
+        } else if (data.status === 'failed') {
+            stopPolling();
+            showError(data.failed_step, data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Poll error:', error);
+        // Don't stop polling on transient errors
+    });
+}
+
+function updateProgress(data) {
+    // Update progress bar
+    const percent = data.progress || 0;
+    document.getElementById('progress-fill').style.width = percent + '%';
+    document.getElementById('progress-text').textContent = percent + '%';
+
+    // Update step indicators
+    const currentStep = data.current_step;
+    const completedSteps = data.completed_steps || [];
+    const steps = data.steps || {};
+
+    stepOrder.forEach(stepId => {
+        const li = document.getElementById('step-' + stepId);
+        const icon = li.querySelector('.step-icon');
+        const status = li.querySelector('.step-status');
+        const retryBtn = li.querySelector('.btn-retry');
+        const stepData = steps[stepId] || {};
+
+        // Reset classes
+        li.classList.remove('completed', 'in-progress', 'failed');
+        retryBtn.classList.add('hidden');
+
+        if (stepData.status === 'completed' || completedSteps.includes(stepId)) {
+            li.classList.add('completed');
+            icon.innerHTML = '&#10003;';
+            status.textContent = stepData.completed_at ? 'Completed' : '';
+        } else if (stepData.status === 'in_progress' || stepId === currentStep) {
+            li.classList.add('in-progress');
+            icon.innerHTML = '<div class="spinner-small"></div>';
+            status.textContent = 'Running...';
+        } else if (stepData.status === 'failed') {
+            li.classList.add('failed');
+            icon.innerHTML = '&#10007;';
+            status.textContent = stepData.error || 'Failed';
+            retryBtn.classList.remove('hidden');
+        } else {
+            icon.innerHTML = '&#9675;';
+            status.textContent = '';
+        }
+    });
+}
+
+function showCompletion() {
+    stopPolling();
+    document.getElementById('progress-card').classList.add('hidden');
+    document.getElementById('completion-card').classList.remove('hidden');
+
+    // Mark setup complete (redundant but ensures marker exists)
+    fetch('/api/complete', {method: 'POST'});
+}
+
+function showError(stepId, message) {
+    const errorSection = document.getElementById('error-section');
+    const errorStepName = document.getElementById('error-step-name');
+    const errorMessage = document.getElementById('error-message');
+
+    errorSection.classList.remove('hidden');
+    errorStepName.textContent = stepId ? stepNames[stepId] : 'Unknown step';
+    errorMessage.textContent = message || 'Unknown error occurred';
+
+    // Show retry button on the failed step
+    if (stepId) {
+        const li = document.getElementById('step-' + stepId);
+        if (li) {
+            li.querySelector('.btn-retry').classList.remove('hidden');
+        }
+    }
+}
+
+function reboot() {
+    if (!confirm('This will reboot the system. Continue?')) {
+        return;
+    }
+
+    fetch('/api/reboot', {method: 'POST'})
+    .then(() => {
+        alert('System is rebooting. You will need to reconnect after reboot completes.');
+    })
+    .catch(error => {
+        alert('Reboot failed: ' + error.message);
+    });
+}
+</script>
 {% endblock %}
