@@ -30,8 +30,13 @@
         <span>IPv6</span>
     </div>
     <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Admin</span>
+    </div>
+    <div class="step-connector completed"></div>
     <div class="step active">
-        <span class="step-number">6</span>
+        <span class="step-number">7</span>
         <span>Summary</span>
     </div>
 </div>
@@ -133,9 +138,32 @@
         {% endif %}
     </div>
 
+    <!-- Admin Summary -->
+    <div class="summary-section">
+        <h3>Admin Commands</h3>
+        <div class="summary-item">
+            <span class="summary-label">Admin Wallet</span>
+            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.admin.wallet }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Admin Commands</span>
+            <span class="summary-value">{{ 'Enabled' if summary.admin.enabled else 'Disabled' }}</span>
+        </div>
+        {% if summary.admin.enabled %}
+        <div class="summary-item">
+            <span class="summary-label">Destination Mode</span>
+            <span class="summary-value">{{ summary.admin.destination_mode }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Commands Configured</span>
+            <span class="summary-value">{{ summary.admin.command_count }}</span>
+        </div>
+        {% endif %}
+    </div>
+
     <form method="POST" action="{{ url_for('wizard_summary') }}" id="summary-form">
         <div class="flex justify-between" style="margin-top: 2rem;">
-            <a href="{{ url_for('wizard_ipv6') }}" class="btn btn-secondary">Back</a>
+            <a href="{{ url_for('wizard_admin_commands') }}" class="btn btn-secondary">Back</a>
             <div>
                 <button type="submit" name="confirm" value="no" class="btn btn-secondary">Cancel</button>
                 <button type="submit" name="confirm" value="yes" class="btn btn-primary" id="finalize-btn">

@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Wallet - BlockHost Installer{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width: 560px; margin: 2rem auto;">
+    <h2>Admin Wallet</h2>
+    <p class="text-muted mb-2">
+        Connect your Ethereum wallet to identify yourself as the administrator of this BlockHost instance.
+        This is required before proceeding with setup.
+    </p>
+
+    <!-- Step 1: Connect -->
+    <div class="form-section" id="section-connect">
+        <h3>Connect Wallet</h3>
+        <div id="no-wallet" class="hidden">
+            <div class="alert alert-error">
+                No Ethereum wallet detected. Please install MetaMask or another browser wallet.
+            </div>
+        </div>
+        <div id="wallet-disconnected">
+            <button type="button" class="btn btn-primary" id="btn-connect" style="width: 100%;">
+                Connect Wallet
+            </button>
+        </div>
+        <div id="wallet-connected" class="hidden">
+            <div class="address-box">
+                <span id="wallet-address" style="flex: 1;">-</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Step 2: Sign (shown after connect) -->
+    <div class="form-section hidden" id="section-sign">
+        <h3>Sign Authentication</h3>
+        <p class="text-muted mb-2" style="font-size: 0.875rem;">
+            Sign a message to create your admin credentials. This signature will be used to encrypt
+            your access details into NFT #0.
+        </p>
+        <div style="margin-bottom: 1rem;">
+            <label>Message to sign</label>
+            <div class="address-box">
+                <span id="decrypt-message-display" style="font-size: 0.8rem;">-</span>
+            </div>
+        </div>
+        <button type="button" class="btn btn-primary" id="btn-sign" style="width: 100%;">
+            Sign Message
+        </button>
+        <div id="sign-status"></div>
+    </div>
+
+    <!-- Step 3: Confirmed (shown after sign) -->
+    <div class="form-section hidden" id="section-confirmed">
+        <h3>Admin Identity Confirmed</h3>
+        <div class="alert alert-success">
+            Wallet connected and signature captured. Your admin credentials are ready.
+        </div>
+        <div style="margin-top: 1rem;">
+            <div class="summary-item">
+                <span class="summary-label">Admin Wallet</span>
+                <span class="summary-value" id="confirmed-address" style="font-size: 0.8rem;">-</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden form for POST -->
+    <form method="POST" action="{{ url_for('wizard_wallet') }}" id="wallet-form" class="hidden">
+        <input type="hidden" name="admin_wallet" id="input-wallet">
+        <input type="hidden" name="admin_signature" id="input-signature">
+        <input type="hidden" name="decrypt_message" id="input-decrypt-message">
+    </form>
+
+    <div class="flex justify-between" style="margin-top: 2rem;">
+        <span></span>
+        <button type="button" class="btn btn-primary" id="btn-continue" disabled onclick="submitForm()">
+            Continue to Setup
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const $ = id => document.getElementById(id);
+let adminAddress = null;
+let adminSignature = null;
+let decryptMessage = null;
+
+// Generate a nonce for the decrypt message
+function generateNonce() {
+    const arr = new Uint8Array(8);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// EIP-55 checksum address
+function toChecksumAddress(address) {
+    // We'll rely on the wallet returning checksummed address
+    // but fall back to lowercase if needed
+    return address;
+}
+
+// Connect wallet
+$('btn-connect').addEventListener('click', async () => {
+    if (!window.ethereum) {
+        $('no-wallet').classList.remove('hidden');
+        $('wallet-disconnected').classList.add('hidden');
+        return;
+    }
+
+    try {
+        $('btn-connect').disabled = true;
+        $('btn-connect').textContent = 'Connecting...';
+
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        adminAddress = accounts[0];
+
+        // Display connected wallet
+        $('wallet-address').textContent = adminAddress;
+        $('wallet-disconnected').classList.add('hidden');
+        $('wallet-connected').classList.remove('hidden');
+
+        // Generate decrypt message
+        const nonce = generateNonce();
+        decryptMessage = 'libpam-web3:' + adminAddress + ':' + nonce;
+        $('decrypt-message-display').textContent = decryptMessage;
+
+        // Show sign section
+        $('section-sign').classList.remove('hidden');
+
+    } catch (e) {
+        $('btn-connect').disabled = false;
+        $('btn-connect').textContent = 'Connect Wallet';
+        console.error('Connect error:', e);
+    }
+});
+
+// Sign message
+$('btn-sign').addEventListener('click', async () => {
+    try {
+        $('btn-sign').disabled = true;
+        $('btn-sign').textContent = 'Waiting for signature...';
+
+        adminSignature = await window.ethereum.request({
+            method: 'personal_sign',
+            params: [decryptMessage, adminAddress]
+        });
+
+        // Update UI
+        $('section-sign').classList.add('hidden');
+        $('section-confirmed').classList.remove('hidden');
+        $('confirmed-address').textContent = adminAddress;
+
+        // Fill hidden form
+        $('input-wallet').value = adminAddress;
+        $('input-signature').value = adminSignature;
+        $('input-decrypt-message').value = decryptMessage;
+
+        // Enable continue
+        $('btn-continue').disabled = false;
+
+    } catch (e) {
+        $('btn-sign').disabled = false;
+        $('btn-sign').textContent = 'Sign Message';
+        $('sign-status').innerHTML = '<div class="alert alert-error" style="margin-top: 0.5rem;">' + e.message + '</div>';
+        console.error('Sign error:', e);
+    }
+});
+
+function submitForm() {
+    $('wallet-form').submit();
+}
+
+// Auto-connect if already connected
+if (window.ethereum && window.ethereum.selectedAddress) {
+    $('btn-connect').click();
+}
+</script>
+{% endblock %}

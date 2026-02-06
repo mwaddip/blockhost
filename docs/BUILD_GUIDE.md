@@ -471,15 +471,17 @@ The `libpam-web3` package is stored at `/var/lib/blockhost/template-packages/` a
 
 After first-boot installs Proxmox VE and BlockHost packages, the web wizard guides users through package configuration. This section documents the wizard steps and configuration files created.
 
-### Wizard Flow (6 Steps)
+### Wizard Flow (7 Steps + Wallet Gate)
 
 ```
+[OTP Login] → [Wallet Gate: Connect MetaMask + Sign]
 1. Network     → DHCP or static IP
 2. Storage     → Disk selection
 3. Blockchain  → Chain, wallet, contracts
 4. Proxmox     → Storage, bridge, VM pools
 5. IPv6        → Broker or manual prefix
-6. Summary     → Review and finalize
+6. Admin       → Admin commands, port knock config
+7. Summary     → Review and finalize
 ```
 
 ### Step 3: Blockchain Configuration
@@ -1985,3 +1987,99 @@ python3 validate_system.py
 ```
 
 This runs regardless of testing mode and outputs a detailed report.
+
+## Wizard Updates (2026-02-06) - Admin Wallet & Commands
+
+### Overview
+
+Added mandatory admin wallet connection gate after OTP login, and a new Admin Commands
+wizard step for configuring blockchain-based port knocking and future admin commands.
+
+### Changes Made
+
+#### 1. Admin Wallet Gate (Post-OTP)
+
+After OTP login, admin must connect MetaMask and sign a decrypt message before proceeding
+to the wizard. This captures:
+- Admin wallet address (stored in session and config)
+- Signature (used to derive AES key for NFT #0 encryption)
+- Decrypt message (format: `libpam-web3:<address>:<nonce>`)
+
+**New file**: `installer/web/templates/wizard/wallet.html`
+
+**Route**: `GET/POST /wizard/wallet` (no step bar - pre-wizard gate)
+
+**Redirect chain**: OTP success → `/wizard/wallet` → `/wizard/network`
+
+#### 2. Admin Commands Wizard Step (Step 6)
+
+New wizard step between IPv6 and Summary for configuring on-chain admin commands.
+
+**New file**: `installer/web/templates/wizard/admin_commands.html`
+
+**Route**: `GET/POST /wizard/admin-commands`
+
+**User Inputs**:
+| Setting | Default | Description |
+|---------|---------|-------------|
+| admin_enabled | yes | Enable/disable admin commands |
+| destination_mode | self | How to filter admin transactions (any/self/server/null) |
+| knock_command | random hex | Secret command name for port knocking |
+| knock_ports | 22, 8006 | Ports to open on knock |
+| knock_timeout | 300 | Seconds to wait for login before closing ports |
+| knock_max_duration | 600 | Max time ports stay open after login |
+
+#### 3. Config File Generation
+
+**`/etc/blockhost/blockhost.yaml`** now includes:
+```yaml
+admin:
+  wallet_address: "0x..."
+  max_command_age: 300
+  destination_mode: "self"
+```
+
+**`/etc/blockhost/admin-commands.json`** (new file):
+```json
+{
+  "commands": {
+    "<secret_name>": {
+      "action": "knock",
+      "description": "Open SSH and Proxmox ports temporarily",
+      "params": {
+        "allowed_ports": [22, 8006],
+        "max_duration": 600,
+        "default_duration": 300
+      }
+    }
+  }
+}
+```
+
+**`/etc/blockhost/admin-signature.key`** (new file):
+Admin's raw signature, used during install to encrypt connection details
+into NFT #0 via `keccak256(signature)` → AES-256-GCM key.
+
+#### 4. Step Bar Updates
+
+All wizard templates updated from 6 steps to 7 (added "Admin" at position 6,
+Summary moved to 7).
+
+**Files modified**:
+- `installer/web/templates/wizard/network.html` - Step bar
+- `installer/web/templates/wizard/storage.html` - Step bar
+- `installer/web/templates/wizard/blockchain.html` - Step bar
+- `installer/web/templates/wizard/proxmox.html` - Step bar
+- `installer/web/templates/wizard/ipv6.html` - Step bar
+- `installer/web/templates/wizard/summary.html` - Step bar + admin summary section + back button
+- `installer/web/app.py` - Routes, redirects, config generation
+
+#### 5. Engine Submodule Update
+
+Updated `blockhost-engine` submodule to include:
+- NFT decryption on signup page (auto-populate from wallet, offline/paranoid mode)
+- Admin command infrastructure (monitor, command database, knock handler)
+
+Config format coordinated between installer and engine:
+- Engine reads `admin.wallet_address` from `blockhost.yaml`
+- Engine reads command definitions from `admin-commands.json`

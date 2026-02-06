@@ -232,6 +232,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
     def index():
         """Redirect to login or wizard."""
         if session.get('authenticated'):
+            # If wallet not yet connected, go to wallet gate first
+            if not session.get('admin_wallet'):
+                return redirect(url_for('wizard_wallet'))
             return redirect(url_for('wizard_network'))
         return redirect(url_for('login'))
 
@@ -239,6 +242,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
     def login():
         """OTP login page."""
         if session.get('authenticated'):
+            if not session.get('admin_wallet'):
+                return redirect(url_for('wizard_wallet'))
             return redirect(url_for('wizard_network'))
 
         error = None
@@ -253,7 +258,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     session['authenticated'] = True
                     session.permanent = True
                     flash('Authentication successful', 'success')
-                    return redirect(url_for('wizard_network'))
+                    return redirect(url_for('wizard_wallet'))
                 else:
                     error = message
 
@@ -268,6 +273,31 @@ def create_app(config: Optional[dict] = None) -> Flask:
         return redirect(url_for('login'))
 
     # Wizard routes
+    @app.route('/wizard/wallet', methods=['GET', 'POST'])
+    @require_auth
+    def wizard_wallet():
+        """Admin wallet connection gate - mandatory before wizard."""
+        if request.method == 'POST':
+            admin_wallet = request.form.get('admin_wallet', '').strip()
+            admin_signature = request.form.get('admin_signature', '').strip()
+            decrypt_message = request.form.get('decrypt_message', '').strip()
+
+            if not admin_wallet or not admin_wallet.startswith('0x') or len(admin_wallet) != 42:
+                flash('Invalid wallet address', 'error')
+                return redirect(url_for('wizard_wallet'))
+
+            if not admin_signature or not admin_signature.startswith('0x'):
+                flash('Missing signature', 'error')
+                return redirect(url_for('wizard_wallet'))
+
+            session['admin_wallet'] = admin_wallet
+            session['admin_signature'] = admin_signature
+            session['admin_decrypt_message'] = decrypt_message
+            return redirect(url_for('wizard_network'))
+
+        # If wallet already connected, allow re-doing or skip
+        return render_template('wizard/wallet.html')
+
     @app.route('/wizard/network', methods=['GET', 'POST'])
     @require_auth
     def wizard_network():
@@ -416,11 +446,46 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'allocation_size': request.form.get('allocation_size'),
                 })
 
-            return redirect(url_for('wizard_summary'))
+            return redirect(url_for('wizard_admin_commands'))
 
         return render_template('wizard/ipv6.html',
                              broker_registry=broker_registry,
-                             step=5, total_steps=6)
+                             step=5, total_steps=7)
+
+    @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
+    @require_auth
+    def wizard_admin_commands():
+        """Admin commands configuration step."""
+        if request.method == 'POST':
+            admin_enabled = request.form.get('admin_enabled') == 'yes'
+
+            admin_commands = {
+                'enabled': admin_enabled,
+            }
+
+            if admin_enabled:
+                # Parse ports
+                ports_str = request.form.get('knock_ports', '22, 8006')
+                ports = [int(p.strip()) for p in ports_str.split(',') if p.strip().isdigit()]
+
+                admin_commands.update({
+                    'destination_mode': request.form.get('destination_mode', 'self'),
+                    'knock_command': request.form.get('knock_command', ''),
+                    'knock_ports': ports,
+                    'knock_timeout': int(request.form.get('knock_timeout', 300)),
+                    'knock_max_duration': int(request.form.get('knock_max_duration', 600)),
+                })
+
+            session['admin_commands'] = admin_commands
+            return redirect(url_for('wizard_summary'))
+
+        # Generate a random suggested command name
+        suggested_command = secrets.token_hex(8)
+
+        return render_template('wizard/admin_commands.html',
+                             admin_wallet=session.get('admin_wallet'),
+                             suggested_command=suggested_command,
+                             step=6, total_steps=7)
 
     @app.route('/wizard/summary', methods=['GET', 'POST'])
     @require_auth
@@ -429,6 +494,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         blockchain = session.get('blockchain', {})
         proxmox = session.get('proxmox', {})
         ipv6 = session.get('ipv6', {})
+        admin_commands = session.get('admin_commands', {})
 
         # Get deployer address from key
         deployer_address = None
@@ -467,6 +533,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'broker_node': ipv6.get('broker_node'),
                 'broker_registry': ipv6.get('broker_registry'),
             },
+            'admin': {
+                'wallet': session.get('admin_wallet', 'Not connected'),
+                'enabled': admin_commands.get('enabled', False),
+                'destination_mode': admin_commands.get('destination_mode', 'N/A'),
+                'command_count': 1 if admin_commands.get('enabled') else 0,
+            },
         }
 
         if request.method == 'POST':
@@ -478,7 +550,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return render_template('wizard/summary.html',
                              summary=summary,
-                             step=6, total_steps=6)
+                             step=7, total_steps=7)
 
     @app.route('/wizard/install')
     @require_auth
@@ -763,6 +835,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'blockchain': session.get('blockchain', {}),
                 'proxmox': session.get('proxmox', {}),
                 'ipv6': session.get('ipv6', {}),
+                'admin_wallet': session.get('admin_wallet', ''),
+                'admin_signature': session.get('admin_signature', ''),
+                'admin_decrypt_message': session.get('admin_decrypt_message', ''),
+                'admin_commands': session.get('admin_commands', {}),
             }
 
         # If retrying a specific step, reset it to pending
@@ -829,6 +905,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'blockchain': session.get('blockchain', {}),
                 'proxmox': session.get('proxmox', {}),
                 'ipv6': session.get('ipv6', {}),
+                'admin_wallet': session.get('admin_wallet', ''),
+                'admin_signature': session.get('admin_signature', ''),
+                'admin_decrypt_message': session.get('admin_decrypt_message', ''),
+                'admin_commands': session.get('admin_commands', {}),
             }
 
         # Run in background thread
@@ -1654,6 +1734,8 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         proxmox = config.get('proxmox', {})
         ipv6 = config.get('ipv6', {})
         contracts = config.get('contracts', {})
+        admin_commands = config.get('admin_commands', {})
+        admin_wallet = config.get('admin_wallet', '')
 
         # Parse IP pool - extract last octet if full IP strings provided
         ip_start = proxmox.get('ip_start', '200')
@@ -1740,7 +1822,46 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'server_public_key': config.get('server_public_key', ''),
             'decrypt_message': blockchain.get('decrypt_message', 'blockhost-access'),
         }
+
+        # Add admin section if admin commands are enabled
+        if admin_wallet:
+            admin_section = {
+                'wallet_address': admin_wallet,
+            }
+            if admin_commands.get('enabled'):
+                admin_section.update({
+                    'max_command_age': 300,
+                    'destination_mode': admin_commands.get('destination_mode', 'self'),
+                })
+            blockhost_config['admin'] = admin_section
+
         _write_yaml(config_dir / 'blockhost.yaml', blockhost_config)
+
+        # Write admin-commands.json if admin commands are enabled
+        if admin_commands.get('enabled') and admin_commands.get('knock_command'):
+            commands_db = {
+                'commands': {
+                    admin_commands['knock_command']: {
+                        'action': 'knock',
+                        'description': 'Open SSH and Proxmox ports temporarily',
+                        'params': {
+                            'allowed_ports': admin_commands.get('knock_ports', [22, 8006]),
+                            'max_duration': admin_commands.get('knock_max_duration', 600),
+                            'default_duration': admin_commands.get('knock_timeout', 300),
+                        }
+                    }
+                }
+            }
+            (config_dir / 'admin-commands.json').write_text(
+                json.dumps(commands_db, indent=2) + '\n'
+            )
+
+        # Write admin signature for NFT #0 minting
+        admin_signature = config.get('admin_signature', '')
+        if admin_signature:
+            sig_file = config_dir / 'admin-signature.key'
+            sig_file.write_text(admin_signature)
+            sig_file.chmod(0o600)
 
         # Write .env file for blockhost-monitor service
         env_file = Path('/opt/blockhost/.env')

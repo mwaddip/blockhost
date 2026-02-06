@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Commands - BlockHost Installer{% endblock %}
+
+{% block content %}
+<!-- Progress Steps -->
+<div class="steps">
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Network</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Storage</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Blockchain</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>Proxmox</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step completed">
+        <span class="step-number">&#10003;</span>
+        <span>IPv6</span>
+    </div>
+    <div class="step-connector completed"></div>
+    <div class="step active">
+        <span class="step-number">6</span>
+        <span>Admin</span>
+    </div>
+    <div class="step-connector"></div>
+    <div class="step">
+        <span class="step-number">7</span>
+        <span>Summary</span>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Admin Commands</h2>
+    <p class="text-muted mb-2">
+        Configure on-chain admin commands. These let you send encrypted instructions to your server
+        via the blockchain from anywhere in the world.
+    </p>
+
+    <form id="admin-form" method="POST" action="{{ url_for('wizard_admin_commands') }}">
+        <!-- Enable/Disable -->
+        <div class="form-section">
+            <h3>Enable Admin Commands</h3>
+            <div class="radio-group mb-2">
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="admin_enabled" value="yes" checked>
+                    <div class="radio-label">
+                        <h4>Yes (recommended)</h4>
+                        <p>Allow encrypted admin commands from your wallet via the blockchain</p>
+                    </div>
+                </label>
+                <label class="radio-option" onclick="selectRadio(this)">
+                    <input type="radio" name="admin_enabled" value="no">
+                    <div class="radio-label">
+                        <h4>No</h4>
+                        <p>Skip admin command setup (can be configured later)</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+
+        <!-- Admin Config (shown when enabled) -->
+        <div id="admin-config">
+            <!-- Admin Wallet (pre-filled from wallet gate) -->
+            <div class="form-section">
+                <h3>Admin Wallet</h3>
+                <div class="form-group">
+                    <label>Authorized Wallet Address</label>
+                    <div class="address-box">
+                        <span id="admin-wallet-display">{{ admin_wallet or 'Not connected' }}</span>
+                    </div>
+                    <input type="hidden" name="admin_wallet" value="{{ admin_wallet or '' }}">
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        This is the wallet you connected after login. Only transactions from this wallet will be processed.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Destination Mode -->
+            <div class="form-section">
+                <h3>Transaction Destination</h3>
+                <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                    How the server filters incoming transactions. The command payload is always encrypted,
+                    this just controls which transactions are worth trying to decrypt.
+                </p>
+
+                <div class="radio-group mb-2">
+                    <label class="radio-option" onclick="selectRadio(this)">
+                        <input type="radio" name="destination_mode" value="self" checked>
+                        <div class="radio-label">
+                            <h4>Send to self</h4>
+                            <p>You send the transaction to your own address (tx.from === tx.to). Simple and clean.</p>
+                        </div>
+                    </label>
+                    <label class="radio-option" onclick="selectRadio(this)">
+                        <input type="radio" name="destination_mode" value="any">
+                        <div class="radio-label">
+                            <h4>Any destination</h4>
+                            <p>Server checks all transactions from your wallet. Easiest setup, slightly more processing.</p>
+                        </div>
+                    </label>
+                    <label class="radio-option" onclick="selectRadio(this)">
+                        <input type="radio" name="destination_mode" value="server">
+                        <div class="radio-label">
+                            <h4>Send to server address</h4>
+                            <p>Send to the server's Ethereum address (derived from its public key). Most explicit.</p>
+                        </div>
+                    </label>
+                    <label class="radio-option" onclick="selectRadio(this)">
+                        <input type="radio" name="destination_mode" value="null">
+                        <div class="radio-label">
+                            <h4>Send to burn address</h4>
+                            <p>Send to 0x...dEaD. Unambiguous but costs gas with no recovery.</p>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Port Knock Command -->
+            <div class="form-section">
+                <h3>Port Knock Command</h3>
+                <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                    Define a secret command name that opens SSH and Proxmox ports temporarily.
+                    After you log in, ports close to everyone except your IP.
+                </p>
+
+                <div class="form-group">
+                    <label for="knock_command">Secret Command Name</label>
+                    <div class="input-group">
+                        <input type="text" id="knock_command" name="knock_command"
+                               value="{{ suggested_command }}"
+                               placeholder="Enter a secret string"
+                               autocomplete="off">
+                        <button type="button" class="btn btn-secondary btn-small" onclick="randomizeCommand()">
+                            Randomize
+                        </button>
+                    </div>
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        This is a secret - anyone who knows it (and has your wallet) could trigger the command.
+                        Use something random and unguessable.
+                    </p>
+                </div>
+
+                <div class="two-col">
+                    <div class="form-group">
+                        <label for="knock_ports">Ports to Open</label>
+                        <input type="text" id="knock_ports" name="knock_ports"
+                               value="22, 8006"
+                               placeholder="22, 8006">
+                        <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                            Comma-separated port numbers
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="knock_timeout">Timeout (seconds)</label>
+                        <input type="number" id="knock_timeout" name="knock_timeout"
+                               value="300" min="60" max="3600">
+                        <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                            Ports close automatically if no login within this time
+                        </p>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="knock_max_duration">Max Session Duration (seconds)</label>
+                    <input type="number" id="knock_max_duration" name="knock_max_duration"
+                           value="600" min="60" max="86400">
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        Maximum time ports stay open for your IP after login
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ url_for('wizard_ipv6') }}" class="btn btn-secondary">Back</a>
+            <button type="submit" class="btn btn-primary">Continue</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Toggle sections based on radio selection
+function selectRadio(element) {
+    const radio = element.querySelector('input[type="radio"]');
+    radio.checked = true;
+
+    const group = element.closest('.radio-group');
+    group.querySelectorAll('.radio-option').forEach(opt => opt.classList.remove('selected'));
+    element.classList.add('selected');
+
+    // Toggle admin config visibility
+    if (radio.name === 'admin_enabled') {
+        document.getElementById('admin-config').classList.toggle('hidden', radio.value !== 'yes');
+    }
+}
+
+// Generate random command name
+function randomizeCommand() {
+    const arr = new Uint8Array(8);
+    crypto.getRandomValues(arr);
+    const hex = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+    document.getElementById('knock_command').value = hex;
+}
+
+// Validate form
+document.getElementById('admin-form').addEventListener('submit', function(e) {
+    const enabled = document.querySelector('input[name="admin_enabled"]:checked').value;
+    if (enabled !== 'yes') return;
+
+    const command = document.getElementById('knock_command').value.trim();
+    if (!command) {
+        e.preventDefault();
+        alert('Please enter a secret command name for port knocking.');
+        return;
+    }
+
+    if (command.length < 4) {
+        e.preventDefault();
+        alert('Command name should be at least 4 characters for security.');
+        return;
+    }
+
+    const ports = document.getElementById('knock_ports').value.trim();
+    if (!ports) {
+        e.preventDefault();
+        alert('Please enter at least one port number.');
+        return;
+    }
+});
+
+// Initialize radio button styling
+document.querySelectorAll('input[type="radio"]:checked').forEach(radio => {
+    radio.closest('.radio-option')?.classList.add('selected');
+});
+</script>
+{% endblock %}
