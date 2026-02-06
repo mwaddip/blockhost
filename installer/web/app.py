@@ -2380,14 +2380,12 @@ def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
         # Create systemd service for signup page server
         # Use port 443 with TLS for HTTPS, or 8080 for HTTP fallback
         if tls_mode in ('letsencrypt', 'self-signed'):
-            service_content = f"""[Unit]
-Description=Blockhost Signup Page Server (HTTPS)
-After=network.target
+            # Write the server script to a separate file (inline Python in systemd doesn't work)
+            server_script = f'''#!/usr/bin/env python3
+import http.server
+import ssl
+import socketserver
 
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 -c "
-import http.server, ssl, socketserver
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory='/var/www/blockhost', **kwargs)
@@ -2395,12 +2393,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/' or self.path == '':
             self.path = '/signup.html'
         return super().do_GET()
+
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain('{cert_file}', '{key_file}')
 with socketserver.TCPServer(('', 443), Handler) as httpd:
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    print("Serving signup page on https://0.0.0.0:443")
     httpd.serve_forever()
-"
+'''
+            script_file = Path('/usr/local/bin/blockhost-signup-server')
+            script_file.write_text(server_script)
+            script_file.chmod(0o755)
+
+            service_content = """[Unit]
+Description=Blockhost Signup Page Server (HTTPS)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/blockhost-signup-server
 Restart=on-failure
 RestartSec=10
 AmbientCapabilities=CAP_NET_BIND_SERVICE
