@@ -1444,7 +1444,9 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
 
         private_key, address, public_key = _generate_secp256k1_keypair_with_pubkey()
 
-        key_file.write_text(private_key)
+        # Write private key without 0x prefix (pam_web3_tool expects raw hex)
+        private_key_raw = private_key[2:] if private_key.startswith('0x') else private_key
+        key_file.write_text(private_key_raw)
         key_file.chmod(0o600)
 
         # Write public key separately (for signup page ECIES encryption)
