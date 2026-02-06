@@ -1,0 +1,89 @@
+# BlockHost Project Specification
+# Machine-readable project metadata for Claude sessions
+
+project:
+  name: blockhost
+  description: Custom Proxmox VE image with blockchain-based VM provisioning
+  version: 0.1.0
+
+components:
+  installer:
+    web:
+      path: installer/web/
+      entry: app.py
+      framework: Flask
+      purpose: Web wizard for initial configuration
+    console:
+      path: installer/console/
+      purpose: Fallback ncurses network config
+    common:
+      path: installer/common/
+      modules: [otp.py, network.py, detection.py]
+
+  scripts:
+    build_iso:
+      path: scripts/build-iso.sh
+      flags: [--testing]
+      output: build/blockhost_0.1.0.iso
+    first_boot:
+      path: scripts/first-boot.sh
+      systemd_unit: blockhost-firstboot.service
+
+submodules:
+  # These are separate repos - do not edit directly
+  libpam-web3:
+    packages: [libpam-web3, libpam-web3-tools]
+    purpose: PAM module for web3 wallet authentication
+  blockhost-common:
+    packages: [blockhost-common]
+    purpose: Shared config and database modules
+  blockhost-provisioner:
+    packages: [blockhost-provisioner]
+    purpose: VM creation, garbage collection, NFT minting
+  blockhost-engine:
+    packages: [blockhost-engine]
+    service: blockhost-monitor.service
+    purpose: Blockchain event monitor, subscription handling
+  blockhost-broker:
+    packages: [blockhost-broker-client]
+    purpose: IPv6 tunnel broker client
+
+config_files:
+  # Written by wizard during finalization
+  db_yaml:
+    path: /etc/blockhost/db.yaml
+    contains: [terraform_dir, vmid_pool, ip_pool, ipv6, gc_grace_days]
+  web3_defaults:
+    path: /etc/blockhost/web3-defaults.yaml
+    contains: [chain_id, rpc_url, contracts]
+  blockhost_yaml:
+    path: /etc/blockhost/blockhost.yaml
+    contains: [server, deployer, proxmox]
+  monitor_env:
+    path: /opt/blockhost/.env
+    contains: [SEPOLIA_RPC, BLOCKHOST_CONTRACT, NFT_CONTRACT, DEPLOYER_KEY_FILE]
+
+services:
+  blockhost_monitor:
+    unit: blockhost-monitor.service
+    purpose: Watches blockchain for subscription events
+    triggers: VM provisioning on SubscriptionCreated, resume on SubscriptionExtended
+  blockhost_gc:
+    unit: blockhost-gc.timer
+    schedule: daily
+    purpose: Two-phase VM lifecycle (suspend expired, destroy after grace period)
+
+vm_lifecycle:
+  states: [active, suspended, destroyed]
+  flow:
+    - subscription_expires: VM suspended (shutdown, data preserved)
+    - grace_period_expires: VM destroyed (gc_grace_days, default 7)
+    - subscription_extended_while_suspended: VM resumed
+
+testing:
+  ssh_key: testing/blockhost-test-key
+  ssh_wrapper: scripts/ssh-test.sh
+  iso_testing_mode:
+    flag: --testing
+    root_password: blockhost
+    apt_proxy: http://192.168.122.1:3142
