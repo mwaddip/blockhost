@@ -1953,36 +1953,34 @@ def _finalize_token(config: dict) -> tuple[bool, Optional[str]]:
         # Create API token using pveum
         token_name = 'blockhost'
         result = subprocess.run(
-            ['pveum', 'user', 'token', 'add', user, token_name, '--privsep', '0'],
+            ['pveum', 'user', 'token', 'add', user, token_name,
+             '--privsep', '0', '--output-format', 'json'],
             capture_output=True,
             text=True,
             timeout=30
         )
 
         if result.returncode == 0:
-            # Parse token from output
-            # Format: "full-tokenid" "value" "..."
-            for line in result.stdout.split('\n'):
-                if 'value' in line.lower():
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        token_value = parts[-1].strip('"')
+            # Parse token from JSON output
+            import json as _json
+            token_data = _json.loads(result.stdout)
+            token_value = token_data.get('value', '')
+            if token_value:
+                token_id = f"{user}!{token_name}"
 
-                        # Write terraform.tfvars
-                        terraform_dir = Path('/var/lib/blockhost/terraform')
-                        terraform_dir.mkdir(parents=True, exist_ok=True)
+                # Write terraform.tfvars
+                terraform_dir = Path('/var/lib/blockhost/terraform')
+                terraform_dir.mkdir(parents=True, exist_ok=True)
 
-                        tfvars = {
-                            'proxmox_api_url': proxmox.get('api_url', 'https://127.0.0.1:8006/api2/json'),
-                            'proxmox_api_token_id': f"{user}!{token_name}",
-                            'proxmox_api_token_secret': token_value,
-                            'proxmox_node': proxmox.get('node'),
-                            'proxmox_storage': proxmox.get('storage'),
-                            'proxmox_bridge': proxmox.get('bridge'),
-                        }
-                        _write_tfvars(terraform_dir / 'terraform.tfvars', tfvars)
+                tfvars = {
+                    'proxmox_api_token': f"{token_id}={token_value}",
+                    'proxmox_node': proxmox.get('node'),
+                    'proxmox_storage': proxmox.get('storage'),
+                    'proxmox_bridge': proxmox.get('bridge'),
+                }
+                _write_tfvars(terraform_dir / 'terraform.tfvars', tfvars)
 
-                        return True, None
+                return True, None
 
         return False, 'Failed to create API token'
     except Exception as e:
