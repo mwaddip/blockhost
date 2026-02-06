@@ -78,3 +78,10 @@ Packages built from submodules during first-boot:
 | blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Proxmox host |
 
 **Note**: `libpam-web3` (the PAM module, not tools) is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the Proxmox host.
+
+## ISO Build & Test Cycle
+
+When rebuilding the ISO:
+
+1. **Rebuild .deb packages** whenever a submodule has changed: `./scripts/build-packages.sh` — the ISO build copies pre-built .debs from `packages/host/` and `packages/template/`, it does NOT rebuild them automatically.
+2. **Remove the old ISO with `sudo`**: `sudo rm build/blockhost_0.1.0.iso` — the ISO is created by a root process and is owned by root.

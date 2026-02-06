@@ -1,45 +1,10 @@
 {% extends "base.html" %}
+{% from "macros/wizard_steps.html" import step_bar %}
 
 {% block title %}Blockchain Setup - BlockHost Installer{% endblock %}
 
 {% block content %}
-<!-- Progress Steps -->
-<div class="steps">
-    <div class="step completed">
-        <span class="step-number">&#10003;</span>
-        <span>Network</span>
-    </div>
-    <div class="step-connector completed"></div>
-    <div class="step completed">
-        <span class="step-number">&#10003;</span>
-        <span>Storage</span>
-    </div>
-    <div class="step-connector completed"></div>
-    <div class="step active">
-        <span class="step-number">3</span>
-        <span>Blockchain</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">4</span>
-        <span>Proxmox</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">5</span>
-        <span>IPv6</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">6</span>
-        <span>Admin</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">7</span>
-        <span>Summary</span>
-    </div>
-</div>
+{{ step_bar('blockchain') }}
 
 <div class="card">
     <h2>Blockchain Configuration</h2>
@@ -131,6 +96,18 @@
                         <p class="text-muted mt-1" style="font-size: 0.75rem;" id="balance-hint">
                             Fund this wallet with testnet ETH to continue. Balance is checked automatically.
                         </p>
+                        <div id="topup-section" style="margin-top: 0.75rem;">
+                            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <input type="number" id="topup-amount" step="0.001" min="0.001"
+                                       placeholder="0.1" style="width: 7rem;">
+                                <span style="font-size: 0.875rem;">ETH</span>
+                                <button type="button" class="btn btn-small btn-primary"
+                                        onclick="topUpWallet('generate')" id="topup-btn">
+                                    Send from wallet
+                                </button>
+                            </div>
+                            <div id="topup-status" class="text-muted mt-1" style="font-size: 0.75rem;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -149,6 +126,18 @@
                     Validate Key
                 </button>
                 <div id="import-status" class="hidden" style="margin-top: 0.5rem;"></div>
+                <div id="import-topup-section" class="hidden" style="margin-top: 0.75rem;">
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <input type="number" id="import-topup-amount" step="0.001" min="0.001"
+                               placeholder="0.1" style="width: 7rem;">
+                        <span style="font-size: 0.875rem;">ETH</span>
+                        <button type="button" class="btn btn-small btn-primary"
+                                onclick="topUpWallet('import')" id="import-topup-btn">
+                            Send from wallet
+                        </button>
+                    </div>
+                    <div id="import-topup-status" class="text-muted mt-1" style="font-size: 0.75rem;"></div>
+                </div>
             </div>
         </div>
 
@@ -439,6 +428,8 @@ async function validateImportKey() {
             statusDiv.innerHTML = `<div class="status-indicator success">Valid - Address: ${data.address}</div>`;
             // Store the validated address for balance checking
             window.importedAddress = data.address;
+            // Show top-up section
+            document.getElementById('import-topup-section').classList.remove('hidden');
             // Start checking balance
             checkImportedBalance();
         } else {
@@ -474,6 +465,85 @@ async function checkImportedBalance() {
     } catch (error) {
         console.error('Balance check error:', error);
     }
+}
+
+// Top up deployer wallet from browser wallet (MetaMask)
+async function topUpWallet(mode) {
+    const address = mode === 'generate' ? window.generatedAddress : window.importedAddress;
+    const amountInput = document.getElementById(mode === 'generate' ? 'topup-amount' : 'import-topup-amount');
+    const statusEl = document.getElementById(mode === 'generate' ? 'topup-status' : 'import-topup-status');
+    const btn = document.getElementById(mode === 'generate' ? 'topup-btn' : 'import-topup-btn');
+
+    const ethAmount = parseFloat(amountInput.value);
+    if (!address) { statusEl.textContent = 'No deployer address'; return; }
+    if (!ethAmount || ethAmount <= 0) { statusEl.textContent = 'Enter an amount'; return; }
+    if (!window.ethereum) { statusEl.textContent = 'No browser wallet detected'; return; }
+
+    btn.disabled = true;
+    statusEl.textContent = 'Requesting approval...';
+
+    try {
+        // Ensure MetaMask is on the correct chain
+        const wizardChainId = document.getElementById('chain_id').value;
+        if (wizardChainId !== 'custom') {
+            await switchChain(wizardChainId);
+        }
+
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const weiHex = '0x' + BigInt(Math.round(ethAmount * 1e18)).toString(16);
+
+        statusEl.textContent = 'Confirm in wallet...';
+        const txHash = await window.ethereum.request({
+            method: 'eth_sendTransaction',
+            params: [{ from: accounts[0], to: address, value: weiHex }]
+        });
+
+        statusEl.innerHTML = 'TX sent: <code>' + txHash.slice(0, 10) + '...</code> — waiting for confirmation...';
+
+        // Poll for receipt
+        const confirmed = await waitForReceipt(txHash);
+        if (confirmed) {
+            statusEl.innerHTML = '<span style="color:var(--success)">Confirmed!</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color:var(--warning)">TX sent but not confirmed yet. Balance will update.</span>';
+        }
+
+        // Refresh balance
+        if (mode === 'generate') checkBalance();
+        else checkImportedBalance();
+    } catch (e) {
+        if (e.code === 4001) {
+            statusEl.textContent = 'Transaction rejected by user.';
+        } else {
+            statusEl.textContent = 'Error: ' + (e.message || e);
+        }
+    }
+    btn.disabled = false;
+}
+
+async function switchChain(chainId) {
+    const hexChainId = '0x' + parseInt(chainId).toString(16);
+    try {
+        await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: hexChainId }]
+        });
+    } catch (e) {
+        // 4902 = chain not added — ignore, user may have it configured differently
+        if (e.code !== 4902) throw e;
+    }
+}
+
+async function waitForReceipt(txHash) {
+    for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const receipt = await window.ethereum.request({
+            method: 'eth_getTransactionReceipt',
+            params: [txHash]
+        });
+        if (receipt) return true;
+    }
+    return false;
 }
 
 // Form validation before submit

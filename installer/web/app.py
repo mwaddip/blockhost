@@ -48,6 +48,17 @@ CHAIN_NAMES = {
     '80001': 'Polygon Mumbai',
 }
 
+# Wizard step definitions (single source of truth for step bar rendering)
+WIZARD_STEPS = [
+    {'id': 'network',        'label': 'Network',    'endpoint': 'wizard_network'},
+    {'id': 'storage',        'label': 'Storage',    'endpoint': 'wizard_storage'},
+    {'id': 'blockchain',     'label': 'Blockchain', 'endpoint': 'wizard_blockchain'},
+    {'id': 'proxmox',        'label': 'Proxmox',    'endpoint': 'wizard_proxmox'},
+    {'id': 'ipv6',           'label': 'IPv6',       'endpoint': 'wizard_ipv6'},
+    {'id': 'admin_commands', 'label': 'Admin',      'endpoint': 'wizard_admin_commands'},
+    {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
+]
+
 # Global job storage for async operations
 _jobs = {}
 
@@ -227,6 +238,24 @@ def create_app(config: Optional[dict] = None) -> Flask:
     app.otp_manager = otp_manager
     app.net_manager = net_manager
 
+    # Inject wizard steps into all templates
+    @app.context_processor
+    def inject_wizard_steps():
+        return {'wizard_steps': WIZARD_STEPS}
+
+    @app.template_global()
+    def wizard_nav(current_step_id):
+        """Return prev/next endpoint names for wizard navigation."""
+        step_ids = [s['id'] for s in WIZARD_STEPS]
+        try:
+            idx = step_ids.index(current_step_id)
+        except ValueError:
+            return {'prev': None, 'next': None}
+        return {
+            'prev': WIZARD_STEPS[idx - 1]['endpoint'] if idx > 0 else None,
+            'next': WIZARD_STEPS[idx + 1]['endpoint'] if idx < len(step_ids) - 1 else None,
+        }
+
     # Authentication decorator
     def require_auth(f):
         @wraps(f)
@@ -354,8 +383,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         return render_template('wizard/network.html',
                              interfaces=interfaces,
                              current_ip=current_ip,
-                             current_gateway=current_gateway,
-                             step=1, total_steps=6)
+                             current_gateway=current_gateway)
 
     @app.route('/wizard/storage', methods=['GET', 'POST'])
     @require_auth
@@ -369,8 +397,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return redirect(url_for('wizard_blockchain'))
 
         return render_template('wizard/storage.html',
-                             disks=disks,
-                             step=2, total_steps=6)
+                             disks=disks)
 
     @app.route('/wizard/blockchain', methods=['GET', 'POST'])
     @require_auth
@@ -396,8 +423,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             }
             return redirect(url_for('wizard_proxmox'))
 
-        return render_template('wizard/blockchain.html',
-                             step=3, total_steps=6)
+        return render_template('wizard/blockchain.html')
 
     @app.route('/wizard/proxmox', methods=['GET', 'POST'])
     @require_auth
@@ -425,8 +451,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return redirect(url_for('wizard_ipv6'))
 
         return render_template('wizard/proxmox.html',
-                             detected=detected,
-                             step=4, total_steps=6)
+                             detected=detected)
 
     @app.route('/wizard/ipv6', methods=['GET', 'POST'])
     @require_auth
@@ -458,8 +483,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return redirect(url_for('wizard_admin_commands'))
 
         return render_template('wizard/ipv6.html',
-                             broker_registry=broker_registry,
-                             step=5, total_steps=7)
+                             broker_registry=broker_registry)
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
@@ -493,8 +517,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return render_template('wizard/admin_commands.html',
                              admin_wallet=session.get('admin_wallet'),
-                             suggested_command=suggested_command,
-                             step=6, total_steps=7)
+                             suggested_command=suggested_command)
 
     @app.route('/wizard/summary', methods=['GET', 'POST'])
     @require_auth
@@ -558,8 +581,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         return render_template('wizard/summary.html',
-                             summary=summary,
-                             step=7, total_steps=7)
+                             summary=summary)
 
     @app.route('/wizard/install')
     @require_auth
@@ -1828,7 +1850,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'auth': {
                 'otp_length': 6,
                 'otp_ttl_seconds': 300,
-                'public_secret': blockchain.get('public_secret', 'blockhost-access'),
+                'public_secret': config.get('admin_public_secret', 'blockhost-access'),
             },
             'signing_page': {
                 'html_path': '/usr/share/libpam-web3-tools/signing-page/index.html',
@@ -1858,7 +1880,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             },
             # Top-level fields for generate-signup-page.py
             'server_public_key': config.get('server_public_key', ''),
-            'public_secret': blockchain.get('public_secret', 'blockhost-access'),
+            'public_secret': config.get('admin_public_secret', 'blockhost-access'),
         }
 
         # Add admin section if admin commands are enabled
@@ -2587,8 +2609,16 @@ def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
             # Write the server script to a separate file (inline Python in systemd doesn't work)
             server_script = f'''#!/usr/bin/env python3
 import http.server
+import socket
 import ssl
 import socketserver
+
+class DualStackTCPServer(socketserver.TCPServer):
+    address_family = socket.AF_INET6
+    def server_bind(self):
+        # Allow dual-stack (IPv4 + IPv6) on a single socket
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -2600,9 +2630,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain('{cert_file}', '{key_file}')
-with socketserver.TCPServer(('', 443), Handler) as httpd:
+with DualStackTCPServer(('::', 443), Handler) as httpd:
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-    print("Serving signup page on https://0.0.0.0:443")
+    print("Serving signup page on https://[::]:443 (IPv4+IPv6)")
     httpd.serve_forever()
 '''
             script_file = Path('/usr/local/bin/blockhost-signup-server')
@@ -2722,9 +2752,10 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
         )
 
         # Store result for step data display
+        # mint_nft() returns a tx hash string (or None for dry run)
         config['mint_nft_result'] = {
-            'token_id': str(result.get('token_id', '')),
-            'tx_hash': result.get('tx_hash', result.get('transaction_hash', '')),
+            'token_id': '0',
+            'tx_hash': result or '',
         }
 
         return True, None

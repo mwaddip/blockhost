@@ -1,45 +1,10 @@
 {% extends "base.html" %}
+{% from "macros/wizard_steps.html" import step_bar %}
 
 {% block title %}Storage Configuration - BlockHost Installer{% endblock %}
 
 {% block content %}
-<!-- Progress Steps -->
-<div class="steps">
-    <div class="step completed">
-        <span class="step-number">&#10003;</span>
-        <span>Network</span>
-    </div>
-    <div class="step-connector completed"></div>
-    <div class="step active">
-        <span class="step-number">2</span>
-        <span>Storage</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">3</span>
-        <span>Blockchain</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">4</span>
-        <span>Proxmox</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">5</span>
-        <span>IPv6</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">6</span>
-        <span>Admin</span>
-    </div>
-    <div class="step-connector"></div>
-    <div class="step">
-        <span class="step-number">7</span>
-        <span>Summary</span>
-    </div>
-</div>
+{{ step_bar('storage') }}
 
 <div class="card">
     <h2>Storage Configuration</h2>

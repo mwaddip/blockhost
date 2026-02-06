@@ -307,6 +307,12 @@ fi
 mkdir -p /etc/apt/apt.conf.d
 echo 'Acquire::http::Proxy "http://192.168.122.1:3142";' > /etc/apt/apt.conf.d/00proxy
 
+# Ensure SSH is always accessible in testing mode (bypass pve-firewall)
+# Persist across reboots via /etc/network/interfaces post-up or iptables-persistent
+mkdir -p /etc/iptables
+iptables -I INPUT -p tcp --dport 22 -j ACCEPT -m comment --comment "blockhost-testing" 2>/dev/null || true
+iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+
 # Create testing mode marker for validation script
 mkdir -p /etc/blockhost
 touch /etc/blockhost/.testing-mode

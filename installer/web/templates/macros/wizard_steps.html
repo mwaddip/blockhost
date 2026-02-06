@@ -1,0 +1,27 @@
+{% macro step_bar(current_step) %}
+{% set ns = namespace(reached_current=false) %}
+<div class="steps">
+    {% for step in wizard_steps %}
+    {% if step.id == current_step %}
+        {% set ns.reached_current = true %}
+        <div class="step active">
+            <span class="step-number">{{ loop.index }}</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% elif not ns.reached_current %}
+        <div class="step completed">
+            <span class="step-number">&#10003;</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% else %}
+        <div class="step">
+            <span class="step-number">{{ loop.index }}</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% endif %}
+    {% if not loop.last %}
+        <div class="step-connector{% if not ns.reached_current %} completed{% endif %}"></div>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endmacro %}

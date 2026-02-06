@@ -2195,3 +2195,243 @@ Added non-critical validation check: calls `cast call <nft_contract> 'totalSuppl
 7. Confirm hostname shows after https step
 8. Confirm NFT #0 mints after signup step, shows token ID + tx hash
 9. Confirm validation passes including new NFT check
+
+---
+
+## Wizard Updates (2026-02-06) - Top Up Deployer Wallet
+
+### Overview
+
+Added a "Send from wallet" button on the Blockchain wizard page that lets the admin
+send ETH directly from their connected browser wallet (MetaMask) to the deployer
+address. This eliminates the need to leave the wizard and manually send funds.
+
+### How It Works
+
+The admin connects MetaMask on the wallet gate page before reaching the blockchain
+step. Since `window.ethereum` is already available, the top-up button:
+
+1. Reads the ETH amount from an input field
+2. Switches MetaMask to the correct chain (matching the wizard's chain_id dropdown)
+3. Sends `eth_sendTransaction` via `window.ethereum` from the admin's wallet to the deployer address
+4. Polls `eth_getTransactionReceipt` every 3 seconds (up to 30s) for confirmation
+5. Refreshes the balance display on confirmation
+
+No backend changes are needed — the transaction goes entirely through the browser wallet's RPC.
+
+### Changes Made
+
+**File modified**: `installer/web/templates/wizard/blockchain.html`
+
+#### 1. Top-up UI for Generated Wallet
+
+Added inside `#balance-section`, after the balance hint. Always visible once wallet is generated:
+
+```html
+<div id="topup-section" style="margin-top: 0.75rem;">
+    <input type="number" id="topup-amount" step="0.001" min="0.001" placeholder="0.1">
+    <span>ETH</span>
+    <button onclick="topUpWallet('generate')" id="topup-btn">Send from wallet</button>
+    <div id="topup-status"></div>
+</div>
+```
+
+#### 2. Top-up UI for Imported Wallet
+
+Added after `#import-status` div. Hidden until key validation succeeds:
+
+```html
+<div id="import-topup-section" class="hidden">
+    <input type="number" id="import-topup-amount" step="0.001" min="0.001" placeholder="0.1">
+    <span>ETH</span>
+    <button onclick="topUpWallet('import')" id="import-topup-btn">Send from wallet</button>
+    <div id="import-topup-status"></div>
+</div>
+```
+
+Revealed in `validateImportKey()` when `data.valid` is true.
+
+#### 3. JavaScript Functions
+
+**`topUpWallet(mode)`** — Main function. `mode` is `'generate'` or `'import'`:
+- Resolves correct address, input, status, and button elements based on mode
+- Validates amount and address
+- Calls `switchChain()` if chain_id is not "custom"
+- Sends ETH via `eth_sendTransaction`
+- Polls receipt via `waitForReceipt()`
+- Refreshes balance via `checkBalance()` or `checkImportedBalance()`
+- Handles user rejection (error code 4001) gracefully
+
+**`switchChain(chainId)`** — Requests MetaMask to switch to the wizard's selected chain:
+- Converts decimal chain ID to hex
+- Ignores error 4902 (chain not added to wallet)
+
+**`waitForReceipt(txHash)`** — Polls for transaction confirmation:
+- Calls `eth_getTransactionReceipt` via `window.ethereum` every 3 seconds
+- Returns `true` if receipt found within 10 attempts (~30 seconds)
+- Returns `false` on timeout (balance polling will catch it eventually)
+
+### Verification
+
+1. Generate a wallet on the blockchain page
+2. Enter an ETH amount and click "Send from wallet" — MetaMask popup appears
+3. If MetaMask is on wrong chain — chain switch prompt first
+4. Confirm in MetaMask — status shows "Confirm in wallet..." then "Confirmed!"
+5. Balance auto-refreshes to show new amount
+6. Continue button enables (if deploying contracts)
+7. Same flow works for imported wallet after key validation
+8. Rejecting in MetaMask shows "Transaction rejected by user"
+
+---
+
+## Step 21: Data-Driven Wizard Step Bar
+
+**Date**: 2026-02-06
+**Why**: The wizard step bar (breadcrumb navigation) was duplicated across all 7 wizard templates (~35 lines each, ~245 lines total). Adding or reordering a step required editing every template. This refactors to a single source of truth.
+
+### 21.1 Add `WIZARD_STEPS` config to `installer/web/app.py`
+
+Added at module level (before `create_app`):
+
+```python
+WIZARD_STEPS = [
+    {'id': 'network',        'label': 'Network',    'endpoint': 'wizard_network'},
+    {'id': 'storage',        'label': 'Storage',    'endpoint': 'wizard_storage'},
+    {'id': 'blockchain',     'label': 'Blockchain', 'endpoint': 'wizard_blockchain'},
+    {'id': 'proxmox',        'label': 'Proxmox',    'endpoint': 'wizard_proxmox'},
+    {'id': 'ipv6',           'label': 'IPv6',       'endpoint': 'wizard_ipv6'},
+    {'id': 'admin_commands', 'label': 'Admin',      'endpoint': 'wizard_admin_commands'},
+    {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
+]
+```
+
+Each entry has:
+- `id`: used by templates to identify the current step
+- `label`: display text in the step bar
+- `endpoint`: Flask route name (for `url_for()` in navigation)
+
+### 21.2 Add context processor and nav helper in `create_app()`
+
+Inside `create_app()`, after storing managers in app context:
+
+```python
+@app.context_processor
+def inject_wizard_steps():
+    return {'wizard_steps': WIZARD_STEPS}
+
+@app.template_global()
+def wizard_nav(current_step_id):
+    """Return prev/next endpoint names for wizard navigation."""
+    step_ids = [s['id'] for s in WIZARD_STEPS]
+    try:
+        idx = step_ids.index(current_step_id)
+    except ValueError:
+        return {'prev': None, 'next': None}
+    return {
+        'prev': WIZARD_STEPS[idx - 1]['endpoint'] if idx > 0 else None,
+        'next': WIZARD_STEPS[idx + 1]['endpoint'] if idx < len(step_ids) - 1 else None,
+    }
+```
+
+- `inject_wizard_steps`: makes `wizard_steps` available in all templates
+- `wizard_nav`: template global that returns prev/next endpoints for a given step ID (available for future use in back/continue buttons)
+
+### 21.3 Create `installer/web/templates/macros/wizard_steps.html`
+
+New file — Jinja2 macro that renders the step bar from the config list:
+
+```html
+{% macro step_bar(current_step) %}
+{% set ns = namespace(reached_current=false) %}
+<div class="steps">
+    {% for step in wizard_steps %}
+    {% if step.id == current_step %}
+        {% set ns.reached_current = true %}
+        <div class="step active">
+            <span class="step-number">{{ loop.index }}</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% elif not ns.reached_current %}
+        <div class="step completed">
+            <span class="step-number">&#10003;</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% else %}
+        <div class="step">
+            <span class="step-number">{{ loop.index }}</span>
+            <span>{{ step.label }}</span>
+        </div>
+    {% endif %}
+    {% if not loop.last %}
+        <div class="step-connector{% if not ns.reached_current %} completed{% endif %}"></div>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endmacro %}
+```
+
+Uses `namespace()` to track state across loop iterations (Jinja2 scoping requirement).
+
+### 21.4 Update all 7 wizard templates
+
+In each template, replaced the ~35-line hardcoded `<div class="steps">...</div>` block with a macro import and call:
+
+```html
+{% from "macros/wizard_steps.html" import step_bar %}
+{# then inside {% block content %}: #}
+{{ step_bar('step_id') }}
+```
+
+| Template | Step ID |
+|----------|---------|
+| `network.html` | `'network'` |
+| `storage.html` | `'storage'` |
+| `blockchain.html` | `'blockchain'` |
+| `proxmox.html` | `'proxmox'` |
+| `ipv6.html` | `'ipv6'` |
+| `admin_commands.html` | `'admin_commands'` |
+| `summary.html` | `'summary'` |
+
+**Not changed**: `wallet.html` (pre-wizard gate, no step bar), `install.html` (post-wizard, no step bar).
+
+### 21.5 Remove stale `step`/`total_steps` params from `app.py`
+
+Removed `step=N, total_steps=N` from all 7 `render_template()` calls. These were already inconsistent (some said `total_steps=6`, others `total_steps=7`) and unused by templates.
+
+### Verification
+
+1. Load each wizard page — step bar renders identically to before
+2. Completed steps show checkmarks, active step is highlighted, future steps are gray
+3. Connectors before active step are green, after are gray
+4. To test: add a fake 8th step to `WIZARD_STEPS` list, confirm all pages update automatically
+5. Remove the fake step, confirm everything reverts
+
+---
+
+## Step 22: Fix public_secret Source in Config Writer
+
+**Date**: 2026-02-06
+**Why**: The `_finalize_config()` function wrote `public_secret` to `web3-defaults.yaml` and `blockhost.yaml` using `blockchain.get('public_secret', 'blockhost-access')`. However, `public_secret` is never stored in the `blockchain` session dict — it comes from the wallet gate and is stored as `admin_public_secret` in the finalization config. This meant the config files always got the fallback value `'blockhost-access'` regardless of what the admin actually signed.
+
+### Changes
+
+In `installer/web/app.py`, function `_finalize_config()`, two lines changed:
+
+```python
+# Before (always fell back to default):
+'public_secret': blockchain.get('public_secret', 'blockhost-access'),
+
+# After (reads actual value from wallet gate):
+'public_secret': config.get('admin_public_secret', 'blockhost-access'),
+```
+
+Both occurrences fixed:
+1. `web3-defaults.yaml` → `auth.public_secret`
+2. `blockhost.yaml` → top-level `public_secret`
+
+### Verification
+
+1. Connect wallet and sign a custom message (e.g. "my-custom-secret") in the wallet gate
+2. Complete wizard through to finalization
+3. Check `/etc/blockhost/web3-defaults.yaml` — `auth.public_secret` should be `"my-custom-secret"`, not `"blockhost-access"`
+4. Check `/etc/blockhost/blockhost.yaml` — `public_secret` should match
