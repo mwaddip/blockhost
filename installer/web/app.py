@@ -65,7 +65,13 @@ class SetupState:
         """Load state from disk."""
         if SETUP_STATE_FILE.exists():
             try:
-                return json.loads(SETUP_STATE_FILE.read_text())
+                state = json.loads(SETUP_STATE_FILE.read_text())
+                # Migrate: add any missing steps from default state
+                default_steps = self._default_state()['steps']
+                for step_id, step_default in default_steps.items():
+                    if step_id not in state.get('steps', {}):
+                        state.setdefault('steps', {})[step_id] = step_default
+                return state
             except (json.JSONDecodeError, IOError):
                 pass
         return self._default_state()
@@ -88,6 +94,7 @@ class SetupState:
                 'ipv6': {'status': 'pending', 'error': None, 'completed_at': None},
                 'https': {'status': 'pending', 'error': None, 'completed_at': None},
                 'signup': {'status': 'pending', 'error': None, 'completed_at': None},
+                'mint_nft': {'status': 'pending', 'error': None, 'completed_at': None},
                 'template': {'status': 'pending', 'error': None, 'completed_at': None},
                 'finalize': {'status': 'pending', 'error': None, 'completed_at': None},
                 'validate': {'status': 'pending', 'error': None, 'completed_at': None},
@@ -122,7 +129,7 @@ class SetupState:
 
     def get_next_step(self) -> Optional[str]:
         """Return the next step to run (first non-completed step)."""
-        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'bridge', 'ipv6', 'https', 'signup', 'template', 'finalize', 'validate']
+        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'bridge', 'ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate']
         for step_id in step_order:
             if self.state['steps'][step_id]['status'] not in ('completed',):
                 return step_id
@@ -135,12 +142,14 @@ class SetupState:
         self.state['current_step'] = step_id
         self.save()
 
-    def mark_step_completed(self, step_id: str):
-        """Mark a step as completed."""
+    def mark_step_completed(self, step_id: str, data: dict = None):
+        """Mark a step as completed, optionally attaching result data."""
         import datetime
         self.state['steps'][step_id]['status'] = 'completed'
         self.state['steps'][step_id]['error'] = None
         self.state['steps'][step_id]['completed_at'] = datetime.datetime.now().isoformat()
+        if data:
+            self.state['steps'][step_id]['data'] = data
         self.save()
 
     def mark_step_failed(self, step_id: str, error: str):
@@ -280,7 +289,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if request.method == 'POST':
             admin_wallet = request.form.get('admin_wallet', '').strip()
             admin_signature = request.form.get('admin_signature', '').strip()
-            decrypt_message = request.form.get('decrypt_message', '').strip()
+            public_secret = request.form.get('public_secret', '').strip()
 
             if not admin_wallet or not admin_wallet.startswith('0x') or len(admin_wallet) != 42:
                 flash('Invalid wallet address', 'error')
@@ -292,7 +301,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
             session['admin_wallet'] = admin_wallet
             session['admin_signature'] = admin_signature
-            session['admin_decrypt_message'] = decrypt_message
+            session['admin_public_secret'] = public_secret
             return redirect(url_for('wizard_network'))
 
         # If wallet already connected, allow re-doing or skip
@@ -837,7 +846,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'ipv6': session.get('ipv6', {}),
                 'admin_wallet': session.get('admin_wallet', ''),
                 'admin_signature': session.get('admin_signature', ''),
-                'admin_decrypt_message': session.get('admin_decrypt_message', ''),
+                'admin_public_secret': session.get('admin_public_secret', ''),
                 'admin_commands': session.get('admin_commands', {}),
             }
 
@@ -907,7 +916,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'ipv6': session.get('ipv6', {}),
                 'admin_wallet': session.get('admin_wallet', ''),
                 'admin_signature': session.get('admin_signature', ''),
-                'admin_decrypt_message': session.get('admin_decrypt_message', ''),
+                'admin_public_secret': session.get('admin_public_secret', ''),
                 'admin_commands': session.get('admin_commands', {}),
             }
 
@@ -1458,6 +1467,7 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
         ('https', 'Configuring HTTPS for signup page', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
+        ('mint_nft', 'Minting admin NFT', _finalize_mint_nft),
         ('template', 'Building VM template', _finalize_template),
         ('finalize', 'Finalizing setup', _finalize_complete),
         ('validate', 'Validating system (testing only)', _finalize_validate),
@@ -1479,7 +1489,35 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
                 success, error = step_func(config)
 
                 if success:
-                    setup_state.mark_step_completed(step_id)
+                    # Attach step data for UI display
+                    step_data = None
+                    if step_id == 'wallet':
+                        deployer_key = config.get('blockchain', {}).get('deployer_key')
+                        addr = _get_address_from_key(deployer_key) if deployer_key else None
+                        if addr:
+                            step_data = {'deployer_address': addr}
+                    elif step_id == 'contracts' and config.get('contracts'):
+                        step_data = {'contracts': config['contracts']}
+                    elif step_id == 'ipv6':
+                        ipv6_cfg = config.get('ipv6', {})
+                        prefix = ipv6_cfg.get('prefix', '')
+                        if not prefix:
+                            alloc_file = Path('/etc/blockhost/broker-allocation.json')
+                            if alloc_file.exists():
+                                try:
+                                    alloc = json.loads(alloc_file.read_text())
+                                    prefix = alloc.get('prefix', '')
+                                except (json.JSONDecodeError, IOError):
+                                    pass
+                        if prefix:
+                            step_data = {'prefix': prefix, 'mode': ipv6_cfg.get('mode', '')}
+                    elif step_id == 'https':
+                        https_cfg = config.get('https', {})
+                        if https_cfg.get('hostname'):
+                            step_data = {'hostname': https_cfg['hostname']}
+                    elif step_id == 'mint_nft' and config.get('mint_nft_result'):
+                        step_data = config['mint_nft_result']
+                    setup_state.mark_step_completed(step_id, data=step_data)
                 else:
                     setup_state.mark_step_failed(step_id, error or f'{step_name} failed')
                     return  # Stop on failure
@@ -1790,7 +1828,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'auth': {
                 'otp_length': 6,
                 'otp_ttl_seconds': 300,
-                'decrypt_message': blockchain.get('decrypt_message', 'blockhost-access'),
+                'public_secret': blockchain.get('public_secret', 'blockhost-access'),
             },
             'signing_page': {
                 'html_path': '/usr/share/libpam-web3-tools/signing-page/index.html',
@@ -1820,7 +1858,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             },
             # Top-level fields for generate-signup-page.py
             'server_public_key': config.get('server_public_key', ''),
-            'decrypt_message': blockchain.get('decrypt_message', 'blockhost-access'),
+            'public_secret': blockchain.get('public_secret', 'blockhost-access'),
         }
 
         # Add admin section if admin commands are enabled
@@ -2074,21 +2112,22 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
 def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
     """Ensure network bridge exists for VM networking.
 
+    Uses the PVE API (pvesh) to create the bridge so that Proxmox manages
+    /etc/network/interfaces itself. This ensures the bridge survives reboot.
+
     On bare metal Proxmox installs, vmbr0 is created by the installer.
     On nested/VM installs or custom setups, it may not exist.
-    This step creates it if missing.
     """
     try:
         proxmox = config.get('proxmox', {})
         bridge_name = proxmox.get('bridge', 'vmbr0')
+        node_name = proxmox.get('node', socket.gethostname())
 
         # Check if bridge already exists
         bridge_path = Path(f'/sys/class/net/{bridge_name}')
         if bridge_path.exists():
-            # Bridge exists, nothing to do
             return True, None
 
-        # Bridge doesn't exist - need to create it
         # Find the primary network interface (the one with a default route)
         result = subprocess.run(
             ['ip', 'route', 'show', 'default'],
@@ -2125,7 +2164,6 @@ def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
         # Find IPv4 address
         ipv4_addr = None
         ipv4_prefix = None
-        gateway = None
 
         for info in iface_info:
             for addr_info in info.get('addr_info', []):
@@ -2138,7 +2176,6 @@ def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
             return False, f'Could not find IPv4 address on {primary_iface}'
 
         # Get gateway from default route
-        parts = result.stdout.strip().split() if result.stdout else []
         result = subprocess.run(
             ['ip', 'route', 'show', 'default'],
             capture_output=True,
@@ -2152,115 +2189,100 @@ def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
         except (ValueError, IndexError):
             return False, 'Could not determine gateway'
 
-        # Read current interfaces file
-        interfaces_file = Path('/etc/network/interfaces')
-        interfaces_content = interfaces_file.read_text() if interfaces_file.exists() else ''
-
-        # Check if bridge is already configured (even if not up)
-        if f'iface {bridge_name}' in interfaces_content:
-            # Bridge is configured but not up - try to bring it up
-            subprocess.run(['ifup', bridge_name], capture_output=True, timeout=30)
-            if Path(f'/sys/class/net/{bridge_name}').exists():
-                return True, None
-            return False, f'Bridge {bridge_name} configured but failed to come up'
-
-        # Create bridge configuration
-        # We'll modify the primary interface to be part of the bridge
-        bridge_config = f'''
-# Bridge for VM networking (auto-generated by BlockHost wizard)
-auto {bridge_name}
-iface {bridge_name} inet static
-    address {ipv4_addr}/{ipv4_prefix}
-    gateway {gateway}
-    bridge-ports {primary_iface}
-    bridge-stp off
-    bridge-fd 0
-
-# Original interface becomes bridge port
-auto {primary_iface}
-iface {primary_iface} inet manual
-'''
-
-        # Backup original interfaces file
-        backup_file = Path('/etc/network/interfaces.blockhost-backup')
-        if not backup_file.exists():
-            backup_file.write_text(interfaces_content)
-
-        # Comment out existing configuration for the primary interface
-        new_content = interfaces_content
-        lines = interfaces_content.split('\n')
-        new_lines = []
-        in_primary_block = False
-
-        for line in lines:
-            # Check if this starts the primary interface block
-            if line.strip().startswith(f'iface {primary_iface}') or line.strip().startswith(f'auto {primary_iface}'):
-                in_primary_block = True
-                new_lines.append(f'# DISABLED BY BLOCKHOST: {line}')
-            elif in_primary_block:
-                # Check if this is a new interface block (end of primary block)
-                if line.strip().startswith('auto ') or line.strip().startswith('iface '):
-                    in_primary_block = False
-                    new_lines.append(line)
-                else:
-                    new_lines.append(f'# DISABLED BY BLOCKHOST: {line}')
-            else:
-                new_lines.append(line)
-
-        new_content = '\n'.join(new_lines)
-
-        # Add bridge configuration
-        new_content += bridge_config
-
-        # Write new interfaces file
-        interfaces_file.write_text(new_content)
-
-        # Bring up the bridge
-        # First, we need to be careful not to lose network connectivity
-        # The safest approach is to do this atomically
+        # Step 1: Create bridge via PVE API
         result = subprocess.run(
-            ['ip', 'link', 'add', 'name', bridge_name, 'type', 'bridge'],
+            [
+                'pvesh', 'create', f'/nodes/{node_name}/network',
+                '--iface', bridge_name,
+                '--type', 'bridge',
+                '--bridge_ports', primary_iface,
+                '--autostart', '1',
+                '--cidr', f'{ipv4_addr}/{ipv4_prefix}',
+                '--gateway', gateway,
+            ],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=30
         )
 
-        if result.returncode != 0 and 'exists' not in result.stderr:
-            return False, f'Failed to create bridge: {result.stderr}'
+        if result.returncode != 0 and 'already exists' not in (result.stderr or ''):
+            return False, f'PVE bridge creation failed: {result.stderr or result.stdout}'
 
-        # Add primary interface to bridge
+        # Step 2: Set primary interface to manual (bridge port)
+        result = subprocess.run(
+            [
+                'pvesh', 'set', f'/nodes/{node_name}/network/{primary_iface}',
+                '--type', 'eth',
+                '--autostart', '1',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        # Non-fatal if this fails — PVE may handle it automatically
+
+        # Step 3: Apply the staged network config
+        # This rewrites /etc/network/interfaces and reloads networking
+        result = subprocess.run(
+            ['pvesh', 'set', f'/nodes/{node_name}/network'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            # Apply failed — try ifreload as fallback
+            subprocess.run(
+                ['ifreload', '-a'],
+                capture_output=True,
+                timeout=30
+            )
+
+        # Step 4: Ephemeral fallback — bring bridge up with ip commands
+        # if pvesh apply didn't fully activate it during this session
+        if not Path(f'/sys/class/net/{bridge_name}').exists():
+            subprocess.run(
+                ['ip', 'link', 'add', 'name', bridge_name, 'type', 'bridge'],
+                capture_output=True,
+                timeout=10
+            )
+
+        # Ensure bridge is up and has IP
+        subprocess.run(['ip', 'link', 'set', bridge_name, 'up'], capture_output=True, timeout=10)
+
+        if not Path(f'/sys/class/net/{bridge_name}').exists():
+            return False, f'Failed to create bridge {bridge_name}'
+
+        # Add primary interface to bridge if not already
         subprocess.run(
             ['ip', 'link', 'set', primary_iface, 'master', bridge_name],
             capture_output=True,
             timeout=10
         )
 
-        # Move IP to bridge
-        subprocess.run(
-            ['ip', 'addr', 'del', f'{ipv4_addr}/{ipv4_prefix}', 'dev', primary_iface],
+        # Ensure IP is on the bridge (move from primary if needed)
+        ip_check = subprocess.run(
+            ['ip', 'addr', 'show', bridge_name],
             capture_output=True,
+            text=True,
             timeout=10
         )
-
-        subprocess.run(
-            ['ip', 'addr', 'add', f'{ipv4_addr}/{ipv4_prefix}', 'dev', bridge_name],
-            capture_output=True,
-            timeout=10
-        )
-
-        # Bring up the bridge
-        subprocess.run(['ip', 'link', 'set', bridge_name, 'up'], capture_output=True, timeout=10)
-
-        # Re-add default route via bridge
-        subprocess.run(
-            ['ip', 'route', 'add', 'default', 'via', gateway, 'dev', bridge_name],
-            capture_output=True,
-            timeout=10
-        )
-
-        # Verify bridge exists now
-        if not Path(f'/sys/class/net/{bridge_name}').exists():
-            return False, f'Failed to create bridge {bridge_name}'
+        if ipv4_addr not in (ip_check.stdout or ''):
+            subprocess.run(
+                ['ip', 'addr', 'del', f'{ipv4_addr}/{ipv4_prefix}', 'dev', primary_iface],
+                capture_output=True,
+                timeout=10
+            )
+            subprocess.run(
+                ['ip', 'addr', 'add', f'{ipv4_addr}/{ipv4_prefix}', 'dev', bridge_name],
+                capture_output=True,
+                timeout=10
+            )
+            subprocess.run(
+                ['ip', 'route', 'add', 'default', 'via', gateway, 'dev', bridge_name],
+                capture_output=True,
+                timeout=10
+            )
 
         return True, None
 
@@ -2271,9 +2293,27 @@ iface {primary_iface} inet manual
 
 
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure IPv6 tunnel if using broker."""
+    """Configure IPv6 tunnel if using broker, or save manual prefix.
+
+    For broker mode:
+    1. Request allocation (broker-client saves its own config)
+    2. Install persistent WireGuard config
+    3. Enable IPv6 forwarding
+    """
     try:
         ipv6 = config.get('ipv6', {})
+
+        # Enable IPv6 forwarding (needed for VM traffic regardless of mode)
+        subprocess.run(
+            ['sysctl', '-w', 'net.ipv6.conf.all.forwarding=1'],
+            capture_output=True,
+            timeout=10
+        )
+        sysctl_dir = Path('/etc/sysctl.d')
+        sysctl_dir.mkdir(parents=True, exist_ok=True)
+        (sysctl_dir / '99-blockhost-ipv6.conf').write_text(
+            'net.ipv6.conf.all.forwarding=1\n'
+        )
 
         if ipv6.get('mode') == 'broker':
             registry = ipv6.get('broker_registry')
@@ -2286,15 +2326,14 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
             if not registry:
                 return False, 'Broker registry address not configured'
 
-            # Make broker allocation request
-            # Note: --registry-contract is a global option, must come before subcommand
+            # Step 1: Request allocation (no --configure-wg — let broker-client
+            # save its own broker-allocation.json via save_allocation_config())
             cmd = [
                 'broker-client',
                 '--registry-contract', registry,
                 'request',
                 '--nft-contract', nft_contract,
                 '--wallet-key', '/etc/blockhost/deployer.key',
-                '--configure-wg',
                 '--timeout', '120',
             ]
 
@@ -2302,33 +2341,75 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=180  # 3 minutes total timeout
+                timeout=180
             )
 
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout or 'Broker request failed'
+            # Don't bail on non-zero if stdout contains allocation data
+            allocation_file = Path('/etc/blockhost/broker-allocation.json')
+            prefix = ''
+
+            if allocation_file.exists():
+                # broker-client wrote it — read prefix from there
+                try:
+                    alloc_data = json.loads(allocation_file.read_text())
+                    prefix = alloc_data.get('prefix', alloc_data.get('ipv6_prefix', ''))
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            if not prefix:
+                # Fallback: parse from stdout
+                import re
+                for line in (result.stdout or '').strip().split('\n'):
+                    if line.strip().startswith('{'):
+                        try:
+                            data = json.loads(line)
+                            prefix = data.get('prefix', data.get('ipv6_prefix', ''))
+                            if prefix:
+                                break
+                        except json.JSONDecodeError:
+                            pass
+                if not prefix:
+                    prefix_match = re.search(r'prefix[:\s]+([0-9a-fA-F:]+/\d+)', result.stdout or '')
+                    if prefix_match:
+                        prefix = prefix_match.group(1)
+
+            if not prefix:
+                error_msg = result.stderr or result.stdout or 'No prefix in broker response'
                 return False, f'Broker allocation failed: {error_msg}'
 
-            # Parse allocation result from stdout (broker-client outputs JSON on success)
-            allocation = {'prefix': '', 'broker_node': '', 'registry': registry}
-            try:
-                # Try to parse JSON output
-                for line in result.stdout.strip().split('\n'):
-                    if line.startswith('{'):
-                        data = json.loads(line)
-                        allocation['prefix'] = data.get('prefix', data.get('ipv6_prefix', ''))
-                        allocation['broker_node'] = data.get('broker_node', data.get('broker_id', ''))
-                        break
-            except json.JSONDecodeError:
-                # Try to extract prefix from text output
-                import re
-                prefix_match = re.search(r'prefix[:\s]+([0-9a-fA-F:]+/\d+)', result.stdout)
-                if prefix_match:
-                    allocation['prefix'] = prefix_match.group(1)
+            # Store prefix in config for later steps (https, step data)
+            config['ipv6']['prefix'] = prefix
 
-            # Save broker allocation info
-            allocation_file = Path('/etc/blockhost/broker-allocation.json')
-            allocation_file.write_text(json.dumps(allocation, indent=2))
+            # Step 2: Install persistent WireGuard config
+            install_result = subprocess.run(
+                [
+                    'broker-client',
+                    '--registry-contract', registry,
+                    'install',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if install_result.returncode != 0:
+                # Non-fatal warning — tunnel may work ephemerally
+                print(f"Warning: broker-client install failed: {install_result.stderr}")
+
+            # Step 3: Verify WireGuard tunnel is up
+            wg_check = subprocess.run(
+                ['wg', 'show'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if wg_check.returncode != 0 or not wg_check.stdout.strip():
+                # Try to bring up the tunnel manually
+                subprocess.run(
+                    ['wg-quick', 'up', 'wg-broker'],
+                    capture_output=True,
+                    timeout=30
+                )
 
         elif ipv6.get('mode') == 'manual':
             # Manual mode - just save the provided prefix
@@ -2565,6 +2646,86 @@ WantedBy=multi-user.target
         subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=30)
         subprocess.run(['systemctl', 'enable', 'blockhost-signup'], capture_output=True, timeout=30)
         subprocess.run(['systemctl', 'start', 'blockhost-signup'], capture_output=True, timeout=30)
+
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
+    """Mint NFT #0 (admin access credential) to the admin wallet.
+
+    This encrypts the connection details with the admin's signature-derived
+    key and mints an NFT containing the encrypted data.
+    """
+    try:
+        admin_wallet = config.get('admin_wallet')
+        admin_signature = config.get('admin_signature')
+        admin_public_secret = config.get('admin_public_secret', '')
+        https_config = config.get('https', {})
+        hostname = https_config.get('hostname', '')
+
+        if not admin_wallet:
+            return False, 'Admin wallet not configured'
+        if not admin_signature:
+            return False, 'Admin signature not available'
+
+        # Step 1: Encrypt connection details using pam_web3_tool
+        plaintext = json.dumps({
+            'hostname': hostname,
+            'port': 443,
+            'type': 'admin',
+        })
+
+        encrypt_result = subprocess.run(
+            [
+                'pam_web3_tool', 'encrypt-symmetric',
+                '--signature', admin_signature,
+                '--plaintext', plaintext,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if encrypt_result.returncode != 0:
+            return False, f'Encryption failed: {encrypt_result.stderr}'
+
+        # Parse ciphertext hex from output (line-by-line)
+        ciphertext_hex = None
+        for line in encrypt_result.stdout.split('\n'):
+            if 'Ciphertext' in line and '0x' in line:
+                # Extract hex: "Ciphertext (hex): 0x..."
+                idx = line.index('0x')
+                ciphertext_hex = line[idx:].strip()
+                break
+
+        if not ciphertext_hex:
+            return False, f'Could not parse ciphertext from output: {encrypt_result.stdout}'
+
+        # Step 2: Mint NFT using blockhost.mint_nft module
+        try:
+            sys.path.insert(0, '/usr/lib/python3/dist-packages')
+            from blockhost.mint_nft import mint_nft
+            from blockhost.config import load_web3_config
+        except ImportError as e:
+            return False, f'Cannot import minting module: {e}'
+
+        web3_config = load_web3_config()
+
+        result = mint_nft(
+            owner_wallet=admin_wallet,
+            machine_id='blockhost-admin',
+            user_encrypted=ciphertext_hex,
+            public_secret=admin_public_secret,
+            config=web3_config,
+        )
+
+        # Store result for step data display
+        config['mint_nft_result'] = {
+            'token_id': str(result.get('token_id', '')),
+            'tx_hash': result.get('tx_hash', result.get('transaction_hash', '')),
+        }
 
         return True, None
     except Exception as e:

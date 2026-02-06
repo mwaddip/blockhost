@@ -38,10 +38,13 @@
             your access details into NFT #0.
         </p>
         <div style="margin-bottom: 1rem;">
-            <label>Message to sign</label>
-            <div class="address-box">
-                <span id="decrypt-message-display" style="font-size: 0.8rem;">-</span>
-            </div>
+            <label for="public-secret-input">Message to sign</label>
+            <input type="text" id="public-secret-input" value="blockhost-access"
+                   style="font-size: 0.875rem;">
+            <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                Your "public secret" — not a password, but you'll need to sign this same message
+                to decrypt your NFT later. Make it something you'll remember.
+            </p>
         </div>
         <button type="button" class="btn btn-primary" id="btn-sign" style="width: 100%;">
             Sign Message
@@ -67,7 +70,7 @@
     <form method="POST" action="{{ url_for('wizard_wallet') }}" id="wallet-form" class="hidden">
         <input type="hidden" name="admin_wallet" id="input-wallet">
         <input type="hidden" name="admin_signature" id="input-signature">
-        <input type="hidden" name="decrypt_message" id="input-decrypt-message">
+        <input type="hidden" name="public_secret" id="input-public-secret">
     </form>
 
     <div class="flex justify-between" style="margin-top: 2rem;">
@@ -84,21 +87,7 @@
 const $ = id => document.getElementById(id);
 let adminAddress = null;
 let adminSignature = null;
-let decryptMessage = null;
-
-// Generate a nonce for the decrypt message
-function generateNonce() {
-    const arr = new Uint8Array(8);
-    crypto.getRandomValues(arr);
-    return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-// EIP-55 checksum address
-function toChecksumAddress(address) {
-    // We'll rely on the wallet returning checksummed address
-    // but fall back to lowercase if needed
-    return address;
-}
+let publicSecret = null;
 
 // Connect wallet
 $('btn-connect').addEventListener('click', async () => {
@@ -120,11 +109,6 @@ $('btn-connect').addEventListener('click', async () => {
         $('wallet-disconnected').classList.add('hidden');
         $('wallet-connected').classList.remove('hidden');
 
-        // Generate decrypt message
-        const nonce = generateNonce();
-        decryptMessage = 'libpam-web3:' + adminAddress + ':' + nonce;
-        $('decrypt-message-display').textContent = decryptMessage;
-
         // Show sign section
         $('section-sign').classList.remove('hidden');
 
@@ -137,13 +121,19 @@ $('btn-connect').addEventListener('click', async () => {
 
 // Sign message
 $('btn-sign').addEventListener('click', async () => {
+    publicSecret = $('public-secret-input').value.trim();
+    if (!publicSecret) {
+        $('sign-status').innerHTML = '<div class="alert alert-error" style="margin-top: 0.5rem;">Please enter a message to sign.</div>';
+        return;
+    }
+
     try {
         $('btn-sign').disabled = true;
         $('btn-sign').textContent = 'Waiting for signature...';
 
         adminSignature = await window.ethereum.request({
             method: 'personal_sign',
-            params: [decryptMessage, adminAddress]
+            params: [publicSecret, adminAddress]
         });
 
         // Update UI
@@ -154,7 +144,7 @@ $('btn-sign').addEventListener('click', async () => {
         // Fill hidden form
         $('input-wallet').value = adminAddress;
         $('input-signature').value = adminSignature;
-        $('input-decrypt-message').value = decryptMessage;
+        $('input-public-secret').value = publicSecret;
 
         // Enable continue
         $('btn-continue').disabled = false;

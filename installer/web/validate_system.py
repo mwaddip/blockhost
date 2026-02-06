@@ -468,7 +468,8 @@ def run_full_validation() -> ValidationReport:
     report.add(_check_yaml_syntax(
         etc_blockhost / 'blockhost.yaml',
         "Config", "blockhost.yaml",
-        required_keys=['server.key_file', 'deployer.key_file', 'proxmox.node', 'proxmox.storage', 'proxmox.bridge']
+        required_keys=['server.key_file', 'deployer.key_file', 'proxmox.node', 'proxmox.storage', 'proxmox.bridge',
+                       'admin.wallet_address']
     ))
 
     # ========== JSON CONFIG FILES ==========
@@ -529,6 +530,47 @@ def run_full_validation() -> ValidationReport:
     if (etc_blockhost / 'deployer.key').exists():
         report.add(_check_hex_key(etc_blockhost / 'deployer.key', "Keys", "Deployer key format", expected_length=64))
 
+    # ========== ADMIN CONFIG ==========
+
+    # admin-signature.key (always present if admin wallet was connected)
+    admin_sig = etc_blockhost / 'admin-signature.key'
+    report.add(_check_file_exists(admin_sig, "Admin", "Admin signature key"))
+    if admin_sig.exists():
+        report.add(_check_file_permissions(admin_sig, 0o600, "Permissions", "Admin signature key"))
+
+    # Validate admin wallet address from blockhost.yaml
+    blockhost_yaml_admin = etc_blockhost / 'blockhost.yaml'
+    admin_enabled = False
+    if blockhost_yaml_admin.exists():
+        try:
+            import yaml
+            bh_data = yaml.safe_load(blockhost_yaml_admin.read_text())
+            admin_section = bh_data.get('admin', {})
+            admin_wallet = admin_section.get('wallet_address', '')
+            report.add(_check_eth_address(admin_wallet, "Admin", "Admin wallet address"))
+
+            # Check if admin commands are enabled (has destination_mode means enabled)
+            if admin_section.get('destination_mode'):
+                admin_enabled = True
+        except ImportError:
+            report.add(ValidationResult("Admin", "Admin wallet validation", True,
+                                        "Skipped (yaml module unavailable)", critical=False))
+        except Exception as e:
+            report.add(ValidationResult("Admin", "Admin wallet validation", False, f"Error: {e}"))
+
+    # admin-commands.json (only present when admin commands enabled)
+    admin_cmds_file = etc_blockhost / 'admin-commands.json'
+    if admin_enabled:
+        report.add(_check_json_syntax(admin_cmds_file, "Admin", "admin-commands.json",
+                                      required_keys=['commands']))
+    else:
+        if admin_cmds_file.exists():
+            report.add(ValidationResult("Admin", "admin-commands.json", False,
+                                        "File exists but admin commands not enabled in blockhost.yaml"))
+        else:
+            report.add(ValidationResult("Admin", "admin-commands.json", True,
+                                        "Not present (OK - admin commands not enabled)", critical=False))
+
     # ========== CONTRACT ADDRESSES ==========
 
     # Read and validate contract addresses from web3-defaults.yaml
@@ -550,6 +592,67 @@ def run_full_validation() -> ValidationReport:
             report.add(ValidationResult("Contracts", "Address validation", True, "Skipped (yaml module unavailable)", critical=False))
         except Exception as e:
             report.add(ValidationResult("Contracts", "Address validation", False, f"Error: {e}"))
+
+    # ========== NFT #0 (ADMIN CREDENTIAL) ==========
+
+    # Check if NFT #0 was minted (totalSupply > 0)
+    if web3_defaults.exists():
+        try:
+            import yaml
+            data = yaml.safe_load(web3_defaults.read_text())
+            blockchain = data.get('blockchain', {})
+            nft_addr = blockchain.get('nft_contract', '')
+            rpc_url = blockchain.get('rpc_url', '')
+
+            if nft_addr and rpc_url:
+                try:
+                    result = subprocess.run(
+                        ['cast', 'call', nft_addr, 'totalSupply()', '--rpc-url', rpc_url],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if result.returncode == 0:
+                        supply_hex = result.stdout.strip()
+                        try:
+                            supply = int(supply_hex, 16) if supply_hex.startswith('0x') else int(supply_hex)
+                        except ValueError:
+                            supply = 0
+                        if supply > 0:
+                            report.add(ValidationResult(
+                                "NFT", "Admin NFT minted", True,
+                                f"totalSupply = {supply}", critical=False
+                            ))
+                        else:
+                            report.add(ValidationResult(
+                                "NFT", "Admin NFT minted", False,
+                                "totalSupply is 0 — NFT #0 not minted", critical=False
+                            ))
+                    else:
+                        report.add(ValidationResult(
+                            "NFT", "Admin NFT minted", False,
+                            f"cast call failed: {result.stderr}", critical=False
+                        ))
+                except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                    report.add(ValidationResult(
+                        "NFT", "Admin NFT minted", False,
+                        f"Cannot check: {e}", critical=False
+                    ))
+            else:
+                report.add(ValidationResult(
+                    "NFT", "Admin NFT minted", True,
+                    "Skipped (no NFT contract or RPC configured)", critical=False
+                ))
+        except ImportError:
+            report.add(ValidationResult(
+                "NFT", "Admin NFT check", True,
+                "Skipped (yaml module unavailable)", critical=False
+            ))
+        except Exception as e:
+            report.add(ValidationResult(
+                "NFT", "Admin NFT check", False,
+                f"Error: {e}", critical=False
+            ))
 
     # ========== ENVIRONMENT FILE ==========
 
@@ -587,6 +690,32 @@ def run_full_validation() -> ValidationReport:
 
     report.add(_check_bridge_exists(bridge_name))
     report.add(_check_bridge_has_ip(bridge_name))
+
+    # IPv6 forwarding sysctl
+    sysctl_file = Path('/etc/sysctl.d/99-blockhost-ipv6.conf')
+    if sysctl_file.exists():
+        content = sysctl_file.read_text()
+        if 'net.ipv6.conf.all.forwarding=1' in content:
+            report.add(ValidationResult("Network", "IPv6 forwarding sysctl", True, "Persisted in 99-blockhost-ipv6.conf"))
+        else:
+            report.add(ValidationResult("Network", "IPv6 forwarding sysctl", False, "File exists but missing forwarding=1"))
+    else:
+        report.add(ValidationResult("Network", "IPv6 forwarding sysctl", False, "Missing: /etc/sysctl.d/99-blockhost-ipv6.conf", critical=False))
+
+    # WireGuard persistent config (broker mode only)
+    broker_alloc_data = None
+    if broker_alloc.exists():
+        try:
+            broker_alloc_data = json.loads(broker_alloc.read_text())
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    is_broker_mode = broker_alloc_data and broker_alloc_data.get('mode') != 'manual' and broker_alloc_data.get('prefix')
+    if is_broker_mode:
+        wg_conf = Path('/etc/wireguard/wg-broker.conf')
+        report.add(_check_file_exists(wg_conf, "Network", "WireGuard broker config", critical=False))
+        report.add(_check_service_state('wg-quick@wg-broker', expected_enabled=True, expected_active=None,
+                                        category="Network", critical=False))
 
     # ========== SSH ==========
 

@@ -200,6 +200,13 @@
             <div class="step-content">
                 <span class="step-name">Configure deployer wallet</span>
                 <span class="step-status"></span>
+                <div id="wallet-data" class="hidden" style="margin-top: 0.5rem;">
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Deployer:</span>
+                        <code id="wallet-deployer-addr" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('wallet-deployer-addr')" title="Copy">&#128203;</button>
+                    </div>
+                </div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('wallet')">Retry</button>
         </li>
@@ -208,6 +215,18 @@
             <div class="step-content">
                 <span class="step-name" id="step-contracts-text">Deploy smart contracts</span>
                 <span class="step-status"></span>
+                <div id="contract-addresses" class="hidden" style="margin-top: 0.5rem;">
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">NFT:</span>
+                        <code id="contract-nft-addr" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('contract-nft-addr')" title="Copy">&#128203;</button>
+                    </div>
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Subscriptions:</span>
+                        <code id="contract-sub-addr" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('contract-sub-addr')" title="Copy">&#128203;</button>
+                    </div>
+                </div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('contracts')">Retry</button>
         </li>
@@ -241,6 +260,17 @@
             <div class="step-content">
                 <span class="step-name">Configure IPv6</span>
                 <span class="step-status"></span>
+                <div id="ipv6-data" class="hidden" style="margin-top: 0.5rem;">
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Prefix:</span>
+                        <code id="ipv6-prefix" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('ipv6-prefix')" title="Copy">&#128203;</button>
+                    </div>
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Mode:</span>
+                        <code id="ipv6-mode" class="contract-addr"></code>
+                    </div>
+                </div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('ipv6')">Retry</button>
         </li>
@@ -249,6 +279,13 @@
             <div class="step-content">
                 <span class="step-name">Configure HTTPS for signup</span>
                 <span class="step-status"></span>
+                <div id="https-data" class="hidden" style="margin-top: 0.5rem;">
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Hostname:</span>
+                        <code id="https-hostname" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('https-hostname')" title="Copy">&#128203;</button>
+                    </div>
+                </div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('https')">Retry</button>
         </li>
@@ -259,6 +296,26 @@
                 <span class="step-status"></span>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('signup')">Retry</button>
+        </li>
+        <li id="step-mint_nft" data-step="mint_nft">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Mint admin NFT</span>
+                <span class="step-status"></span>
+                <div id="mint-nft-data" class="hidden" style="margin-top: 0.5rem;">
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">Token ID:</span>
+                        <code id="mint-nft-token-id" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('mint-nft-token-id')" title="Copy">&#128203;</button>
+                    </div>
+                    <div class="contract-addr-row">
+                        <span class="contract-addr-label">TX Hash:</span>
+                        <code id="mint-nft-tx-hash" class="contract-addr"></code>
+                        <button type="button" class="btn-copy" onclick="copyAddress('mint-nft-tx-hash')" title="Copy">&#128203;</button>
+                    </div>
+                </div>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('mint_nft')">Retry</button>
         </li>
         <li id="step-template" data-step="template">
             <span class="step-icon">&#9675;</span>
@@ -452,6 +509,49 @@
     to { transform: rotate(360deg); }
 }
 
+/* Contract address display */
+.contract-addr-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+}
+
+.contract-addr-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-width: 5rem;
+}
+
+.contract-addr {
+    font-size: 0.7rem;
+    background: var(--bg-input);
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+    user-select: all;
+}
+
+.btn-copy {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 0.25rem;
+    padding: 0.1rem 0.35rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1;
+}
+
+.btn-copy:hover {
+    background: var(--bg-input);
+    color: var(--text-primary);
+}
+
+.btn-copy.copied {
+    color: var(--success);
+    border-color: var(--success);
+}
+
 /* Validation output styling */
 #validation-output {
     line-height: 1.4;
@@ -463,7 +563,7 @@
 <script>
 let pollInterval;
 // Note: 'terraform' step runs in backend but is hidden from UI (internal plumbing)
-const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'bridge', 'ipv6', 'https', 'signup', 'template', 'finalize', 'validate'];
+const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'bridge', 'ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate'];
 const stepNames = {
     'keypair': 'Generate server keypair',
     'wallet': 'Configure deployer wallet',
@@ -474,6 +574,7 @@ const stepNames = {
     'ipv6': 'Configure IPv6',
     'https': 'Configure HTTPS for signup',
     'signup': 'Generate signup page',
+    'mint_nft': 'Mint admin NFT',
     'template': 'Build VM template',
     'finalize': 'Finalize setup',
     'validate': 'Validate system'
@@ -719,6 +820,36 @@ function updateProgress(data) {
             li.classList.add('completed');
             icon.innerHTML = '&#10003;';
             status.textContent = stepData.completed_at ? 'Completed' : '';
+
+            // Show step data when steps complete
+            if (stepId === 'wallet' && stepData.data && stepData.data.deployer_address) {
+                document.getElementById('wallet-deployer-addr').textContent = stepData.data.deployer_address;
+                document.getElementById('wallet-data').classList.remove('hidden');
+            }
+            if (stepId === 'contracts' && stepData.data && stepData.data.contracts) {
+                const addrs = document.getElementById('contract-addresses');
+                document.getElementById('contract-nft-addr').textContent = stepData.data.contracts.nft || '';
+                document.getElementById('contract-sub-addr').textContent = stepData.data.contracts.subscription || '';
+                addrs.classList.remove('hidden');
+            }
+            if (stepId === 'ipv6' && stepData.data && stepData.data.prefix) {
+                document.getElementById('ipv6-prefix').textContent = stepData.data.prefix;
+                document.getElementById('ipv6-mode').textContent = stepData.data.mode || '';
+                document.getElementById('ipv6-data').classList.remove('hidden');
+            }
+            if (stepId === 'https' && stepData.data && stepData.data.hostname) {
+                document.getElementById('https-hostname').textContent = stepData.data.hostname;
+                document.getElementById('https-data').classList.remove('hidden');
+            }
+            if (stepId === 'mint_nft' && stepData.data) {
+                if (stepData.data.token_id) {
+                    document.getElementById('mint-nft-token-id').textContent = stepData.data.token_id;
+                }
+                if (stepData.data.tx_hash) {
+                    document.getElementById('mint-nft-tx-hash').textContent = stepData.data.tx_hash;
+                }
+                document.getElementById('mint-nft-data').classList.remove('hidden');
+            }
         } else if (stepData.status === 'in_progress' || stepId === currentStep) {
             li.classList.add('in-progress');
             icon.innerHTML = '<div class="spinner-small"></div>';
@@ -790,6 +921,39 @@ function showError(stepId, message) {
     if (stepId === 'validate') {
         fetchValidationOutput();
     }
+}
+
+function copyAddress(elementId) {
+    const text = document.getElementById(elementId).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById(elementId).nextElementSibling;
+        btn.classList.add('copied');
+        btn.innerHTML = '&#10003;';
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = '&#128203;';
+        }, 2000);
+    }).catch(() => {
+        // Fallback for Firefox on HTTP (clipboard API requires secure context)
+        const range = document.createRange();
+        range.selectNodeContents(document.getElementById(elementId));
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        try {
+            document.execCommand('copy');
+            const btn = document.getElementById(elementId).nextElementSibling;
+            btn.classList.add('copied');
+            btn.innerHTML = '&#10003;';
+            setTimeout(() => {
+                btn.classList.remove('copied');
+                btn.innerHTML = '&#128203;';
+            }, 2000);
+        } catch(e) {
+            // At least the text is selected for manual copy
+        }
+        sel.removeAllRanges();
+    });
 }
 
 function reboot() {

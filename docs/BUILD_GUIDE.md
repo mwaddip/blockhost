@@ -1742,7 +1742,7 @@ blockchain:
 auth:
   otp_length: 6
   otp_ttl_seconds: 300
-  decrypt_message: "blockhost-access"
+  public_secret: "blockhost-access"
 signing_page:
   html_path: /usr/share/libpam-web3-tools/signing-page/index.html
 deployer:
@@ -1885,13 +1885,13 @@ Added new finalization step to generate and serve the signup page.
 
 #### 5. Fixed blockhost.yaml Config
 
-Added `server_public_key` and `decrypt_message` to `blockhost.yaml` output.
+Added `server_public_key` and `public_secret` to `blockhost.yaml` output.
 These fields are required by `blockhost-generate-signup`.
 
 ```yaml
 # Now included in blockhost.yaml:
 server_public_key: '04...'  # Uncompressed secp256k1 public key (no 0x prefix)
-decrypt_message: 'blockhost-access'
+public_secret: 'blockhost-access'
 ```
 
 ---
@@ -1919,12 +1919,19 @@ reboot rather than having to debug a broken system.
 **YAML Configuration:**
 - `/etc/blockhost/db.yaml` - syntax + required keys (vmid_range, ip_pool, etc.)
 - `/etc/blockhost/web3-defaults.yaml` - syntax + required keys (chain_id, rpc_url, nft_contract)
-- `/etc/blockhost/blockhost.yaml` - syntax + required keys (key files, proxmox settings)
+- `/etc/blockhost/blockhost.yaml` - syntax + required keys (key files, proxmox settings, admin.wallet_address)
 
 **JSON Configuration:**
 - `/etc/blockhost/https.json` - syntax + required keys
 - `/etc/blockhost/broker-allocation.json` - syntax (if exists)
+- `/etc/blockhost/admin-commands.json` - syntax + `commands` key (only when admin commands enabled)
 - `/var/lib/blockhost/setup-state.json` - status = completed
+
+**Admin Configuration:**
+- `/etc/blockhost/admin-signature.key` - exists, 0600 permissions
+- Admin wallet address in blockhost.yaml validated as Ethereum address
+- `admin-commands.json` required when `admin.destination_mode` is set in blockhost.yaml
+- `admin-commands.json` should NOT exist when admin commands are disabled
 
 **Terraform:**
 - `/var/lib/blockhost/terraform/provider.tf.json` - valid JSON
@@ -2083,3 +2090,108 @@ Updated `blockhost-engine` submodule to include:
 Config format coordinated between installer and engine:
 - Engine reads `admin.wallet_address` from `blockhost.yaml`
 - Engine reads command definitions from `admin-commands.json`
+
+---
+
+### Step 14: Finalization Data Display, NFT #0 Minting, Bridge & IPv6 Fixes
+
+**Date**: 2026-02-06
+
+#### 1. Bridge Persistence Fix (`_finalize_bridge()`)
+
+**Problem**: Previous bridge creation edited `/etc/network/interfaces` directly, ignoring PVE's management of that file. Bridge configuration was lost on reboot.
+
+**Fix**: Rewrote `_finalize_bridge()` to use the PVE API (`pvesh`) exclusively:
+
+```bash
+# Create bridge via PVE API
+pvesh create /nodes/<node>/network --iface vmbr0 --type bridge \
+    --bridge_ports <primary_iface> --autostart 1 \
+    --cidr <ip>/<prefix> --gateway <gw>
+
+# Set primary interface to manual (bridge port)
+pvesh set /nodes/<node>/network/<primary_iface> --type eth --autostart 1
+
+# Apply staged config (rewrites /etc/network/interfaces)
+pvesh set /nodes/<node>/network
+```
+
+PVE generates a clean `/etc/network/interfaces` with proper bridge config that survives reboot. Ephemeral `ip` commands are used as fallback to ensure bridge is active during the current session.
+
+**Files changed**: `installer/web/app.py` — `_finalize_bridge()`
+
+#### 2. IPv6 Broker Persistence Fix (`_finalize_ipv6()`)
+
+**Problem**: Previous implementation used `--configure-wg` (ephemeral), wrote its own `broker-allocation.json` instead of letting broker-client handle it, and never called `broker-client install` for persistent WireGuard config.
+
+**Fix**: Rewrote broker path:
+1. Call `broker-client request` WITHOUT `--configure-wg` (broker-client saves its own config)
+2. Read prefix from `/etc/blockhost/broker-allocation.json` (written by broker-client)
+3. Call `broker-client install` to create persistent WireGuard config at `/etc/wireguard/wg-broker.conf`
+4. Verify WireGuard tunnel is up with `wg show`
+5. Enable IPv6 forwarding via sysctl (persisted in `/etc/sysctl.d/99-blockhost-ipv6.conf`)
+
+```bash
+# IPv6 forwarding (persisted)
+sysctl -w net.ipv6.conf.all.forwarding=1
+# Written to /etc/sysctl.d/99-blockhost-ipv6.conf
+```
+
+**Files changed**: `installer/web/app.py` — `_finalize_ipv6()`
+
+#### 3. Finalization Step Data Display
+
+**Problem**: Finalization steps only showed pass/fail — no useful data for sysadmins to record.
+
+**Fix**: Expanded step data collection in `_run_finalization_with_state()` to attach data for:
+
+| Step | Data Shown | Source |
+|------|-----------|--------|
+| wallet | Deployer address | `_get_address_from_key()` |
+| contracts | NFT + Subscription addresses | `config['contracts']` (existing) |
+| ipv6 | Allocated prefix, mode | `broker-allocation.json` or config |
+| https | Hostname | `config['https']['hostname']` |
+| mint_nft | Token ID, TX hash | Mint result |
+
+Each data item has a copyable `<code>` element with a copy button, using the same pattern as the existing contract addresses display.
+
+**Files changed**:
+- `installer/web/app.py` — step data collection in `_run_finalization_with_state()`
+- `installer/web/templates/wizard/summary.html` — data display divs + JS `updateProgress()` expansion
+
+#### 4. NFT #0 Minting Step
+
+**New step `mint_nft`** added between `signup` and `template` in the finalization sequence.
+
+**What it does**:
+1. Encrypts connection details (`hostname`, port 443, type "admin") using `pam_web3_tool encrypt-symmetric` with the admin's signature
+2. Calls `mint_nft()` from `blockhost.mint_nft` module with:
+   - `owner_wallet` = admin wallet from wallet gate
+   - `machine_id` = `"blockhost-admin"`
+   - `user_encrypted` = encrypted hex from step 1
+   - `public_secret` = admin's public secret
+3. Stores token ID and TX hash for display
+
+**State migration**: `_load()` now merges missing steps from `_default_state()` so existing in-progress installs don't KeyError on the new step.
+
+**Files changed**:
+- `installer/web/app.py` — `_default_state()`, `get_next_step()`, `_run_finalization_with_state()`, new `_finalize_mint_nft()`, `_load()` migration
+- `installer/web/templates/wizard/summary.html` — new `<li id="step-mint_nft">`, JS stepOrder/stepNames
+
+#### 5. NFT #0 Validation Check
+
+Added non-critical validation check: calls `cast call <nft_contract> 'totalSupply()'` — if supply > 0, passes.
+
+**Files changed**: `installer/web/validate_system.py` — new NFT section in `run_full_validation()`
+
+#### Verification
+
+1. Build ISO with `--testing`
+2. Run wizard through finalization
+3. Confirm vmbr0 bridge created via PVE API and persists across reboot
+4. Confirm deployer address shows after wallet step with copy button
+5. Confirm contract addresses show after contracts step (existing, verify still works)
+6. Confirm IPv6 prefix shows after ipv6 step
+7. Confirm hostname shows after https step
+8. Confirm NFT #0 mints after signup step, shows token ID + tx hash
+9. Confirm validation passes including new NFT check
