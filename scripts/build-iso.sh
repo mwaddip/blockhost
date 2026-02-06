@@ -22,6 +22,7 @@ OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 
 # Testing mode settings
 TESTING_MODE=false
+BUILD_DEBS=false
 APT_PROXY="http://192.168.122.1:3142"
 
 # Colors
@@ -38,6 +39,7 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
+    echo "  --build-deb  Build all .deb packages from submodules before ISO creation"
     echo "  --testing    Enable testing mode (apt proxy, SSH root login)"
     echo "  --help       Show this help message"
     echo ""
@@ -49,6 +51,10 @@ usage() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --build-deb)
+                BUILD_DEBS=true
+                shift
+                ;;
             --testing)
                 TESTING_MODE=true
                 shift
@@ -374,6 +380,15 @@ main() {
         log "TESTING MODE ENABLED"
         log "  - apt proxy: $APT_PROXY"
         log "  - SSH root login: enabled"
+    fi
+
+    if [ "$BUILD_DEBS" = "true" ]; then
+        log "Building .deb packages from submodules..."
+        if ! "${SCRIPT_DIR}/build-packages.sh"; then
+            error "Package build failed. Fix errors above and retry."
+        fi
+        log "All packages built successfully"
+        echo ""
     fi
 
     check_dependencies

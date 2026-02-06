@@ -90,7 +90,7 @@ main() {
     echo "======================================"
 
     # ----------------------------------------
-    log_section "Required Commands"
+    log_section "Required Commands (ISO build)"
     # ----------------------------------------
 
     # ISO building
@@ -118,6 +118,63 @@ main() {
         MISSING_CMDS+=("wget")
         MISSING_PKGS+=("wget")
     fi
+
+    # ----------------------------------------
+    log_section "Required Commands (package builds)"
+    # ----------------------------------------
+
+    # Rust toolchain (libpam-web3, libpam-web3-tools)
+    if command -v cargo >/dev/null 2>&1; then
+        log_ok "cargo ($(cargo --version 2>/dev/null | head -1))"
+    else
+        log_missing "cargo (install: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)"
+        MISSING_CMDS+=("cargo")
+    fi
+
+    # Foundry / forge (libpam-web3-tools, blockhost-engine contracts)
+    if command -v forge >/dev/null 2>&1 || [ -x "$HOME/.foundry/bin/forge" ]; then
+        local forge_bin="${HOME}/.foundry/bin/forge"
+        command -v forge >/dev/null 2>&1 && forge_bin="forge"
+        log_ok "forge ($($forge_bin --version 2>/dev/null | head -1))"
+    else
+        log_missing "forge (install: curl -L https://foundry.paradigm.xyz | bash && foundryup)"
+        MISSING_CMDS+=("forge")
+    fi
+
+    # Node.js (blockhost-engine)
+    if command -v node >/dev/null 2>&1; then
+        local node_ver
+        node_ver=$(node --version 2>/dev/null)
+        local node_major
+        node_major=$(echo "$node_ver" | sed 's/v//' | cut -d. -f1)
+        if [ "$node_major" -ge 18 ] 2>/dev/null; then
+            log_ok "node ($node_ver)"
+        else
+            log_missing "node >= 18 (found $node_ver)"
+            MISSING_CMDS+=("node")
+        fi
+    else
+        log_missing "node (install: https://nodejs.org/ or via nvm)"
+        MISSING_CMDS+=("node")
+    fi
+
+    # npm (blockhost-engine)
+    check_command npm npm
+
+    # Python 3 (blockhost-provisioner, blockhost-broker)
+    if command -v python3 >/dev/null 2>&1; then
+        log_ok "python3 ($(python3 --version 2>/dev/null))"
+    else
+        log_missing "python3 (install: python3)"
+        MISSING_CMDS+=("python3")
+        MISSING_PKGS+=("python3")
+    fi
+
+    # git (submodule operations, forge dependencies)
+    check_command git git
+
+    # curl (Foundry installer, various downloads)
+    check_command curl curl
 
     # ----------------------------------------
     log_section "Required Files"
@@ -254,6 +311,7 @@ if [ "$1" = "--install" ]; then
     # First run check to get missing packages
     MISSING_PKGS=()
 
+    # ISO build deps
     command -v xorriso >/dev/null 2>&1 || MISSING_PKGS+=("xorriso")
     command -v cpio >/dev/null 2>&1 || MISSING_PKGS+=("cpio")
     command -v gzip >/dev/null 2>&1 || MISSING_PKGS+=("gzip")
@@ -261,16 +319,55 @@ if [ "$1" = "--install" ]; then
     command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || MISSING_PKGS+=("curl")
     [ -f "/usr/lib/ISOLINUX/isohdpfx.bin" ] || MISSING_PKGS+=("isolinux")
 
+    # Package build deps (apt-installable only)
+    command -v python3 >/dev/null 2>&1 || MISSING_PKGS+=("python3")
+    command -v git >/dev/null 2>&1 || MISSING_PKGS+=("git")
+    command -v curl >/dev/null 2>&1 || MISSING_PKGS+=("curl")
+    command -v pkg-config >/dev/null 2>&1 || MISSING_PKGS+=("pkg-config")
+    command -v gcc >/dev/null 2>&1 || MISSING_PKGS+=("build-essential")
+
     if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-        echo "Installing missing packages: ${MISSING_PKGS[*]}"
-        sudo apt update && sudo apt install -y "${MISSING_PKGS[@]}"
+        # Remove duplicates
+        UNIQUE_PKGS=($(echo "${MISSING_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+        echo "Installing missing system packages: ${UNIQUE_PKGS[*]}"
+        sudo apt update && sudo apt install -y "${UNIQUE_PKGS[@]}"
     else
         echo "All system packages already installed"
+    fi
+
+    # Install Rust toolchain if missing
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo ""
+        echo "Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+    fi
+
+    # Install Foundry if missing
+    if ! command -v forge >/dev/null 2>&1 && [ ! -x "$HOME/.foundry/bin/forge" ]; then
+        echo ""
+        echo "Installing Foundry..."
+        curl -L https://foundry.paradigm.xyz | bash
+        "$HOME/.foundry/bin/foundryup"
+    fi
+
+    # Check Node.js
+    if ! command -v node >/dev/null 2>&1; then
+        echo ""
+        echo "Node.js 18+ is required but not installed."
+        echo "Install via: https://nodejs.org/ or nvm (https://github.com/nvm-sh/nvm)"
+    else
+        node_major=$(node --version | sed 's/v//' | cut -d. -f1)
+        if [ "$node_major" -lt 18 ] 2>/dev/null; then
+            echo ""
+            echo "Node.js 18+ required, found $(node --version). Please upgrade."
+        fi
     fi
 
     # Download Debian ISO if missing
     DEBIAN_ISO="${BUILD_DIR}/debian-12-netinst.iso"
     if [ ! -f "$DEBIAN_ISO" ]; then
+        echo ""
         echo "Downloading Debian ISO..."
         mkdir -p "$BUILD_DIR"
         DEBIAN_URL="https://cdimage.debian.org/cdimage/archive/12.9.0/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso"
