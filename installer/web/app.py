@@ -2440,6 +2440,36 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 'registry': '',
                 'mode': 'manual',
             }, indent=2))
+            config['ipv6']['prefix'] = ipv6.get('prefix', '')
+
+        # Step 4: Add gateway address to vmbr0 for VM connectivity
+        # VMs use the first host address in the prefix as their IPv6 gateway.
+        # This address must exist on vmbr0 (the bridge VMs are connected to).
+        prefix = config.get('ipv6', {}).get('prefix', '')
+        if prefix:
+            import ipaddress
+            try:
+                network = ipaddress.IPv6Network(prefix, strict=False)
+                gw_addr = str(network.network_address + 1)
+
+                # Add to vmbr0 as /128 to avoid conflicting with the /120 on wg-broker
+                subprocess.run(
+                    ['ip', '-6', 'addr', 'add', f'{gw_addr}/128', 'dev', 'vmbr0'],
+                    capture_output=True,
+                    timeout=10
+                )
+
+                # Persist: add to /etc/network/interfaces.d/blockhost-ipv6
+                iface_dir = Path('/etc/network/interfaces.d')
+                iface_dir.mkdir(parents=True, exist_ok=True)
+                (iface_dir / 'blockhost-ipv6').write_text(
+                    f'# BlockHost IPv6 gateway address on bridge for VM connectivity\n'
+                    f'auto vmbr0\n'
+                    f'iface vmbr0 inet6 static\n'
+                    f'    address {gw_addr}/128\n'
+                )
+            except (ValueError, subprocess.TimeoutExpired) as e:
+                print(f"Warning: Could not add IPv6 gateway to vmbr0: {e}")
 
         return True, None
     except subprocess.TimeoutExpired:
