@@ -108,6 +108,7 @@ main() {
     check_command find findutils
     check_command sed sed
     check_command chmod coreutils
+    check_command wget wget
 
     # ----------------------------------------
     log_section "Required Files"
@@ -248,6 +249,7 @@ if [ "$1" = "--install" ]; then
     command -v cpio >/dev/null 2>&1 || MISSING_PKGS+=("cpio")
     command -v gzip >/dev/null 2>&1 || MISSING_PKGS+=("gzip")
     command -v dpkg-deb >/dev/null 2>&1 || MISSING_PKGS+=("dpkg")
+    command -v wget >/dev/null 2>&1 || MISSING_PKGS+=("wget")
     [ -f "/usr/lib/ISOLINUX/isohdpfx.bin" ] || MISSING_PKGS+=("isolinux")
 
     if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
