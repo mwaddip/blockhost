@@ -491,14 +491,16 @@ def run_full_validation() -> ValidationReport:
     state_file = Path('/var/lib/blockhost/setup-state.json')
     report.add(_check_json_syntax(state_file, "Config", "setup-state.json", required_keys=['status']))
 
-    # Check setup-state.json shows completion
+    # Check setup-state.json status
+    # Note: validation runs DURING finalization, so status will be 'running' not 'completed'
     if state_file.exists():
         try:
             state = json.loads(state_file.read_text())
-            if state.get('status') == 'completed':
-                report.add(ValidationResult("Config", "Setup state status", True, "Setup marked as completed"))
+            status = state.get('status')
+            if status in ('running', 'completed'):
+                report.add(ValidationResult("Config", "Setup state status", True, f"Setup status: {status}"))
             else:
-                report.add(ValidationResult("Config", "Setup state status", False, f"Setup status is '{state.get('status')}', expected 'completed'"))
+                report.add(ValidationResult("Config", "Setup state status", False, f"Unexpected status: {status}"))
         except:
             pass
 
@@ -558,8 +560,8 @@ def run_full_validation() -> ValidationReport:
 
     # ========== SERVICES ==========
 
-    # blockhost-signup should be enabled and running
-    report.add(_check_service_state('blockhost-signup', expected_enabled=True, expected_active=True))
+    # blockhost-signup should be enabled (may still be starting)
+    report.add(_check_service_state('blockhost-signup', expected_enabled=True, expected_active=None))
 
     # blockhost-monitor should be enabled (may not be active until reboot)
     report.add(_check_service_state('blockhost-monitor', expected_enabled=True, expected_active=None))

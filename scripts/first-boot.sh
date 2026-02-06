@@ -142,7 +142,7 @@ if [ ! -f "$STEP_PROXMOX" ]; then
     apt-get update
 
     log "Installing Proxmox VE packages (this will take a while)..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony
+    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony python3-ecdsa
 
     # Update grub
     update-grub
