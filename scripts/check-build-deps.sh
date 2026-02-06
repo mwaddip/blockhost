@@ -108,7 +108,16 @@ main() {
     check_command find findutils
     check_command sed sed
     check_command chmod coreutils
-    check_command wget wget
+    # Need wget OR curl for ISO download
+    if command -v wget >/dev/null 2>&1; then
+        log_ok "wget (for ISO download)"
+    elif command -v curl >/dev/null 2>&1; then
+        log_ok "curl (for ISO download)"
+    else
+        log_missing "wget or curl (for ISO download)"
+        MISSING_CMDS+=("wget")
+        MISSING_PKGS+=("wget")
+    fi
 
     # ----------------------------------------
     log_section "Required Files"
@@ -249,7 +258,7 @@ if [ "$1" = "--install" ]; then
     command -v cpio >/dev/null 2>&1 || MISSING_PKGS+=("cpio")
     command -v gzip >/dev/null 2>&1 || MISSING_PKGS+=("gzip")
     command -v dpkg-deb >/dev/null 2>&1 || MISSING_PKGS+=("dpkg")
-    command -v wget >/dev/null 2>&1 || MISSING_PKGS+=("wget")
+    command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || MISSING_PKGS+=("curl")
     [ -f "/usr/lib/ISOLINUX/isohdpfx.bin" ] || MISSING_PKGS+=("isolinux")
 
     if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
@@ -264,7 +273,15 @@ if [ "$1" = "--install" ]; then
     if [ ! -f "$DEBIAN_ISO" ]; then
         echo "Downloading Debian ISO..."
         mkdir -p "$BUILD_DIR"
-        wget -q --show-progress https://cdimage.debian.org/cdimage/archive/12.9.0/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso -O "$DEBIAN_ISO"
+        DEBIAN_URL="https://cdimage.debian.org/cdimage/archive/12.9.0/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso"
+        if command -v wget >/dev/null 2>&1; then
+            wget -q --show-progress "$DEBIAN_URL" -O "$DEBIAN_ISO"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L --progress-bar "$DEBIAN_URL" -o "$DEBIAN_ISO"
+        else
+            echo "Error: Neither wget nor curl available for download"
+            exit 1
+        fi
     fi
 
     echo ""
