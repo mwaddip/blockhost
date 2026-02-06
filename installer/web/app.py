@@ -84,10 +84,13 @@ class SetupState:
                 'config': {'status': 'pending', 'error': None, 'completed_at': None},
                 'token': {'status': 'pending', 'error': None, 'completed_at': None},
                 'terraform': {'status': 'pending', 'error': None, 'completed_at': None},
+                'bridge': {'status': 'pending', 'error': None, 'completed_at': None},
                 'ipv6': {'status': 'pending', 'error': None, 'completed_at': None},
+                'https': {'status': 'pending', 'error': None, 'completed_at': None},
+                'signup': {'status': 'pending', 'error': None, 'completed_at': None},
                 'template': {'status': 'pending', 'error': None, 'completed_at': None},
-                'services': {'status': 'pending', 'error': None, 'completed_at': None},
                 'finalize': {'status': 'pending', 'error': None, 'completed_at': None},
+                'validate': {'status': 'pending', 'error': None, 'completed_at': None},
             },
             'config': {},  # Stored configuration
         }
@@ -119,7 +122,7 @@ class SetupState:
 
     def get_next_step(self) -> Optional[str]:
         """Return the next step to run (first non-completed step)."""
-        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'ipv6', 'template', 'services', 'finalize']
+        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'bridge', 'ipv6', 'https', 'signup', 'template', 'finalize', 'validate']
         for step_id in step_order:
             if self.state['steps'][step_id]['status'] not in ('completed',):
                 return step_id
@@ -167,7 +170,8 @@ class SetupState:
         """Convert state to API response format."""
         completed = self.get_completed_steps()
         failed_step = self.get_failed_step()
-        progress = int((len(completed) / 10) * 100) if self.state['status'] != 'completed' else 100
+        total_steps = len(self.state['steps'])
+        progress = int((len(completed) / total_steps) * 100) if self.state['status'] != 'completed' else 100
 
         return {
             'status': self.state['status'],
@@ -377,6 +381,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'ip_start': request.form.get('ip_start'),
                 'ip_end': request.form.get('ip_end'),
                 'gateway': request.form.get('gateway'),
+                'gc_grace_days': int(request.form.get('gc_grace_days', 7)),
             }
             return redirect(url_for('wizard_ipv6'))
 
@@ -454,6 +459,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'vmid_end': proxmox.get('vmid_end'),
                 'ip_start': proxmox.get('ip_start'),
                 'ip_end': proxmox.get('ip_end'),
+                'gc_grace_days': proxmox.get('gc_grace_days', 7),
             },
             'ipv6': {
                 'mode': ipv6.get('mode'),
@@ -895,6 +901,22 @@ def create_app(config: Optional[dict] = None) -> Flask:
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
 
+    @app.route('/api/validation-output')
+    @require_auth
+    def api_validation_output():
+        """Get the validation output (testing mode only)."""
+        output_file = Path('/var/lib/blockhost/validation-output.txt')
+        if output_file.exists():
+            return jsonify({
+                'success': True,
+                'output': output_file.read_text()
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'output': None  # Not in testing mode or validation hasn't run yet
+            })
+
     return app
 
 
@@ -1030,6 +1052,61 @@ def _generate_secp256k1_keypair() -> tuple[str, str]:
             return private_hex, address
 
         raise RuntimeError("cast wallet address failed")
+    except Exception as e:
+        raise RuntimeError(f"Failed to generate keypair: {e}")
+
+
+def _generate_secp256k1_keypair_with_pubkey() -> tuple[str, str, str]:
+    """Generate a secp256k1 keypair and return (private_key, address, public_key).
+
+    The public key is the uncompressed format (0x04 + x + y, 65 bytes hex)
+    needed for ECIES encryption.
+    """
+    try:
+        # Try using eth-keys library if available
+        from eth_keys import keys
+        private_key = keys.PrivateKey(secrets.token_bytes(32))
+        # public_key.to_bytes() gives 64 bytes (x + y), need to prepend 0x04 for uncompressed
+        public_key_bytes = b'\x04' + private_key.public_key.to_bytes()
+        public_key_hex = '0x' + public_key_bytes.hex()
+        return (
+            private_key.to_hex(),
+            private_key.public_key.to_checksum_address(),
+            public_key_hex
+        )
+    except ImportError:
+        pass
+
+    # Fallback: generate random key and use cast
+    try:
+        private_bytes = secrets.token_bytes(32)
+        private_hex = '0x' + private_bytes.hex()
+
+        # Get address
+        result = subprocess.run(
+            ['cast', 'wallet', 'address', '--private-key', private_hex],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            raise RuntimeError("cast wallet address failed")
+        address = result.stdout.strip()
+
+        # Get public key using cast sig (derive from private key)
+        # cast wallet sign-auth doesn't work, use python ecdsa as backup
+        try:
+            from ecdsa import SigningKey, SECP256k1
+            sk = SigningKey.from_string(private_bytes, curve=SECP256k1)
+            vk = sk.verifying_key
+            # to_string() gives 64 bytes (x + y)
+            public_key_hex = '0x04' + vk.to_string().hex()
+        except ImportError:
+            # Last resort: store empty and generate later
+            public_key_hex = ''
+
+        return private_hex, address, public_key_hex
+
     except Exception as e:
         raise RuntimeError(f"Failed to generate keypair: {e}")
 
@@ -1297,10 +1374,13 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
         ('config', 'Writing configuration files', _finalize_config),
         ('token', 'Creating Proxmox API token', _finalize_token),
         ('terraform', 'Configuring Terraform provider', _finalize_terraform),
+        ('bridge', 'Configuring network bridge', _finalize_bridge),
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
+        ('https', 'Configuring HTTPS for signup page', _finalize_https),
+        ('signup', 'Generating signup page', _finalize_signup),
         ('template', 'Building VM template', _finalize_template),
-        ('services', 'Starting services', _finalize_services),
         ('finalize', 'Finalizing setup', _finalize_complete),
+        ('validate', 'Validating system (testing only)', _finalize_validate),
     ]
 
     try:
@@ -1355,18 +1435,26 @@ def _run_finalization(job_id: str, config: dict):
 
 
 def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
-    """Generate server keypair."""
+    """Generate server keypair for ECIES encryption."""
     try:
-        key_file = Path('/etc/blockhost/server.key')
-        key_file.parent.mkdir(parents=True, exist_ok=True)
+        config_dir = Path('/etc/blockhost')
+        config_dir.mkdir(parents=True, exist_ok=True)
 
-        private_key, address = _generate_secp256k1_keypair()
+        key_file = config_dir / 'server.key'
+
+        private_key, address, public_key = _generate_secp256k1_keypair_with_pubkey()
 
         key_file.write_text(private_key)
         key_file.chmod(0o600)
 
-        # Store address for config files
+        # Write public key separately (for signup page ECIES encryption)
+        pubkey_file = config_dir / 'server.pubkey'
+        pubkey_file.write_text(public_key)
+        pubkey_file.chmod(0o644)
+
+        # Store in running config for later steps
         config['server_address'] = address
+        config['server_public_key'] = public_key
 
         return True, None
     except Exception as e:
@@ -1565,38 +1653,74 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         ipv6 = config.get('ipv6', {})
         contracts = config.get('contracts', {})
 
-        # Write db.yaml
+        # Parse IP pool - extract last octet if full IP strings provided
+        ip_start = proxmox.get('ip_start', '200')
+        ip_end = proxmox.get('ip_end', '250')
+        # Convert full IP strings to integers (last octet)
+        if isinstance(ip_start, str) and '.' in ip_start:
+            ip_start = int(ip_start.split('.')[-1])
+        if isinstance(ip_end, str) and '.' in ip_end:
+            ip_end = int(ip_end.split('.')[-1])
+
+        # Write db.yaml (vmid_range is canonical, integers for ip_pool)
         db_config = {
+            'db_file': '/var/lib/blockhost/vms.json',
             'terraform_dir': '/var/lib/blockhost/terraform',
-            'vmid_pool': {
+            'vmid_range': {
                 'start': proxmox.get('vmid_start', 100),
                 'end': proxmox.get('vmid_end', 999),
             },
             'ip_pool': {
                 'network': proxmox.get('ip_network', '192.168.122.0/24'),
-                'start': proxmox.get('ip_start', '192.168.122.200'),
-                'end': proxmox.get('ip_end', '192.168.122.250'),
+                'start': ip_start,
+                'end': ip_end,
                 'gateway': proxmox.get('gateway', '192.168.122.1'),
             },
-            'ipv6': {
-                'prefix': ipv6.get('prefix'),
-                'allocation_size': ipv6.get('allocation_size', 64),
+            'ipv6_pool': {
+                'start': 2,  # Skip ::0 (network) and ::1 (host)
+                'end': 254,
             },
+            'default_expiry_days': 30,
+            'gc_grace_days': proxmox.get('gc_grace_days', 7),
         }
         _write_yaml(config_dir / 'db.yaml', db_config)
 
-        # Write web3-defaults.yaml
+        # USDC addresses by chain
+        usdc_addresses = {
+            11155111: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',  # Sepolia
+            1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',         # Mainnet
+            137: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',       # Polygon
+            42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',     # Arbitrum
+        }
+        chain_id = int(blockchain.get('chain_id', 11155111))
+
+        # Write web3-defaults.yaml (nested structure expected by provisioner)
         web3_config = {
-            'chain_id': int(blockchain.get('chain_id', 11155111)),
-            'rpc_url': blockchain.get('rpc_url'),
-            'contracts': {
-                'nft': contracts.get('nft'),
-                'subscription': contracts.get('subscription'),
+            'blockchain': {
+                'chain_id': chain_id,
+                'rpc_url': blockchain.get('rpc_url'),
+                'nft_contract': contracts.get('nft'),
+                'subscription_contract': contracts.get('subscription'),
+                'usdc_address': usdc_addresses.get(chain_id, ''),
+            },
+            'auth': {
+                'otp_length': 6,
+                'otp_ttl_seconds': 300,
+                'decrypt_message': blockchain.get('decrypt_message', 'blockhost-access'),
+            },
+            'signing_page': {
+                'html_path': '/usr/share/libpam-web3-tools/signing-page/index.html',
+            },
+            'deployer': {
+                'private_key_file': '/etc/blockhost/deployer.key',
+            },
+            'server': {
+                'public_key': config.get('server_public_key', ''),
             },
         }
         _write_yaml(config_dir / 'web3-defaults.yaml', web3_config)
 
-        # Write blockhost.yaml
+        # Write blockhost.yaml (includes fields needed by generate-signup-page.py)
         blockhost_config = {
             'server': {
                 'address': config.get('server_address'),
@@ -1610,8 +1734,27 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
                 'storage': proxmox.get('storage'),
                 'bridge': proxmox.get('bridge'),
             },
+            # Top-level fields for generate-signup-page.py
+            'server_public_key': config.get('server_public_key', ''),
+            'decrypt_message': blockchain.get('decrypt_message', 'blockhost-access'),
         }
         _write_yaml(config_dir / 'blockhost.yaml', blockhost_config)
+
+        # Write .env file for blockhost-monitor service
+        env_file = Path('/opt/blockhost/.env')
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Map chain_id to RPC env var name
+        chain_id = int(blockchain.get('chain_id', 11155111))
+        rpc_var = 'SEPOLIA_RPC' if chain_id == 11155111 else f'CHAIN_{chain_id}_RPC'
+
+        env_lines = [
+            f"{rpc_var}={blockchain.get('rpc_url', '')}",
+            f"BLOCKHOST_CONTRACT={contracts.get('subscription', '')}",
+            f"NFT_CONTRACT={contracts.get('nft', '')}",
+            f"DEPLOYER_KEY_FILE=/etc/blockhost/deployer.key",
+        ]
+        env_file.write_text('\n'.join(env_lines) + '\n')
 
         return True, None
     except Exception as e:
@@ -1726,6 +1869,7 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
                     "insecure": True,
                     "ssh": {
                         "agent": False,
+                        "username": "root",
                         "private_key": "${file(\"/etc/blockhost/terraform_ssh_key\")}",
                         "node": [
                             {
@@ -1800,6 +1944,205 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
         return True, None
     except subprocess.TimeoutExpired:
         return False, 'Terraform init timed out'
+    except Exception as e:
+        return False, str(e)
+
+
+def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
+    """Ensure network bridge exists for VM networking.
+
+    On bare metal Proxmox installs, vmbr0 is created by the installer.
+    On nested/VM installs or custom setups, it may not exist.
+    This step creates it if missing.
+    """
+    try:
+        proxmox = config.get('proxmox', {})
+        bridge_name = proxmox.get('bridge', 'vmbr0')
+
+        # Check if bridge already exists
+        bridge_path = Path(f'/sys/class/net/{bridge_name}')
+        if bridge_path.exists():
+            # Bridge exists, nothing to do
+            return True, None
+
+        # Bridge doesn't exist - need to create it
+        # Find the primary network interface (the one with a default route)
+        result = subprocess.run(
+            ['ip', 'route', 'show', 'default'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0 or not result.stdout.strip():
+            return False, 'Could not determine default network interface'
+
+        # Parse: "default via 192.168.122.1 dev ens3 proto dhcp src 192.168.122.195 metric 100"
+        parts = result.stdout.strip().split()
+        try:
+            dev_idx = parts.index('dev')
+            primary_iface = parts[dev_idx + 1]
+        except (ValueError, IndexError):
+            return False, f'Could not parse default route: {result.stdout}'
+
+        # Get current IP configuration from the primary interface
+        result = subprocess.run(
+            ['ip', '-j', 'addr', 'show', primary_iface],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return False, f'Could not get IP config for {primary_iface}'
+
+        import json as json_mod
+        iface_info = json_mod.loads(result.stdout)
+
+        # Find IPv4 address
+        ipv4_addr = None
+        ipv4_prefix = None
+        gateway = None
+
+        for info in iface_info:
+            for addr_info in info.get('addr_info', []):
+                if addr_info.get('family') == 'inet':
+                    ipv4_addr = addr_info.get('local')
+                    ipv4_prefix = addr_info.get('prefixlen')
+                    break
+
+        if not ipv4_addr or not ipv4_prefix:
+            return False, f'Could not find IPv4 address on {primary_iface}'
+
+        # Get gateway from default route
+        parts = result.stdout.strip().split() if result.stdout else []
+        result = subprocess.run(
+            ['ip', 'route', 'show', 'default'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        parts = result.stdout.strip().split()
+        try:
+            via_idx = parts.index('via')
+            gateway = parts[via_idx + 1]
+        except (ValueError, IndexError):
+            return False, 'Could not determine gateway'
+
+        # Read current interfaces file
+        interfaces_file = Path('/etc/network/interfaces')
+        interfaces_content = interfaces_file.read_text() if interfaces_file.exists() else ''
+
+        # Check if bridge is already configured (even if not up)
+        if f'iface {bridge_name}' in interfaces_content:
+            # Bridge is configured but not up - try to bring it up
+            subprocess.run(['ifup', bridge_name], capture_output=True, timeout=30)
+            if Path(f'/sys/class/net/{bridge_name}').exists():
+                return True, None
+            return False, f'Bridge {bridge_name} configured but failed to come up'
+
+        # Create bridge configuration
+        # We'll modify the primary interface to be part of the bridge
+        bridge_config = f'''
+# Bridge for VM networking (auto-generated by BlockHost wizard)
+auto {bridge_name}
+iface {bridge_name} inet static
+    address {ipv4_addr}/{ipv4_prefix}
+    gateway {gateway}
+    bridge-ports {primary_iface}
+    bridge-stp off
+    bridge-fd 0
+
+# Original interface becomes bridge port
+auto {primary_iface}
+iface {primary_iface} inet manual
+'''
+
+        # Backup original interfaces file
+        backup_file = Path('/etc/network/interfaces.blockhost-backup')
+        if not backup_file.exists():
+            backup_file.write_text(interfaces_content)
+
+        # Comment out existing configuration for the primary interface
+        new_content = interfaces_content
+        lines = interfaces_content.split('\n')
+        new_lines = []
+        in_primary_block = False
+
+        for line in lines:
+            # Check if this starts the primary interface block
+            if line.strip().startswith(f'iface {primary_iface}') or line.strip().startswith(f'auto {primary_iface}'):
+                in_primary_block = True
+                new_lines.append(f'# DISABLED BY BLOCKHOST: {line}')
+            elif in_primary_block:
+                # Check if this is a new interface block (end of primary block)
+                if line.strip().startswith('auto ') or line.strip().startswith('iface '):
+                    in_primary_block = False
+                    new_lines.append(line)
+                else:
+                    new_lines.append(f'# DISABLED BY BLOCKHOST: {line}')
+            else:
+                new_lines.append(line)
+
+        new_content = '\n'.join(new_lines)
+
+        # Add bridge configuration
+        new_content += bridge_config
+
+        # Write new interfaces file
+        interfaces_file.write_text(new_content)
+
+        # Bring up the bridge
+        # First, we need to be careful not to lose network connectivity
+        # The safest approach is to do this atomically
+        result = subprocess.run(
+            ['ip', 'link', 'add', 'name', bridge_name, 'type', 'bridge'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0 and 'exists' not in result.stderr:
+            return False, f'Failed to create bridge: {result.stderr}'
+
+        # Add primary interface to bridge
+        subprocess.run(
+            ['ip', 'link', 'set', primary_iface, 'master', bridge_name],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Move IP to bridge
+        subprocess.run(
+            ['ip', 'addr', 'del', f'{ipv4_addr}/{ipv4_prefix}', 'dev', primary_iface],
+            capture_output=True,
+            timeout=10
+        )
+
+        subprocess.run(
+            ['ip', 'addr', 'add', f'{ipv4_addr}/{ipv4_prefix}', 'dev', bridge_name],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Bring up the bridge
+        subprocess.run(['ip', 'link', 'set', bridge_name, 'up'], capture_output=True, timeout=10)
+
+        # Re-add default route via bridge
+        subprocess.run(
+            ['ip', 'route', 'add', 'default', 'via', gateway, 'dev', bridge_name],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Verify bridge exists now
+        if not Path(f'/sys/class/net/{bridge_name}').exists():
+            return False, f'Failed to create bridge {bridge_name}'
+
+        return True, None
+
+    except subprocess.TimeoutExpired:
+        return False, 'Network configuration timed out'
     except Exception as e:
         return False, str(e)
 
@@ -1881,6 +2224,219 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
         return False, str(e)
 
 
+def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
+    """Configure HTTPS for the signup page using sslip.io and Let's Encrypt."""
+    try:
+        config_dir = Path('/etc/blockhost')
+        ssl_dir = config_dir / 'ssl'
+        ssl_dir.mkdir(parents=True, exist_ok=True)
+
+        # Try to get IPv6 address from broker allocation
+        ipv6_address = None
+        broker_file = config_dir / 'broker-allocation.json'
+        if broker_file.exists():
+            broker_data = json.loads(broker_file.read_text())
+            prefix = broker_data.get('prefix', '')
+            if prefix:
+                # Extract network from prefix (e.g., "2a11:6c7:f04:276::/120" -> "2a11:6c7:f04:276::")
+                network = prefix.split('/')[0]
+                # Host uses ::1 in the prefix
+                ipv6_address = network.rstrip(':') + '::1'
+
+        hostname = None
+        use_sslip = False
+
+        if ipv6_address:
+            # Convert IPv6 to sslip.io format (replace : with -)
+            ipv6_dashed = ipv6_address.replace(':', '-')
+            hostname = f"signup.{ipv6_dashed}.sslip.io"
+            use_sslip = True
+        else:
+            # No IPv6 - check if user configured a custom domain
+            ipv6_config = config.get('ipv6', {})
+            custom_domain = ipv6_config.get('custom_domain')
+            if custom_domain:
+                hostname = custom_domain
+            else:
+                # Fall back to self-signed certificate
+                hostname = socket.gethostname()
+
+        # Store hostname in config for services to use
+        https_config = {
+            'hostname': hostname,
+            'use_sslip': use_sslip,
+            'ipv6_address': ipv6_address,
+            'cert_file': str(ssl_dir / 'cert.pem'),
+            'key_file': str(ssl_dir / 'key.pem'),
+        }
+
+        if use_sslip or (hostname and '.' in hostname and not hostname.endswith('.local')):
+            # Try to get Let's Encrypt certificate
+            try:
+                # Check if certbot is available
+                certbot_check = subprocess.run(['which', 'certbot'], capture_output=True)
+                if certbot_check.returncode != 0:
+                    # Install certbot if not present
+                    subprocess.run(
+                        ['apt-get', 'install', '-y', 'certbot'],
+                        capture_output=True,
+                        timeout=300
+                    )
+
+                # Run certbot for HTTP-01 challenge
+                # The signup server needs to be stopped or we use standalone mode
+                result = subprocess.run(
+                    [
+                        'certbot', 'certonly',
+                        '--standalone',
+                        '--non-interactive',
+                        '--agree-tos',
+                        '--register-unsafely-without-email',
+                        '--domain', hostname,
+                        '--cert-path', str(ssl_dir / 'cert.pem'),
+                        '--key-path', str(ssl_dir / 'key.pem'),
+                        '--fullchain-path', str(ssl_dir / 'fullchain.pem'),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+
+                if result.returncode == 0:
+                    https_config['tls_mode'] = 'letsencrypt'
+                    # Update paths to Let's Encrypt's actual locations
+                    le_path = Path(f'/etc/letsencrypt/live/{hostname}')
+                    if le_path.exists():
+                        https_config['cert_file'] = str(le_path / 'fullchain.pem')
+                        https_config['key_file'] = str(le_path / 'privkey.pem')
+                else:
+                    # Let's Encrypt failed, fall back to self-signed
+                    _generate_self_signed_cert(hostname, ssl_dir)
+                    https_config['tls_mode'] = 'self-signed'
+
+            except Exception as e:
+                # Certbot failed, use self-signed
+                _generate_self_signed_cert(hostname, ssl_dir)
+                https_config['tls_mode'] = 'self-signed'
+        else:
+            # No valid domain, use self-signed
+            _generate_self_signed_cert(hostname, ssl_dir)
+            https_config['tls_mode'] = 'self-signed'
+
+        # Write HTTPS configuration
+        https_config_file = config_dir / 'https.json'
+        https_config_file.write_text(json.dumps(https_config, indent=2))
+
+        # Store in running config for other steps
+        config['https'] = https_config
+
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _generate_self_signed_cert(hostname: str, ssl_dir: Path):
+    """Generate a self-signed certificate for fallback HTTPS."""
+    cert_path = ssl_dir / 'cert.pem'
+    key_path = ssl_dir / 'key.pem'
+
+    subprocess.run([
+        'openssl', 'req', '-x509', '-newkey', 'rsa:4096',
+        '-keyout', str(key_path),
+        '-out', str(cert_path),
+        '-days', '365',
+        '-nodes',
+        '-subj', f'/CN={hostname}',
+    ], capture_output=True, timeout=60)
+
+    key_path.chmod(0o600)
+
+
+def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
+    """Generate signup page and create systemd service to serve it."""
+    try:
+        https_config = config.get('https', {})
+        signup_dir = Path('/var/www/blockhost')
+        signup_dir.mkdir(parents=True, exist_ok=True)
+
+        signup_file = signup_dir / 'signup.html'
+
+        # Generate the signup page
+        result = subprocess.run(
+            ['blockhost-generate-signup', '--output', str(signup_file)],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            return False, f"Failed to generate signup page: {result.stderr}"
+
+        # Determine port and TLS settings based on HTTPS config
+        tls_mode = https_config.get('tls_mode', 'self-signed')
+        cert_file = https_config.get('cert_file', '/etc/blockhost/ssl/cert.pem')
+        key_file = https_config.get('key_file', '/etc/blockhost/ssl/key.pem')
+
+        # Create systemd service for signup page server
+        # Use port 443 with TLS for HTTPS, or 8080 for HTTP fallback
+        if tls_mode in ('letsencrypt', 'self-signed'):
+            service_content = f"""[Unit]
+Description=Blockhost Signup Page Server (HTTPS)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -c "
+import http.server, ssl, socketserver
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory='/var/www/blockhost', **kwargs)
+    def do_GET(self):
+        if self.path == '/' or self.path == '':
+            self.path = '/signup.html'
+        return super().do_GET()
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain('{cert_file}', '{key_file}')
+with socketserver.TCPServer(('', 443), Handler) as httpd:
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    httpd.serve_forever()
+"
+Restart=on-failure
+RestartSec=10
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+"""
+        else:
+            # HTTP fallback (no TLS)
+            service_content = """[Unit]
+Description=Blockhost Signup Page Server (HTTP)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/www/blockhost
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+        service_file = Path('/etc/systemd/system/blockhost-signup.service')
+        service_file.write_text(service_content)
+
+        # Reload systemd and enable the service
+        subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=30)
+        subprocess.run(['systemctl', 'enable', 'blockhost-signup'], capture_output=True, timeout=30)
+        subprocess.run(['systemctl', 'start', 'blockhost-signup'], capture_output=True, timeout=30)
+
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
     """Build VM template with libpam-web3."""
     try:
@@ -1945,31 +2501,39 @@ def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
         return False, str(e)
 
 
-def _finalize_services(config: dict) -> tuple[bool, Optional[str]]:
-    """Start blockhost services."""
-    try:
-        # Enable and start blockhost-engine
-        subprocess.run(
-            ['systemctl', 'enable', 'blockhost-engine'],
-            capture_output=True,
-            timeout=30
-        )
-        subprocess.run(
-            ['systemctl', 'start', 'blockhost-engine'],
-            capture_output=True,
-            timeout=30
-        )
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
 
 def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
-    """Mark setup as complete."""
+    """Finalize setup: enable services, create default plan, mark complete.
+
+    Note: NFT #0 minting is NOT done here. It requires the wallet connection
+    step (after OTP auth) to be implemented first. NFT #0 should be minted
+    to the admin's connected wallet, not the deployer wallet.
+    """
     try:
         marker_dir = Path('/var/lib/blockhost')
         marker_dir.mkdir(parents=True, exist_ok=True)
+
+        contracts = config.get('contracts', {})
+
+        # Enable blockhost services (will start on reboot)
+        subprocess.run(
+            ['systemctl', 'enable', 'blockhost-monitor'],
+            capture_output=True,
+            timeout=30
+        )
+        subprocess.run(
+            ['systemctl', 'enable', 'blockhost-gc.timer'],
+            capture_output=True,
+            timeout=30
+        )
+
+        # Create default plan if we deployed subscription contract
+        if contracts.get('subscription'):
+            try:
+                _create_default_plan(config)
+            except Exception as e:
+                # Non-fatal - admin can create plan manually
+                print(f"Warning: Failed to create default plan: {e}")
 
         # Write setup complete marker
         (marker_dir / '.setup-complete').touch()
@@ -1984,6 +2548,109 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def _finalize_validate(config: dict) -> tuple[bool, Optional[str]]:
+    """Run comprehensive system validation (testing mode only).
+
+    This step only runs on ISOs built with --testing flag.
+    It validates all configuration files, services, and system state.
+    """
+    try:
+        from installer.web.validate_system import validate_system, is_testing_mode
+
+        if not is_testing_mode():
+            # Skip validation on production builds
+            return True, None
+
+        # Run full validation
+        success, message = validate_system()
+
+        if success:
+            return True, None
+        else:
+            # Return detailed error message
+            return False, f"Validation failed:\n{message}"
+
+    except ImportError as e:
+        # If module can't be imported, skip (don't fail the install)
+        return True, None
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+
+def _create_default_plan(config: dict):
+    """Create a default hosting plan on the subscription contract."""
+    contracts = config.get('contracts', {})
+    blockchain = config.get('blockchain', {})
+
+    subscription_contract = contracts.get('subscription')
+    rpc_url = blockchain.get('rpc_url')
+
+    # Read deployer key
+    deployer_key_file = Path('/etc/blockhost/deployer.key')
+    if not deployer_key_file.exists():
+        raise FileNotFoundError("Deployer key not found")
+
+    deployer_key = deployer_key_file.read_text().strip()
+
+    # Create default plan: 100 cents/day ($1/day)
+    # createPlan(string name, uint256 pricePerDayUsdCents)
+    cmd = [
+        'cast', 'send',
+        subscription_contract,
+        'createPlan(string,uint256)',
+        'Basic VM',         # name
+        '100',              # pricePerDayUsdCents ($1/day)
+        '--private-key', deployer_key,
+        '--rpc-url', rpc_url,
+        '--json',
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Plan creation failed: {result.stderr}")
+
+    print("Default plan 'Basic VM' created")
+
+    # Set primary stablecoin (USDC) based on chain
+    chain_id = int(blockchain.get('chain_id', 11155111))
+    usdc_addresses = {
+        11155111: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',  # Sepolia
+        1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',         # Mainnet
+        137: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',       # Polygon
+        42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',     # Arbitrum
+    }
+
+    usdc_address = usdc_addresses.get(chain_id)
+    if usdc_address:
+        cmd = [
+            'cast', 'send',
+            subscription_contract,
+            'setPrimaryStablecoin(address)',
+            usdc_address,
+            '--private-key', deployer_key,
+            '--rpc-url', rpc_url,
+            '--json',
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        if result.returncode == 0:
+            print(f"Primary stablecoin set to USDC ({usdc_address})")
+        else:
+            print(f"Warning: Failed to set stablecoin: {result.stderr}")
 
 
 def _write_yaml(path: Path, data: dict):

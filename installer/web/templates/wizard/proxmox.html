@@ -128,6 +128,16 @@
             </div>
 
             <div class="form-group">
+                <label for="gc_grace_days">Expiry Grace Period (days)</label>
+                <input type="number" id="gc_grace_days" name="gc_grace_days"
+                       value="7" min="1" max="90">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    When a subscription expires, the VM is suspended for this many days before permanent deletion.
+                    Users can renew during this period to restore their VM.
+                </p>
+            </div>
+
+            <div class="form-group">
                 <label for="ip_network">VM Network</label>
                 <input type="text" id="ip_network" name="ip_network"
                        value="192.168.122.0/24"

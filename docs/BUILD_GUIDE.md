@@ -1714,3 +1714,274 @@ copy_to_host "$LIBPAM_WEB3_DEB" "/tmp/libpam-web3.deb"
    - `PROXMOX_HOST=localhost` set by caller
 
 ---
+
+## Wizard Updates (2026-02-05)
+
+### Summary
+
+Updated the web wizard (`installer/web/app.py`) to generate correct configuration formats for all submodules after end-to-end testing revealed format mismatches.
+
+### Changes Made
+
+#### 1. Config Format Fixes
+
+**db.yaml** - Fixed to use canonical format:
+- Changed `vmid_pool` to `vmid_range`
+- Convert IP pool start/end to integers (last octet)
+- Added `db_file`, `ipv6_pool`, `default_expiry_days`
+
+**web3-defaults.yaml** - Fixed to use nested structure:
+```yaml
+blockchain:
+  chain_id: <int>
+  rpc_url: <string>
+  nft_contract: <address>
+  subscription_contract: <address>
+auth:
+  otp_length: 6
+  otp_ttl_seconds: 300
+  decrypt_message: "blockhost-access"
+signing_page:
+  html_path: /usr/share/libpam-web3-tools/signing-page/index.html
+deployer:
+  private_key_file: /etc/blockhost/deployer.key
+server:
+  public_key: <hex>
+```
+
+**provider.tf.json** - Added SSH username:
+```json
+"ssh": {
+  "agent": false,
+  "username": "root",
+  "private_key": "${file(\"/etc/blockhost/terraform_ssh_key\")}",
+  ...
+}
+```
+
+#### 2. New Finalization Steps
+
+Added to the wizard finalization process:
+
+1. **HTTPS Setup** (`_finalize_https`):
+   - Reads IPv6 prefix from broker allocation
+   - Generates sslip.io hostname from IPv6
+   - Runs certbot for Let's Encrypt certificate
+   - Falls back to self-signed if no IPv6/domain
+
+2. **Server Keypair** (`_finalize_keypair`):
+   - Now generates and stores public key for ECIES encryption
+   - Writes to `/etc/blockhost/server.pubkey`
+
+3. **Default Plan Creation** (`_create_default_plan`):
+   - Creates "Basic VM" plan on subscription contract
+   - $1/day, 1 CPU, 512MB RAM, 10GB disk
+
+**Note**: NFT #0 minting is NOT implemented yet. It requires the wallet
+connection step (after OTP auth) to be built first. NFT #0 should be
+minted to the admin's connected wallet, not the deployer wallet.
+
+#### 3. UI Updates
+
+Updated `templates/wizard/summary.html`:
+- Added `terraform` step display
+- Added `https` step display
+- Updated JavaScript step order to match backend
+
+### Files Modified
+
+- `installer/web/app.py` - Main wizard application
+- `installer/web/templates/wizard/summary.html` - Finalization UI
+- `SESSION_CONTEXT.md` - Updated status
+
+### Verification
+
+```bash
+# Check Python syntax
+python3 -m py_compile installer/web/app.py
+
+# Test wizard locally (requires Flask)
+cd installer/web && python3 -m flask run --port 8080
+```
+
+---
+
+## Wizard Updates (2026-02-05) - Part 2
+
+### Changes Made
+
+#### 1. Removed Services Step from UI
+
+The "services" step was removed from the visible finalization progress.
+Services are enabled via `systemctl enable` in `_finalize_complete()` but
+don't need a dedicated UI step since they only start after reboot anyway.
+
+**Files modified**:
+- `installer/web/app.py` - Removed `_finalize_services()`, merged enables into `_finalize_complete()`
+- `installer/web/templates/wizard/summary.html` - Removed services from stepOrder/stepNames
+
+#### 2. Auto-fetch Broker Registry on IPv6 Page
+
+The IPv6 configuration page now automatically fetches the broker registry
+contract address from GitHub when the page loads, instead of requiring the
+user to click a button.
+
+**Behavior**:
+- On page load, if broker mode is selected and registry field is empty, auto-fetch runs silently
+- If auto-fetch fails, no error alert (silent failure)
+- Manual "Auto-fetch from GitHub" button remains as fallback
+- Button click shows error alerts if fetch fails
+
+**File modified**: `installer/web/templates/wizard/ipv6.html`
+
+```javascript
+// fetchBrokerRegistry now accepts silent parameter
+async function fetchBrokerRegistry(silent = false) { ... }
+
+// Auto-fetch on page load
+document.addEventListener('DOMContentLoaded', function() {
+    const brokerMode = document.querySelector('input[name="ipv6_mode"][value="broker"]');
+    const registryInput = document.getElementById('broker_registry');
+    if (brokerMode && brokerMode.checked && registryInput && !registryInput.value.trim()) {
+        fetchBrokerRegistry(true);  // silent=true
+    }
+});
+```
+
+#### 3. Let's Encrypt Without Email
+
+Changed certbot to register without requiring an email address:
+
+**File modified**: `installer/web/app.py`
+
+```python
+# Old (broken - admin@localhost won't work):
+'--email', 'admin@localhost',
+
+# New (no email required):
+'--register-unsafely-without-email',
+```
+
+This avoids the privacy-invading email requirement. Users won't receive
+expiration notices, but `certbot renew` handles auto-renewal anyway.
+
+#### 4. Signup Page Generation Step
+
+Added new finalization step to generate and serve the signup page.
+
+**Changes**:
+- Added `_finalize_signup()` function to `app.py`
+- Added 'signup' step to `SetupState` default steps
+- Added 'signup' to step order in finalization
+- Updated `summary.html` with signup step UI
+
+**What it does**:
+1. Calls `blockhost-generate-signup` to create `/var/www/blockhost/signup.html`
+2. Creates a systemd service (`blockhost-signup.service`) to serve it
+3. Uses HTTPS (port 443) if TLS is configured, HTTP (port 8080) otherwise
+4. Enables and starts the service
+
+#### 5. Fixed blockhost.yaml Config
+
+Added `server_public_key` and `decrypt_message` to `blockhost.yaml` output.
+These fields are required by `blockhost-generate-signup`.
+
+```yaml
+# Now included in blockhost.yaml:
+server_public_key: '04...'  # Uncompressed secp256k1 public key (no 0x prefix)
+decrypt_message: 'blockhost-access'
+```
+
+---
+
+## Testing Mode Validation (Added Session 3)
+
+### Purpose
+
+When the ISO is built with `--testing` flag, the wizard runs a comprehensive
+system validation as the final step. This catches configuration errors before
+reboot rather than having to debug a broken system.
+
+### Files Created
+
+**`installer/web/validate_system.py`** - Comprehensive validation module
+
+### What It Validates
+
+**File Existence and Permissions:**
+- `/etc/blockhost/server.key` - 0600, valid hex
+- `/etc/blockhost/deployer.key` - 0600, valid hex
+- `/etc/blockhost/terraform_ssh_key` - 0600
+- `/etc/blockhost/ssl/key.pem` - 0600
+
+**YAML Configuration:**
+- `/etc/blockhost/db.yaml` - syntax + required keys (vmid_range, ip_pool, etc.)
+- `/etc/blockhost/web3-defaults.yaml` - syntax + required keys (chain_id, rpc_url, nft_contract)
+- `/etc/blockhost/blockhost.yaml` - syntax + required keys (key files, proxmox settings)
+
+**JSON Configuration:**
+- `/etc/blockhost/https.json` - syntax + required keys
+- `/etc/blockhost/broker-allocation.json` - syntax (if exists)
+- `/var/lib/blockhost/setup-state.json` - status = completed
+
+**Terraform:**
+- `/var/lib/blockhost/terraform/provider.tf.json` - valid JSON
+- `/var/lib/blockhost/terraform/variables.tf.json` - valid JSON
+- `/var/lib/blockhost/terraform/terraform.tfvars` - exists
+- `/var/lib/blockhost/terraform/.terraform/` - initialized
+
+**Services:**
+- `blockhost-signup` - enabled and running
+- `blockhost-monitor` - enabled
+- `blockhost-gc.timer` - enabled
+- `blockhost-first-boot` - disabled
+
+**Network:**
+- Bridge (vmbr0) exists
+- Bridge has IP address
+
+**SSH:**
+- Terraform public key in `/root/.ssh/authorized_keys`
+
+**Web:**
+- `/var/www/blockhost/signup.html` exists and has content
+
+### Testing Mode Detection
+
+The validation only runs on ISOs built with `--testing`. Detection uses:
+1. Primary: `/etc/blockhost/.testing-mode` marker file (created by build-iso.sh)
+2. Fallback: `/etc/apt/apt.conf.d/00proxy` (apt proxy config)
+
+### Changes to `scripts/build-iso.sh`
+
+Added marker file creation in testing mode configuration:
+
+```bash
+# Create testing mode marker for validation script
+mkdir -p /etc/blockhost
+touch /etc/blockhost/.testing-mode
+chmod 0644 /etc/blockhost/.testing-mode
+```
+
+### Changes to `installer/web/app.py`
+
+1. Added 'validate' step to `_default_state()` steps dict
+2. Added 'validate' to `step_order` list
+3. Added validate step to finalization steps list
+4. Added `_finalize_validate()` function
+
+### Changes to `installer/web/templates/wizard/summary.html`
+
+1. Added 'validate' to `stepOrder` and `stepNames` JavaScript arrays
+2. Added HTML list item for validate step
+
+### Running Validation Manually
+
+The validation module can be run directly:
+
+```bash
+cd /opt/blockhost/installer/web
+python3 validate_system.py
+```
+
+This runs regardless of testing mode and outputs a detailed report.

@@ -107,6 +107,10 @@
             <span class="summary-label">IP Pool</span>
             <span class="summary-value">{{ summary.proxmox.ip_start }} - {{ summary.proxmox.ip_end }}</span>
         </div>
+        <div class="summary-item">
+            <span class="summary-label">Expiry Grace Period</span>
+            <span class="summary-value">{{ summary.proxmox.gc_grace_days }} days</span>
+        </div>
     </div>
 
     <!-- IPv6 Summary -->
@@ -195,6 +199,15 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('token')">Retry</button>
         </li>
+        <!-- terraform step runs in backend but hidden from UI - internal plumbing -->
+        <li id="step-bridge" data-step="bridge">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Configure network bridge</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('bridge')">Retry</button>
+        </li>
         <li id="step-ipv6" data-step="ipv6">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -202,6 +215,22 @@
                 <span class="step-status"></span>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('ipv6')">Retry</button>
+        </li>
+        <li id="step-https" data-step="https">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Configure HTTPS for signup</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('https')">Retry</button>
+        </li>
+        <li id="step-signup" data-step="signup">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Generate signup page</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('signup')">Retry</button>
         </li>
         <li id="step-template" data-step="template">
             <span class="step-icon">&#9675;</span>
@@ -212,14 +241,6 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('template')">Retry</button>
         </li>
-        <li id="step-services" data-step="services">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Start blockhost-engine</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('services')">Retry</button>
-        </li>
         <li id="step-finalize" data-step="finalize">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -228,7 +249,37 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('finalize')">Retry</button>
         </li>
+        <li id="step-validate" data-step="validate">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Validate system</span>
+                <span class="step-status"></span>
+                <span class="step-hint">(testing builds only)</span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('validate')">Retry</button>
+        </li>
     </ul>
+
+    <!-- Validation Output (testing mode only) -->
+    <div id="validation-output-section" class="hidden" style="margin-top: 1.5rem;">
+        <h3 style="margin-bottom: 0.5rem;">Validation Results</h3>
+        <pre id="validation-output" style="background: var(--bg-input); padding: 1rem; border-radius: 0.5rem; font-size: 0.75rem; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;"></pre>
+    </div>
+
+    <div id="completion-section" class="hidden" style="margin-top: 2rem;">
+        <div class="alert alert-success">
+            <strong>Setup Complete!</strong> BlockHost has been configured successfully.
+        </div>
+        <p class="text-muted" style="margin-top: 1rem;">
+            The system is now operational. VMs will be provisioned automatically when users purchase subscriptions.
+        </p>
+        <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+            <button onclick="reboot()" class="btn btn-primary">Reboot System</button>
+            <a href="https://{{ request.host.split(':')[0] }}:8006" class="btn btn-secondary">
+                Open Proxmox
+            </a>
+        </div>
+    </div>
 
     <div id="error-section" class="hidden" style="margin-top: 2rem;">
         <div class="alert alert-error">
@@ -372,23 +423,32 @@
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* Validation output styling */
+#validation-output {
+    line-height: 1.4;
+}
 </style>
 {% endblock %}
 
 {% block extra_js %}
 <script>
 let pollInterval;
-const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'ipv6', 'template', 'services', 'finalize'];
+// Note: 'terraform' step runs in backend but is hidden from UI (internal plumbing)
+const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'bridge', 'ipv6', 'https', 'signup', 'template', 'finalize', 'validate'];
 const stepNames = {
     'keypair': 'Generate server keypair',
     'wallet': 'Configure deployer wallet',
     'contracts': 'Deploy smart contracts',
     'config': 'Write configuration files',
     'token': 'Create Proxmox API token',
+    'bridge': 'Configure network bridge',
     'ipv6': 'Configure IPv6',
+    'https': 'Configure HTTPS for signup',
+    'signup': 'Generate signup page',
     'template': 'Build VM template',
-    'services': 'Start blockhost-engine',
-    'finalize': 'Finalize setup'
+    'finalize': 'Finalize setup',
+    'validate': 'Validate system'
 };
 
 // Check for existing state on page load
@@ -401,7 +461,9 @@ function checkExistingState() {
     .then(response => response.json())
     .then(data => {
         if (data.status === 'completed') {
-            // Already complete, show completion
+            // Already complete, show progress card with completion
+            showProgressCard();
+            updateProgress(data);
             showCompletion();
         } else if (data.status === 'running') {
             // Currently running, show progress and poll
@@ -647,11 +709,36 @@ function updateProgress(data) {
 
 function showCompletion() {
     stopPolling();
-    document.getElementById('progress-card').classList.add('hidden');
-    document.getElementById('completion-card').classList.remove('hidden');
+    // Keep progress card visible, show completion section within it
+    document.getElementById('completion-section').classList.remove('hidden');
+    // Hide the progress bar since we're done
+    document.getElementById('progress-bar').parentElement.style.display = 'none';
+    document.getElementById('progress-text').style.display = 'none';
+    // Update title
+    document.querySelector('#progress-card h2').textContent = 'Setup Complete';
+    document.querySelector('#progress-card p.text-muted').textContent = 'All steps completed successfully.';
 
     // Mark setup complete (redundant but ensures marker exists)
     fetch('/api/complete', {method: 'POST'});
+
+    // Fetch and display validation output (testing mode only)
+    fetchValidationOutput();
+}
+
+function fetchValidationOutput() {
+    fetch('/api/validation-output')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.output) {
+            const section = document.getElementById('validation-output-section');
+            const pre = document.getElementById('validation-output');
+            pre.textContent = data.output;
+            section.classList.remove('hidden');
+        }
+    })
+    .catch(error => {
+        console.error('Error fetching validation output:', error);
+    });
 }
 
 function showError(stepId, message) {
@@ -669,6 +756,11 @@ function showError(stepId, message) {
         if (li) {
             li.querySelector('.btn-retry').classList.remove('hidden');
         }
+    }
+
+    // If validation failed, show the detailed output
+    if (stepId === 'validate') {
+        fetchValidationOutput();
     }
 }
 

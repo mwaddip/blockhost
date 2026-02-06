@@ -253,6 +253,17 @@ configure_testing_mode() {
 
     log "Configuring testing mode..."
 
+    # Read SSH public key for passwordless access (from repo testing key)
+    SSH_PUBKEY_FILE="${PROJECT_DIR}/testing/blockhost-test-key.pub"
+    SSH_PUBKEY=""
+    if [ -f "$SSH_PUBKEY_FILE" ]; then
+        SSH_PUBKEY=$(cat "$SSH_PUBKEY_FILE")
+        log "Found SSH public key: $SSH_PUBKEY_FILE"
+    else
+        warn "SSH public key not found at $SSH_PUBKEY_FILE - password auth only"
+        warn "Generate with: ssh-keygen -t ed25519 -f testing/blockhost-test-key -N ''"
+    fi
+
     # Ensure apt proxy is set in preseed
     PRESEED_FILE="${ISO_EXTRACT}/preseed.cfg"
     if [ -f "$PRESEED_FILE" ]; then
@@ -270,7 +281,7 @@ configure_testing_mode() {
     if [ -f "$PRESEED_FILE" ]; then
         # Create a script that will be run during late_command to configure SSH
         mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
-        cat > "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh" << 'TESTING_EOF'
+        cat > "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh" << TESTING_EOF
 #!/bin/bash
 # Testing mode configuration
 
@@ -283,9 +294,23 @@ if [ -f /etc/ssh/sshd_config ]; then
     fi
 fi
 
+# Add SSH public key for passwordless access
+if [ -n "${SSH_PUBKEY}" ]; then
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    echo "${SSH_PUBKEY}" >> /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    echo "SSH public key added to /root/.ssh/authorized_keys" >> /var/log/blockhost-install.log
+fi
+
 # Set apt proxy for post-install
 mkdir -p /etc/apt/apt.conf.d
 echo 'Acquire::http::Proxy "http://192.168.122.1:3142";' > /etc/apt/apt.conf.d/00proxy
+
+# Create testing mode marker for validation script
+mkdir -p /etc/blockhost
+touch /etc/blockhost/.testing-mode
+chmod 0644 /etc/blockhost/.testing-mode
 
 echo "Testing mode configured" >> /var/log/blockhost-install.log
 TESTING_EOF

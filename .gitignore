@@ -2,6 +2,9 @@
 build/
 *.iso
 
+# Session context (Claude working memory, not for git)
+SESSION_CONTEXT.md
+
 # Python
 __pycache__/
 *.py[cod]

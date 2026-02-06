@@ -159,7 +159,8 @@ function selectRadio(element) {
 }
 
 // Fetch broker registry address from GitHub
-async function fetchBrokerRegistry() {
+// silent=true suppresses error alerts (used for auto-fetch on page load)
+async function fetchBrokerRegistry(silent = false) {
     const chainId = '{{ session.get("blockchain", {}).get("chain_id", "11155111") }}';
 
     try {
@@ -168,11 +169,13 @@ async function fetchBrokerRegistry() {
 
         if (data.success && data.registry) {
             document.getElementById('broker_registry').value = data.registry;
-        } else {
+        } else if (!silent) {
             alert('Could not fetch registry address: ' + (data.error || 'Registry not found for this chain'));
         }
     } catch (error) {
-        alert('Error fetching registry: ' + error.message);
+        if (!silent) {
+            alert('Error fetching registry: ' + error.message);
+        }
     }
 }
 
@@ -202,6 +205,16 @@ document.getElementById('ipv6-form').addEventListener('submit', function(e) {
 // Initialize radio button styling
 document.querySelectorAll('input[type="radio"]:checked').forEach(radio => {
     radio.closest('.radio-option')?.classList.add('selected');
+});
+
+// Auto-fetch broker registry on page load if field is empty and broker mode is selected
+document.addEventListener('DOMContentLoaded', function() {
+    const brokerMode = document.querySelector('input[name="ipv6_mode"][value="broker"]');
+    const registryInput = document.getElementById('broker_registry');
+
+    if (brokerMode && brokerMode.checked && registryInput && !registryInput.value.trim()) {
+        fetchBrokerRegistry(true);  // silent=true for auto-fetch
+    }
 });
 </script>
 {% endblock %}

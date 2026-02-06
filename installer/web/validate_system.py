@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""
+BlockHost System Validation Module
+
+Comprehensive validation of all configuration files, services, and system state
+after wizard finalization. Only runs on ISOs built with --testing flag.
+
+This module verifies:
+- All config files exist and have correct syntax
+- All required variables/keys are present
+- File permissions are correct
+- Services are in the expected state
+- Network bridge is configured
+- Terraform is initialized
+"""
+
+import json
+import os
+import re
+import stat
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Callable
+
+
+@dataclass
+class ValidationResult:
+    """Result of a single validation check."""
+    category: str
+    name: str
+    passed: bool
+    message: str
+    critical: bool = True  # If False, failure is a warning not an error
+
+
+@dataclass
+class ValidationReport:
+    """Complete validation report."""
+    results: list[ValidationResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        """True if all critical checks passed."""
+        return all(r.passed for r in self.results if r.critical)
+
+    @property
+    def warnings(self) -> list[ValidationResult]:
+        """Non-critical failures."""
+        return [r for r in self.results if not r.passed and not r.critical]
+
+    @property
+    def errors(self) -> list[ValidationResult]:
+        """Critical failures."""
+        return [r for r in self.results if not r.passed and r.critical]
+
+    def add(self, result: ValidationResult):
+        self.results.append(result)
+
+    def detailed_output(self) -> str:
+        """Generate detailed output showing V/X for each test."""
+        lines = []
+        current_category = None
+
+        for r in self.results:
+            # Add category header when it changes
+            if r.category != current_category:
+                if current_category is not None:
+                    lines.append("")  # Blank line between categories
+                lines.append(f"=== {r.category} ===")
+                current_category = r.category
+
+            # Format: [V] or [X] or [!] (warning)
+            if r.passed:
+                mark = "[V]"
+            elif not r.critical:
+                mark = "[!]"  # Warning
+            else:
+                mark = "[X]"
+
+            lines.append(f"  {mark} {r.name}")
+            if not r.passed:
+                lines.append(f"      {r.message}")
+
+        return "\n".join(lines)
+
+    def summary(self) -> str:
+        """Generate human-readable summary with all results."""
+        passed = sum(1 for r in self.results if r.passed)
+        failed = len(self.errors)
+        warned = len(self.warnings)
+
+        lines = [
+            self.detailed_output(),
+            "",
+            "=" * 40,
+            f"TOTAL: {passed} passed, {failed} failed, {warned} warnings",
+        ]
+
+        if not self.passed:
+            lines.append("")
+            lines.append("FAILED CHECKS:")
+            for r in self.errors:
+                lines.append(f"  [X] {r.name}: {r.message}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+def is_testing_mode() -> bool:
+    """Check if system was installed from a testing ISO."""
+    # Testing mode creates a dedicated marker file
+    marker_file = Path('/etc/blockhost/.testing-mode')
+    if marker_file.exists():
+        return True
+
+    # Fallback: check for apt proxy (older testing ISOs)
+    proxy_file = Path('/etc/apt/apt.conf.d/00proxy')
+    return proxy_file.exists()
+
+
+def _check_file_exists(path: Path, category: str, name: str, critical: bool = True) -> ValidationResult:
+    """Check if a file exists."""
+    if path.exists():
+        return ValidationResult(category, name, True, f"File exists: {path}", critical)
+    return ValidationResult(category, name, False, f"Missing: {path}", critical)
+
+
+def _check_file_permissions(path: Path, expected_mode: int, category: str, name: str) -> ValidationResult:
+    """Check file permissions (e.g., 0o600 for private keys)."""
+    if not path.exists():
+        return ValidationResult(category, name, False, f"Cannot check permissions: {path} doesn't exist")
+
+    actual_mode = stat.S_IMODE(path.stat().st_mode)
+    if actual_mode == expected_mode:
+        return ValidationResult(category, name, True, f"Permissions OK ({oct(expected_mode)}): {path}")
+    return ValidationResult(category, name, False, f"Wrong permissions on {path}: expected {oct(expected_mode)}, got {oct(actual_mode)}")
+
+
+def _check_json_syntax(path: Path, category: str, name: str, required_keys: list[str] = None) -> ValidationResult:
+    """Check if a JSON file is valid and optionally has required keys."""
+    if not path.exists():
+        return ValidationResult(category, name, False, f"Missing: {path}")
+
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        return ValidationResult(category, name, False, f"Invalid JSON in {path}: {e}")
+
+    if required_keys:
+        missing = []
+        for key in required_keys:
+            if '.' in key:
+                # Nested key like "blockchain.chain_id"
+                parts = key.split('.')
+                obj = data
+                found = True
+                for part in parts:
+                    if isinstance(obj, dict) and part in obj:
+                        obj = obj[part]
+                    else:
+                        found = False
+                        break
+                if not found:
+                    missing.append(key)
+            elif key not in data:
+                missing.append(key)
+
+        if missing:
+            return ValidationResult(category, name, False, f"Missing keys in {path}: {', '.join(missing)}")
+
+    return ValidationResult(category, name, True, f"Valid JSON: {path}")
+
+
+def _check_yaml_syntax(path: Path, category: str, name: str, required_keys: list[str] = None) -> ValidationResult:
+    """Check if a YAML file is valid and optionally has required keys."""
+    if not path.exists():
+        return ValidationResult(category, name, False, f"Missing: {path}")
+
+    try:
+        import yaml
+        data = yaml.safe_load(path.read_text())
+    except ImportError:
+        # Fallback: basic syntax check without full parsing
+        try:
+            content = path.read_text()
+            if not content.strip():
+                return ValidationResult(category, name, False, f"Empty file: {path}")
+            return ValidationResult(category, name, True, f"File exists (yaml module unavailable): {path}")
+        except Exception as e:
+            return ValidationResult(category, name, False, f"Cannot read {path}: {e}")
+    except Exception as e:
+        return ValidationResult(category, name, False, f"Invalid YAML in {path}: {e}")
+
+    if data is None:
+        return ValidationResult(category, name, False, f"Empty YAML file: {path}")
+
+    if required_keys:
+        missing = []
+        for key in required_keys:
+            if '.' in key:
+                # Nested key like "blockchain.chain_id"
+                parts = key.split('.')
+                obj = data
+                found = True
+                for part in parts:
+                    if isinstance(obj, dict) and part in obj:
+                        obj = obj[part]
+                    else:
+                        found = False
+                        break
+                if not found:
+                    missing.append(key)
+            elif key not in data:
+                missing.append(key)
+
+        if missing:
+            return ValidationResult(category, name, False, f"Missing keys in {path}: {', '.join(missing)}")
+
+    return ValidationResult(category, name, True, f"Valid YAML: {path}")
+
+
+def _check_hex_key(path: Path, category: str, name: str, expected_length: int = None) -> ValidationResult:
+    """Check if a file contains a valid hex key."""
+    if not path.exists():
+        return ValidationResult(category, name, False, f"Missing: {path}")
+
+    try:
+        content = path.read_text().strip()
+        # Remove 0x prefix if present
+        if content.startswith('0x'):
+            content = content[2:]
+
+        # Check if it's valid hex
+        int(content, 16)
+
+        if expected_length and len(content) != expected_length:
+            return ValidationResult(
+                category, name, False,
+                f"Invalid key length in {path}: expected {expected_length}, got {len(content)}"
+            )
+
+        return ValidationResult(category, name, True, f"Valid hex key: {path}")
+    except ValueError:
+        return ValidationResult(category, name, False, f"Invalid hex in {path}")
+
+
+def _check_eth_address(address: str, category: str, name: str) -> ValidationResult:
+    """Check if a string is a valid Ethereum address."""
+    if not address:
+        return ValidationResult(category, name, False, "Address is empty")
+
+    # Basic format check: 0x followed by 40 hex chars
+    pattern = r'^0x[0-9a-fA-F]{40}$'
+    if re.match(pattern, address):
+        return ValidationResult(category, name, True, f"Valid address: {address}")
+    return ValidationResult(category, name, False, f"Invalid Ethereum address format: {address}")
+
+
+def _check_service_state(service: str, expected_enabled: bool, expected_active: bool = None,
+                         category: str = "Services", critical: bool = True) -> ValidationResult:
+    """Check systemd service state."""
+    name = f"{service} state"
+
+    # Check enabled state
+    result = subprocess.run(
+        ['systemctl', 'is-enabled', service],
+        capture_output=True,
+        text=True
+    )
+    is_enabled = result.stdout.strip() == 'enabled'
+
+    if expected_enabled and not is_enabled:
+        return ValidationResult(category, name, False, f"{service} should be enabled but is not", critical)
+    if not expected_enabled and is_enabled:
+        return ValidationResult(category, name, False, f"{service} should be disabled but is enabled", critical)
+
+    # Check active state if requested
+    if expected_active is not None:
+        result = subprocess.run(
+            ['systemctl', 'is-active', service],
+            capture_output=True,
+            text=True
+        )
+        is_active = result.stdout.strip() == 'active'
+
+        if expected_active and not is_active:
+            return ValidationResult(category, name, False, f"{service} should be running but is not", critical)
+        if not expected_active and is_active:
+            return ValidationResult(category, name, False, f"{service} should not be running but is", critical)
+
+    state_desc = "enabled" if expected_enabled else "disabled"
+    if expected_active is not None:
+        state_desc += f", {'running' if expected_active else 'stopped'}"
+
+    return ValidationResult(category, name, True, f"{service}: {state_desc}")
+
+
+def _check_bridge_exists(bridge_name: str = 'vmbr0') -> ValidationResult:
+    """Check if network bridge exists."""
+    bridge_path = Path(f'/sys/class/net/{bridge_name}')
+    if bridge_path.exists():
+        return ValidationResult("Network", f"Bridge {bridge_name}", True, f"Bridge exists")
+    return ValidationResult("Network", f"Bridge {bridge_name}", False, f"Bridge {bridge_name} not found")
+
+
+def _check_bridge_has_ip(bridge_name: str = 'vmbr0') -> ValidationResult:
+    """Check if bridge has an IP address configured."""
+    try:
+        result = subprocess.run(
+            ['ip', 'addr', 'show', bridge_name],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return ValidationResult("Network", f"{bridge_name} IP", False, f"Cannot get IP for {bridge_name}")
+
+        # Look for inet or inet6 line
+        if 'inet ' in result.stdout or 'inet6 ' in result.stdout:
+            return ValidationResult("Network", f"{bridge_name} IP", True, f"{bridge_name} has IP address configured")
+
+        return ValidationResult("Network", f"{bridge_name} IP", False, f"{bridge_name} has no IP address", critical=False)
+    except Exception as e:
+        return ValidationResult("Network", f"{bridge_name} IP", False, f"Error checking {bridge_name}: {e}")
+
+
+def _check_terraform_initialized() -> ValidationResult:
+    """Check if Terraform is initialized."""
+    tf_dir = Path('/var/lib/blockhost/terraform/.terraform')
+    if tf_dir.exists() and tf_dir.is_dir():
+        # Check for provider plugins
+        providers_dir = tf_dir / 'providers'
+        if providers_dir.exists():
+            return ValidationResult("Terraform", "Initialized", True, "Terraform initialized with providers")
+        return ValidationResult("Terraform", "Initialized", False, ".terraform exists but no providers found")
+    return ValidationResult("Terraform", "Initialized", False, "Terraform not initialized (.terraform missing)")
+
+
+def _check_ssh_key_in_authorized(key_path: Path) -> ValidationResult:
+    """Check if a public key is in root's authorized_keys."""
+    auth_keys_path = Path('/root/.ssh/authorized_keys')
+
+    if not key_path.exists():
+        return ValidationResult("SSH", "Terraform key in authorized_keys", False, f"Key file missing: {key_path}")
+
+    if not auth_keys_path.exists():
+        return ValidationResult("SSH", "Terraform key in authorized_keys", False, "authorized_keys doesn't exist")
+
+    try:
+        public_key = key_path.read_text().strip()
+        authorized_keys = auth_keys_path.read_text()
+
+        # Extract just the key part (algorithm + key, not comment)
+        key_parts = public_key.split()
+        if len(key_parts) >= 2:
+            key_to_find = f"{key_parts[0]} {key_parts[1]}"
+            if key_to_find in authorized_keys:
+                return ValidationResult("SSH", "Terraform key in authorized_keys", True, "Terraform SSH key present")
+
+        return ValidationResult("SSH", "Terraform key in authorized_keys", False, "Terraform SSH key not in authorized_keys")
+    except Exception as e:
+        return ValidationResult("SSH", "Terraform key in authorized_keys", False, f"Error checking: {e}")
+
+
+def _check_env_file(path: Path, required_vars: list[str]) -> ValidationResult:
+    """Check .env file for required variables."""
+    if not path.exists():
+        return ValidationResult("Environment", ".env file", False, f"Missing: {path}")
+
+    try:
+        content = path.read_text()
+        missing = []
+
+        for var in required_vars:
+            # Check for VAR= or VAR =
+            pattern = rf'^{re.escape(var)}\s*='
+            if not re.search(pattern, content, re.MULTILINE):
+                missing.append(var)
+
+        if missing:
+            return ValidationResult("Environment", ".env file", False, f"Missing variables: {', '.join(missing)}")
+
+        return ValidationResult("Environment", ".env file", True, f"All required env vars present")
+    except Exception as e:
+        return ValidationResult("Environment", ".env file", False, f"Error reading: {e}")
+
+
+def _check_signup_page_content() -> ValidationResult:
+    """Check if signup.html has actual content."""
+    signup_path = Path('/var/www/blockhost/signup.html')
+
+    if not signup_path.exists():
+        return ValidationResult("Web", "Signup page content", False, "signup.html missing")
+
+    try:
+        content = signup_path.read_text()
+        size = len(content)
+
+        # Should be substantial (the page is several KB at minimum)
+        if size < 1000:
+            return ValidationResult("Web", "Signup page content", False, f"signup.html suspiciously small ({size} bytes)")
+
+        # Check for key elements
+        if '<html' not in content.lower():
+            return ValidationResult("Web", "Signup page content", False, "signup.html missing <html> tag")
+
+        if 'ethers' not in content.lower() and 'ethereum' not in content.lower():
+            return ValidationResult("Web", "Signup page content", False, "signup.html missing Web3 integration", critical=False)
+
+        return ValidationResult("Web", "Signup page content", True, f"signup.html valid ({size} bytes)")
+    except Exception as e:
+        return ValidationResult("Web", "Signup page content", False, f"Error reading: {e}")
+
+
+def run_full_validation() -> ValidationReport:
+    """Run complete system validation."""
+    report = ValidationReport()
+
+    # ========== FILE EXISTENCE AND PERMISSIONS ==========
+
+    # /etc/blockhost/ directory
+    etc_blockhost = Path('/etc/blockhost')
+
+    # Private keys (must be 0600)
+    private_keys = [
+        (etc_blockhost / 'server.key', 'Server private key'),
+        (etc_blockhost / 'deployer.key', 'Deployer private key'),
+        (etc_blockhost / 'terraform_ssh_key', 'Terraform SSH key'),
+        (etc_blockhost / 'ssl' / 'key.pem', 'SSL private key'),
+    ]
+
+    for path, name in private_keys:
+        report.add(_check_file_exists(path, "Files", name))
+        if path.exists():
+            report.add(_check_file_permissions(path, 0o600, "Permissions", name))
+
+    # Public keys (should be readable)
+    public_keys = [
+        (etc_blockhost / 'server.pubkey', 'Server public key'),
+        (etc_blockhost / 'terraform_ssh_key.pub', 'Terraform SSH public key'),
+    ]
+
+    for path, name in public_keys:
+        report.add(_check_file_exists(path, "Files", name))
+
+    # SSL certificate
+    report.add(_check_file_exists(etc_blockhost / 'ssl' / 'cert.pem', "Files", "SSL certificate"))
+
+    # ========== YAML CONFIG FILES ==========
+
+    # db.yaml
+    report.add(_check_yaml_syntax(
+        etc_blockhost / 'db.yaml',
+        "Config", "db.yaml",
+        required_keys=['vmid_range.start', 'vmid_range.end', 'ip_pool.network', 'db_file', 'terraform_dir']
+    ))
+
+    # web3-defaults.yaml
+    report.add(_check_yaml_syntax(
+        etc_blockhost / 'web3-defaults.yaml',
+        "Config", "web3-defaults.yaml",
+        required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract']
+    ))
+
+    # blockhost.yaml
+    report.add(_check_yaml_syntax(
+        etc_blockhost / 'blockhost.yaml',
+        "Config", "blockhost.yaml",
+        required_keys=['server.key_file', 'deployer.key_file', 'proxmox.node', 'proxmox.storage', 'proxmox.bridge']
+    ))
+
+    # ========== JSON CONFIG FILES ==========
+
+    # broker-allocation.json (may not exist if not using broker)
+    broker_alloc = etc_blockhost / 'broker-allocation.json'
+    if broker_alloc.exists():
+        report.add(_check_json_syntax(broker_alloc, "Config", "broker-allocation.json"))
+    else:
+        report.add(ValidationResult("Config", "broker-allocation.json", True, "Not present (OK if not using broker)", critical=False))
+
+    # https.json
+    report.add(_check_json_syntax(
+        etc_blockhost / 'https.json',
+        "Config", "https.json",
+        required_keys=['hostname', 'cert_file', 'key_file']
+    ))
+
+    # setup-state.json
+    state_file = Path('/var/lib/blockhost/setup-state.json')
+    report.add(_check_json_syntax(state_file, "Config", "setup-state.json", required_keys=['status']))
+
+    # Check setup-state.json shows completion
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+            if state.get('status') == 'completed':
+                report.add(ValidationResult("Config", "Setup state status", True, "Setup marked as completed"))
+            else:
+                report.add(ValidationResult("Config", "Setup state status", False, f"Setup status is '{state.get('status')}', expected 'completed'"))
+        except:
+            pass
+
+    # ========== TERRAFORM FILES ==========
+
+    tf_dir = Path('/var/lib/blockhost/terraform')
+
+    report.add(_check_json_syntax(tf_dir / 'provider.tf.json', "Terraform", "provider.tf.json"))
+    report.add(_check_json_syntax(tf_dir / 'variables.tf.json', "Terraform", "variables.tf.json"))
+    report.add(_check_file_exists(tf_dir / 'terraform.tfvars', "Terraform", "terraform.tfvars"))
+    report.add(_check_terraform_initialized())
+
+    # ========== MARKER FILES ==========
+
+    report.add(_check_file_exists(
+        Path('/var/lib/blockhost/.setup-complete'),
+        "Markers", "Setup complete marker"
+    ))
+
+    # ========== KEY CONTENT VALIDATION ==========
+
+    # Check keys are valid hex (64 chars = 32 bytes)
+    if (etc_blockhost / 'server.key').exists():
+        report.add(_check_hex_key(etc_blockhost / 'server.key', "Keys", "Server key format", expected_length=64))
+
+    if (etc_blockhost / 'deployer.key').exists():
+        report.add(_check_hex_key(etc_blockhost / 'deployer.key', "Keys", "Deployer key format", expected_length=64))
+
+    # ========== CONTRACT ADDRESSES ==========
+
+    # Read and validate contract addresses from web3-defaults.yaml
+    web3_defaults = etc_blockhost / 'web3-defaults.yaml'
+    if web3_defaults.exists():
+        try:
+            import yaml
+            data = yaml.safe_load(web3_defaults.read_text())
+            blockchain = data.get('blockchain', {})
+
+            nft_contract = blockchain.get('nft_contract', '')
+            report.add(_check_eth_address(nft_contract, "Contracts", "NFT contract address"))
+
+            # Subscription contract is optional
+            sub_contract = blockchain.get('subscription_contract', '')
+            if sub_contract:
+                report.add(_check_eth_address(sub_contract, "Contracts", "Subscription contract address"))
+        except ImportError:
+            report.add(ValidationResult("Contracts", "Address validation", True, "Skipped (yaml module unavailable)", critical=False))
+        except Exception as e:
+            report.add(ValidationResult("Contracts", "Address validation", False, f"Error: {e}"))
+
+    # ========== ENVIRONMENT FILE ==========
+
+    report.add(_check_env_file(
+        Path('/opt/blockhost/.env'),
+        required_vars=['NFT_CONTRACT', 'DEPLOYER_KEY_FILE']
+    ))
+
+    # ========== SERVICES ==========
+
+    # blockhost-signup should be enabled and running
+    report.add(_check_service_state('blockhost-signup', expected_enabled=True, expected_active=True))
+
+    # blockhost-monitor should be enabled (may not be active until reboot)
+    report.add(_check_service_state('blockhost-monitor', expected_enabled=True, expected_active=None))
+
+    # blockhost-gc.timer should be enabled
+    report.add(_check_service_state('blockhost-gc.timer', expected_enabled=True, expected_active=None))
+
+    # blockhost-first-boot should be disabled
+    report.add(_check_service_state('blockhost-first-boot', expected_enabled=False, expected_active=False))
+
+    # ========== NETWORK ==========
+
+    # Read bridge name from config if possible
+    bridge_name = 'vmbr0'
+    blockhost_yaml = etc_blockhost / 'blockhost.yaml'
+    if blockhost_yaml.exists():
+        try:
+            import yaml
+            data = yaml.safe_load(blockhost_yaml.read_text())
+            bridge_name = data.get('proxmox', {}).get('bridge', 'vmbr0')
+        except:
+            pass
+
+    report.add(_check_bridge_exists(bridge_name))
+    report.add(_check_bridge_has_ip(bridge_name))
+
+    # ========== SSH ==========
+
+    report.add(_check_ssh_key_in_authorized(etc_blockhost / 'terraform_ssh_key.pub'))
+
+    # ========== WEB CONTENT ==========
+
+    report.add(_check_file_exists(Path('/var/www/blockhost/signup.html'), "Web", "Signup page"))
+    report.add(_check_signup_page_content())
+
+    return report
+
+
+VALIDATION_OUTPUT_FILE = Path('/var/lib/blockhost/validation-output.txt')
+
+
+def validate_system() -> tuple[bool, str]:
+    """
+    Run full system validation and return result.
+
+    Returns:
+        Tuple of (success: bool, detailed_output: str)
+    """
+    if not is_testing_mode():
+        return True, "Skipped (not in testing mode)"
+
+    try:
+        report = run_full_validation()
+        output = report.summary()
+
+        # Write output to file for frontend to display
+        try:
+            VALIDATION_OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VALIDATION_OUTPUT_FILE.write_text(output)
+        except Exception as e:
+            output += f"\n\n(Warning: Could not write output file: {e})"
+
+        return report.passed, output
+
+    except Exception as e:
+        error_msg = f"Validation error: {e}"
+        try:
+            VALIDATION_OUTPUT_FILE.write_text(error_msg)
+        except:
+            pass
+        return False, error_msg
+
+
+if __name__ == '__main__':
+    # When run directly, always validate (ignore testing mode check)
+    report = run_full_validation()
+    print(report.summary())
+
+    if report.passed:
+        print("✓ System validation PASSED")
+    else:
+        print("✗ System validation FAILED")
+
+    exit(0 if report.passed else 1)
