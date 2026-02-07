@@ -20,10 +20,18 @@ jobs:
     outputs:
       vm_name: ${{ steps.provision.outputs.vm_name }}
       vm_ip: ${{ steps.provision.outputs.vm_ip }}
+      nft_contract: ${{ steps.provision.outputs.nft_contract }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Symlink base ISO from project directory
+        run: |
+          mkdir -p build
+          if [ ! -f build/debian-12-netinst.iso ]; then
+            ln -s /home/mwaddip/projects/blockhost/build/debian-12-netinst.iso build/debian-12-netinst.iso
+          fi
 
       - name: Build ISO (testing mode)
         run: |
@@ -35,8 +43,6 @@ jobs:
         id: provision
         env:
           DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
-          NFT_CONTRACT: ${{ secrets.NFT_CONTRACT }}
-          SUBSCRIPTION_CONTRACT: ${{ secrets.SUBSCRIPTION_CONTRACT }}
         run: |
           ./testing/ci-provision.sh \
             --iso build/blockhost_0.1.0.iso \
@@ -122,12 +128,28 @@ jobs:
             --private-key "$WALLET_KEY"
 
   cleanup:
-    name: Cleanup VM
+    name: Cleanup
     needs: [provision, integration-test, ipv6-login-test]
     if: ${{ always() && inputs.skip_provision == false && needs.provision.outputs.vm_name != '' }}
     runs-on: [self-hosted, blockhost-proxmox]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release IPv6 tunnel lease
+        if: ${{ needs.provision.outputs.nft_contract != '' }}
+        env:
+          DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
+          NFT_CONTRACT: ${{ needs.provision.outputs.nft_contract }}
+          RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
+        run: |
+          echo "Releasing IPv6 tunnel allocation for NFT contract: $NFT_CONTRACT"
+          cast send 0xCD75c00dBB3F05cF27f16699591f4256a798e694 \
+            "releaseAllocation(address)" \
+            "$NFT_CONTRACT" \
+            --rpc-url "$RPC_URL" \
+            --private-key "$DEPLOYER_KEY" \
+            --json > /dev/null
+          echo "IPv6 tunnel lease released"
 
       - name: Destroy VM
         run: |

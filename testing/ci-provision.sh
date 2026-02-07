@@ -123,11 +123,8 @@ jq -e '.otp' "$CONFIG_FILE" > /dev/null 2>&1 && \
 jq -e '.blockchain' "$CONFIG_FILE" > /dev/null 2>&1 || \
     fail "Config file must contain 'blockchain' section"
 
-# Secrets from environment — deployer key is the only true secret,
-# contract addresses are on-chain public but deployment-specific
+# Secrets from environment — deployer key funds contract deployment + gas
 [ -n "${DEPLOYER_KEY:-}" ]          || fail "DEPLOYER_KEY env var required (deployer private key)"
-[ -n "${NFT_CONTRACT:-}" ]          || fail "NFT_CONTRACT env var required"
-[ -n "${SUBSCRIPTION_CONTRACT:-}" ] || fail "SUBSCRIPTION_CONTRACT env var required"
 
 # Derive admin wallet address from deployer key
 ADMIN_WALLET=$(cast wallet address --private-key "$DEPLOYER_KEY")
@@ -265,12 +262,10 @@ ADMIN_PUBLIC_SECRET=$(jq -r '.admin_public_secret // "blockhost-access"' "$CONFI
 ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOYER_KEY")
 [ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
 
-# Inject OTP + secrets into config
+# Inject OTP + secrets into config (contracts deployed fresh by wizard)
 SUBMIT_JSON=$(jq \
     --arg otp "$OTP_CODE" \
     --arg deployer_key "$DEPLOYER_KEY" \
-    --arg nft_contract "$NFT_CONTRACT" \
-    --arg sub_contract "$SUBSCRIPTION_CONTRACT" \
     --arg admin_wallet "$ADMIN_WALLET" \
     --arg admin_sig "$ADMIN_SIGNATURE" \
     '. + {
@@ -278,9 +273,7 @@ SUBMIT_JSON=$(jq \
         admin_wallet: $admin_wallet,
         admin_signature: $admin_sig
     } | .blockchain += {
-        deployer_key: $deployer_key,
-        nft_contract: $nft_contract,
-        subscription_contract: $sub_contract
+        deployer_key: $deployer_key
     }' "$CONFIG_FILE")
 
 RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -344,7 +337,17 @@ fi
 pass "Finalization complete ($(elapsed))"
 
 # =============================================================================
-# Output — VM IP for subsequent CI jobs
+# Phase 8 — Read deployed contract addresses from VM
+# =============================================================================
+info "Phase 8: Reading deployed contract addresses"
+
+NFT_CONTRACT=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" \
+    "python3 -c \"import yaml; c=yaml.safe_load(open('/etc/blockhost/web3-defaults.yaml')); print(c['blockchain']['nft_contract'])\"")
+[ -n "$NFT_CONTRACT" ] && [ "$NFT_CONTRACT" != "None" ] || fail "Could not read NFT contract address from VM"
+pass "NFT contract: $NFT_CONTRACT"
+
+# =============================================================================
+# Output — VM details for subsequent CI jobs
 # =============================================================================
 echo ""
 echo "=== PROVISION COMPLETE ($(elapsed)) ==="
@@ -352,10 +355,12 @@ echo ""
 echo "VM_NAME=$VM_NAME"
 echo "VM_IP=$VM_IP"
 echo "VM_MAC=$MAC"
+echo "NFT_CONTRACT=$NFT_CONTRACT"
 echo ""
 
 # Write outputs for GitHub Actions
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "vm_name=$VM_NAME" >> "$GITHUB_OUTPUT"
     echo "vm_ip=$VM_IP" >> "$GITHUB_OUTPUT"
+    echo "nft_contract=$NFT_CONTRACT" >> "$GITHUB_OUTPUT"
 fi

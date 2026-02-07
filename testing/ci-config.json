@@ -3,7 +3,7 @@
   "blockchain": {
     "chain_id": "11155111",
     "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
-    "contract_mode": "existing",
+    "contract_mode": "deploy",
     "plan_name": "Basic VM",
     "plan_price_cents": 50
   },
