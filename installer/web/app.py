@@ -2492,10 +2492,10 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
             broker_data = json.loads(broker_file.read_text())
             prefix = broker_data.get('prefix', '')
             if prefix:
-                # Extract network from prefix (e.g., "2a11:6c7:f04:276::/120" -> "2a11:6c7:f04:276::")
-                network = prefix.split('/')[0]
-                # Host uses ::1 in the prefix
-                ipv6_address = network.rstrip(':') + '::1'
+                import ipaddress as _ipaddress
+                network = _ipaddress.IPv6Network(prefix, strict=False)
+                # Host/gateway is first address in prefix (e.g., ::701 for ::700/120)
+                ipv6_address = str(network.network_address + 1)
 
         hostname = None
         use_sslip = False
