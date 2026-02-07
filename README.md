@@ -2,6 +2,10 @@
 
 **Autonomous VM hosting, driven by blockchain.**
 
+> **Status:** Currently only operational on **Sepolia testnet**. Full multichain support is not yet implemented, and the IPv6 broker registry contract is only deployed on testnet. Do not use in production.
+>
+> **Security:** This project is built with security as a core design principle — OS-level authentication, on-chain identity, encrypted credentials, zero standing admin access. However, the code has not been formally audited. Review before deploying with real assets.
+
 BlockHost eliminates traditional hosting accounts entirely. Users purchase a subscription on-chain, receive an NFT containing their encrypted connection details, and authenticate to their VM by signing a message with their wallet. No usernames, no passwords, no control panels — just a wallet and a signature.
 
 The entire lifecycle — from payment to VM provisioning to access credential delivery — happens without human intervention. The host operator installs from an ISO, walks through a wizard, and the system runs itself.
