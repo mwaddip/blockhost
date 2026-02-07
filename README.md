@@ -1,5 +1,7 @@
 # BlockHost
 
+> **WARNING: THE BLOCKHOST ISO WILL IMMEDIATELY AND IRREVERSIBLY ERASE ALL DATA ON THE DEVICE IT IS BOOTED ON.** The installer runs a fully automated Debian preseed that partitions and formats disks without any confirmation prompt. ANY EXISTING DATA ON ALL CONNECTED DRIVES WILL BE DESTROYED. DO NOT BOOT THIS ISO ON A PRODUCTION MACHINE OR ANY DEVICE CONTAINING DATA YOU WANT TO KEEP UNLESS YOU FULLY UNDERSTAND WHAT YOU ARE DOING. Always boot in a dedicated machine or virtual machine with no important data present.
+
 **Autonomous VM hosting, driven by blockchain.**
 
 > **Status:** Currently only operational on **Sepolia testnet**. Full multichain support is not yet implemented, and the IPv6 broker registry contract is only deployed on testnet. Do not use in production.
