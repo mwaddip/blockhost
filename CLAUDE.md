@@ -35,14 +35,12 @@ blockhost/
 ├── docs/
 │   └── BUILD_GUIDE.md        # Step-by-step reproduction guide
 ├── installer/
-│   ├── web/                  # Web-based installer (Flask/lightweight)
-│   ├── console/              # ncurses/whiptail console fallback
+│   ├── web/                  # Web-based installer (Flask)
 │   └── common/               # Shared logic (OTP, detection, config)
 ├── packages/                 # Custom packages to be installed
 ├── scripts/
 │   ├── build-iso.sh          # ISO build script
 │   └── first-boot.sh         # First boot orchestration
-└── vm/                       # VM testing configuration
 ```
 
 ## Architecture Overview
@@ -51,18 +49,16 @@ blockhost/
 1. System boots → `first-boot.service` starts
 2. Check if running from ISO or HDD (detect boot medium)
 3. Attempt DHCP for network configuration
-4. If DHCP fails → Launch ncurses network wizard on console
-5. Generate OTP code → Display on console
-6. Start web installer on port 80
-7. User enters OTP on web interface to authenticate
-8. Web installer guides through package configuration
-9. Mark first-boot complete, disable service
+4. Generate OTP code → Display on console
+5. Start web installer on port 80
+6. User enters OTP on web interface to authenticate
+7. Web installer guides through package configuration
+8. Mark first-boot complete, disable service
 
 ### Key Components
 - **Detection**: `/sys/firmware` checks, mount point analysis
 - **OTP**: Time-based or session-based one-time password
-- **Web Installer**: Lightweight Python (Flask) or Go binary
-- **Console Fallback**: whiptail/dialog for network config
+- **Web Installer**: Flask-based wizard with OTP authentication
 
 ## Submodule Packages
 
