@@ -10,6 +10,8 @@ blockhost/
 ├── CLAUDE.md                          # Session rules, submodule constraints
 ├── ARCHITECTURE.md                    # THIS FILE
 ├── docs/BUILD_GUIDE.md                # Human build reproduction guide
+├── docs/INFRASTRUCTURE.md             # Human infrastructure reference + extension guides
+├── docs/STANDARDS.md                  # Development standards and conventions
 ├── preseed/blockhost.preseed          # Debian auto-install config (93 lines)
 ├── systemd/blockhost-firstboot.service # Runs first-boot.sh after install
 ├── scripts/

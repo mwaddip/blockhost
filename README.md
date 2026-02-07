@@ -46,127 +46,47 @@ See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for the full build and installati
 
 ---
 
-## Admin Flow
+## How It Works
 
-The operator installs BlockHost once. After that, the system is autonomous.
-
-```
-                         INSTALL
-                           |
-                           v
-                    +-------------+
-                    |  Boot ISO   |
-                    +------+------+
-                           |
-               Debian auto-install + Proxmox VE
-                           |
-                           v
-                    +-------------+
-                    | First Boot  |
-                    |   Service   |
-                    +------+------+
-                           |
-              Install packages, Foundry, Terraform
-              Generate OTP, start web wizard
-                           |
-                           v
-                    +-------------+
-                    | Web Wizard  |---------> Connect admin wallet (MetaMask)
-                    +------+------+
-                           |
-              1. Network    2. Storage     3. Blockchain
-              4. Proxmox    5. IPv6        6. Admin Commands
-                           7. Summary
-                           |
-                           v
-                    +-------------+
-                    | Finalization|
-                    +------+------+
-                           |
-              Deploy contracts, configure Terraform,
-              set up IPv6 tunnel, get TLS cert,
-              mint admin NFT #0, build VM template
-                           |
-                           v
-                    +-------------+
-                    | System Live |
-                    +-------------+
-                           |
-              blockhost-engine monitors the chain
-              VMs auto-provision on subscription events
-              Admin sends on-chain commands when needed
-```
-
-### Ongoing admin operations
+### Admin installs once, system runs itself
 
 ```
-Admin wallet                          BlockHost server
-     |                                      |
-     |-- send tx: knock command ----------->|
-     |                                      |-- open firewall ports (temporary)
-     |                                      |
-     |-- SSH to management port ----------->|
-     |                                      |-- verify, grant access
-     |                                      |
-     |-- (ports close after timeout) -------|
+Boot ISO → Debian auto-install → Proxmox VE
+    → First boot: install packages, generate OTP
+    → Web wizard: network, storage, blockchain, Proxmox, IPv6, admin
+    → Finalization: deploy contracts, configure tunnel, build template
+    → System live: engine monitors the chain
 ```
 
----
-
-## User Flow
-
-Users interact with the blockchain and their wallet. They never touch the server directly until SSH login.
+### Users interact with the blockchain, not the server
 
 ```
 User wallet                    Blockchain              BlockHost server
      |                              |                        |
      |-- purchase subscription ---->|                        |
-     |   (send ETH + encrypted sig) |                        |
-     |                              |-- SubscriptionPurchased event
-     |                              |                        |
-     |                              |    blockhost-engine <--|
-     |                              |    detects event       |
-     |                              |                        |
-     |                              |    blockhost-provisioner
-     |                              |    creates VM (Terraform)
-     |                              |    adds IPv6 route     |
-     |                              |                        |
-     |                              |    encrypt connection  |
-     |                              |    details with user's |
-     |                              |    signature           |
-     |                              |                        |
+     |                              |-- event detected ----->|
+     |                              |                        |-- create VM
      |                              |<-- mint NFT -----------|
-     |                              |    (encrypted access   |
-     |                              |     credentials inside)|
+     |                              |   (encrypted access)   |
      |                              |                        |
-     |-- visit signup page -------->|                        |
-     |   connect wallet             |                        |
-     |   sign decrypt message       |                        |
-     |<- receive connection details |                        |
-     |   (hostname, port, user)     |                        |
-     |                              |                        |
-     |-- SSH to VM (IPv6) -------->-|----------------------->|
-     |   sign OTP challenge         |                        |
-     |<- shell access --------------|------------------------|
+     |-- decrypt NFT, get details ->|                        |
+     |-- SSH to VM (wallet auth) ---|----------------------->|
 ```
 
-### Encryption scheme
+### VM lifecycle
 
 ```
-Purchase:   user signs message  -->  signature sent encrypted (ECIES)
-Server:     decrypts signature  -->  keccak256(signature) = AES key
-            encrypts connection details with AES key
-            stores ciphertext in NFT (userEncrypted field)
-
-Decrypt:    user re-signs same message  -->  derives same AES key
-            decrypts connection details from NFT
+Subscription purchased → VM provisioned (active)
+    → subscription expires → VM suspended (data preserved)
+        → renewed → VM resumed
+        → grace period expires → VM destroyed
 ```
 
-The server never stores plaintext credentials. The user's wallet signature is both the proof of identity and the decryption key.
+Default grace period: 7 days (configurable).
 
 ---
 
-## Infrastructure
+## Architecture
 
 ```
 +------------------------------------------------------------------+
@@ -187,117 +107,58 @@ The server never stores plaintext credentials. The user's wallet signature is bo
 |           |  | (Python)         |   |   | (Rust)             |   |
 |           +->| - config loading |<--+   | - pam_web3_tool    |   |
 |              | - VM database    |       | - encrypt/decrypt  |   |
-|              | - shared types   |       | - signing page gen |   |
+|              | - root agent     |       | - signing page gen |   |
 |              +------------------+       +--------------------+   |
 |                                                                  |
 |  +---------------------------+    +---------------------------+  |
-|  | blockhost-broker-client   |    | blockhost-signup          |  |
-|  | (Python)                  |    | (static HTML)             |  |
-|  | - requests IPv6 prefix    |    | - served on port 443      |  |
-|  | - configures WireGuard    |    | - NFT decrypt UI          |  |
-|  +------------+--------------+    +---------------------------+  |
-|               |                                                  |
-+---------------|--------------------------------------------------+
-                |
-        WireGuard tunnel
-                |
-     +----------v-----------+         +------------------------+
-     |   IPv6 Broker         |         |   Blockchain (Sepolia/ |
-     |   (NDP proxy)         |         |   Mainnet/Polygon)     |
-     |   - assigns /120      |         |                        |
-     |   - proxies NDP       |         | - AccessCredentialNFT  |
-     |   - routes traffic    |         | - BlockHostSubscription|
-     +----------+------------+         +------------------------+
-                |                                  ^
-           IPv6 internet                           |
-                |                           User wallet
-         +------v------+                   (MetaMask etc.)
-         |  User's VM  |
-         |  (Debian)   |
-         |             |
-         | libpam-web3 |  <-- PAM module: verifies wallet
-         |             |      signatures at SSH login
-         +-------------+
+|  | blockhost-root-agent      |    | blockhost-signup          |  |
+|  | (Python, runs as root)    |    | (static HTML)             |  |
+|  | - privileged ops daemon   |    | - served on port 443      |  |
+|  | - Unix socket IPC         |    | - NFT decrypt UI          |  |
+|  +---------------------------+    +---------------------------+  |
+|                                                                  |
+|  +---------------------------+                                   |
+|  | blockhost-broker-client   |                                   |
+|  | (Python)                  |                                   |
+|  | - requests IPv6 prefix    |                                   |
+|  | - configures WireGuard    |                                   |
+|  +---------------------------+                                   |
++------------------------------------------------------------------+
+                |                          ^
+        WireGuard tunnel            User wallet
+                |                  (MetaMask etc.)
+     +----------v-----------+
+     |   IPv6 Broker         |
+     |   (NDP proxy)         |
+     +----------------------+
 ```
 
-### Data flow between components
-
-| From | To | What |
-|------|----|------|
-| Blockchain | blockhost-engine | `SubscriptionPurchased` event (wallet, signature, amount) |
-| blockhost-engine | blockhost-provisioner | `blockhost-vm-create --owner-wallet --user-signature --public-secret` |
-| blockhost-provisioner | Terraform/Proxmox | VM definition (`.tf.json`), `terraform apply` |
-| blockhost-provisioner | blockhost-common | `register_vm()` — stores VM record in database |
-| blockhost-provisioner | libpam-web3-tools | `pam_web3_tool encrypt-symmetric` — encrypts connection details |
-| blockhost-provisioner | Blockchain | `mint()` — NFT with encrypted data to user's wallet |
-| blockhost-broker-client | IPv6 Broker | WireGuard handshake, prefix allocation |
-| Proxmox host | VMs | IPv6 routing: `/128` host routes via `vmbr0` bridge |
-| User browser | Blockchain | Read NFT, decrypt connection details |
-| User SSH client | VM (libpam-web3) | Wallet signature verification at PAM level |
-
-### Configuration flow
-
-```
-Web wizard  --->  /etc/blockhost/*.yaml, *.json, *.key
-                         |
-         +---------------+---------------+
-         |               |               |
-    blockhost-       blockhost-      blockhost-
-    engine           provisioner     broker-client
-    reads:           reads:          reads:
-    - web3-defaults  - db.yaml       - broker-allocation
-    - blockhost.yaml - web3-defaults - deployer.key
-    - admin-commands - blockhost.yaml
-```
-
----
-
-## VM Lifecycle
-
-```
-SubscriptionPurchased event
-         |
-         v
-   VM Provisioned (active)
-         |
-   subscription expires
-         |
-         v
-   VM Suspended (data preserved)
-         |
-    +----+----+
-    |         |
- grace     subscription
- period    renewed
- expires      |
-    |         v
-    v    VM Resumed (active)
- VM Destroyed
-```
-
-Default grace period: 7 days (configurable).
+For detailed component interfaces, configuration files, network topology, and the installer flow, see [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md).
 
 ---
 
 ## Components
 
-### blockhost-engine
-Node.js service that monitors the blockchain for `SubscriptionPurchased` events. When a purchase is detected, it decrypts the user's signature (sent encrypted via ECIES), calls the provisioner to create a VM, encrypts connection details into an NFT, and mints it to the user's wallet. Also generates the signup page HTML and handles admin command processing.
+| Component | Language | Role |
+|-----------|----------|------|
+| **blockhost-engine** | TypeScript | Monitors blockchain events, triggers provisioning, admin commands, fund management, `bw`/`ab` CLIs |
+| **blockhost-provisioner** | Python | VM lifecycle: create, suspend, destroy, resume, template build, NFT minting |
+| **blockhost-common** | Python | Shared library: config loading, VM database, root agent client |
+| **libpam-web3** | Rust | PAM module (in VMs) + host tools: wallet auth at SSH, ECIES encryption |
+| **blockhost-broker-client** | Python | IPv6 prefix allocation via on-chain broker registry + WireGuard tunnel |
+| **blockhost-root-agent** | Python | Privileged operations daemon (qm, iptables, key writes) — only component running as root |
+| **installer** (this repo) | Python/Flask | First boot wizard, finalization, system configuration |
 
-### blockhost-provisioner
-Python scripts for VM lifecycle management. `vm-generator.py` allocates IPs/VMIDs, generates Terraform configs, runs `terraform apply`, adds IPv6 host routes, and triggers NFT minting. `vm-gc.py` handles garbage collection of expired VMs (two-phase: suspend then destroy). Uses the bpg/proxmox Terraform provider.
+---
 
-### blockhost-common
-Shared Python package providing config file loading (`blockhost.config`) and the VM database abstraction (`blockhost.vm_db`). All other Python components depend on this. The database tracks VM records, IP allocations, and NFT token reservations.
+## Documentation
 
-### libpam-web3
-Two packages from one repo. **libpam-web3** is a Rust PAM module installed in VMs — it intercepts SSH login and requires a valid wallet signature instead of a password. **libpam-web3-tools** is installed on the host — provides `pam_web3_tool` (symmetric encryption/decryption) and the signing page generator used by the engine.
-
-### blockhost-broker-client
-Python client for the IPv6 tunnel broker network. Requests a `/120` prefix allocation from the broker's on-chain registry, configures a WireGuard tunnel, and persists the allocation. The broker provides NDP proxy for the assigned prefix, giving each VM a publicly routable IPv6 address.
-
-### installer (this repo)
-Flask web application that runs during first boot. Guides the operator through network, storage, blockchain, Proxmox, IPv6, and admin configuration. The finalization step deploys contracts, sets up Terraform, configures the IPv6 tunnel, gets a TLS certificate, mints the admin NFT, and builds the VM template. Includes a post-install validation module for testing.
+| Document | Audience | Content |
+|----------|----------|---------|
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Developers | Component interfaces, config files, installer flow, how to extend |
+| [docs/STANDARDS.md](docs/STANDARDS.md) | Contributors | Privilege separation, CLI usage, submodule boundaries, conventions |
+| [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | Operators | Build dependencies, ISO creation, test cycle |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | LLM sessions | Dense, structured reference for AI-assisted development |
 
 ---
 
