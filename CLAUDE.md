@@ -1,5 +1,9 @@
 # BlockHost - Custom Proxmox VE Image Project
 
+## Architecture Reference (PERSISTENT RULE)
+
+**`ARCHITECTURE.md` must be kept in sync with the codebase.** When any change affects the architecture — new routes, new config files, changed data flows, new finalization steps, session schema changes, new services, or modified submodule interfaces — update `ARCHITECTURE.md` to reflect the change. This file is LLM-optimized (dense, structured, no prose) and serves as the canonical reference for how components connect.
+
 ## Submodule Separation (CRITICAL RULE)
 
 **You CANNOT modify files in submodules.** The following directories are submodules with their own Claude sessions:
@@ -14,18 +18,6 @@
 1. Do NOT attempt to edit files in submodule directories
 2. Instead, provide the user with a complete prompt to send to that submodule's Claude session
 3. Format the prompt clearly so the user can copy-paste it directly
-
-## Documentation Requirements (PERSISTENT RULE)
-
-**Every change made in this project MUST be documented in `docs/BUILD_GUIDE.md`:**
-
-1. **Commands**: Record every shell command executed with full context
-2. **File Changes**: Include diffs or full file contents for all created/modified files
-3. **Explanations**: Explain WHY each step is necessary
-4. **Prerequisites**: List any dependencies or assumptions
-5. **Verification**: Include commands to verify each step succeeded
-
-A human must be able to reproduce the entire build by following the guide step-by-step.
 
 ## Project Structure
 

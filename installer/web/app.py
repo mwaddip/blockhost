@@ -420,6 +420,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'contract_mode': request.form.get('contract_mode'),
                 'nft_contract': request.form.get('nft_contract'),
                 'subscription_contract': request.form.get('subscription_contract'),
+                'plan_name': request.form.get('plan_name', 'Basic VM'),
+                'plan_price_cents': int(request.form.get('plan_price_cents', 50)),
             }
             return redirect(url_for('wizard_proxmox'))
 
@@ -548,6 +550,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'deploy_contracts': blockchain.get('contract_mode') == 'deploy',
                 'nft_contract': blockchain.get('nft_contract'),
                 'subscription_contract': blockchain.get('subscription_contract'),
+                'plan_name': blockchain.get('plan_name', 'Basic VM'),
+                'plan_price_cents': blockchain.get('plan_price_cents', 50),
             },
             'proxmox': {
                 'node': proxmox.get('node'),
@@ -2948,14 +2952,17 @@ def _create_default_plan(config: dict):
 
     deployer_key = deployer_key_file.read_text().strip()
 
-    # Create default plan: 100 cents/day ($1/day)
+    # Use wizard-configured plan name and price, with sensible defaults
+    plan_name = blockchain.get('plan_name', 'Basic VM')
+    plan_price = str(blockchain.get('plan_price_cents', 50))
+
     # createPlan(string name, uint256 pricePerDayUsdCents)
     cmd = [
         'cast', 'send',
         subscription_contract,
         'createPlan(string,uint256)',
-        'Basic VM',         # name
-        '100',              # pricePerDayUsdCents ($1/day)
+        plan_name,
+        plan_price,
         '--private-key', deployer_key,
         '--rpc-url', rpc_url,
         '--json',
@@ -2971,7 +2978,7 @@ def _create_default_plan(config: dict):
     if result.returncode != 0:
         raise RuntimeError(f"Plan creation failed: {result.stderr}")
 
-    print("Default plan 'Basic VM' created")
+    print(f"Plan '{plan_name}' created at {plan_price} cents/day")
 
     # Set primary stablecoin (USDC) based on chain
     chain_id = int(blockchain.get('chain_id', 11155111))

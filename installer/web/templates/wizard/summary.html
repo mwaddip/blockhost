@@ -52,6 +52,14 @@
             <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.subscription_contract }}</span>
         </div>
         {% endif %}
+        <div class="summary-item">
+            <span class="summary-label">Plan Name</span>
+            <span class="summary-value">{{ summary.blockchain.plan_name }}</span>
+        </div>
+        <div class="summary-item">
+            <span class="summary-label">Price per Day</span>
+            <span class="summary-value">{{ summary.blockchain.plan_price_cents }} cents (${{ '%.2f' | format(summary.blockchain.plan_price_cents / 100) }}/day)</span>
+        </div>
     </div>
 
     <!-- Proxmox Summary -->
