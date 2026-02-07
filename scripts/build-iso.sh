@@ -205,52 +205,6 @@ add_packages() {
     log "Packages added to ISO"
 }
 
-add_contracts() {
-    log "Adding contract artifacts..."
-
-    mkdir -p "${ISO_EXTRACT}/blockhost/contracts"
-
-    # Extract contract artifacts from .deb packages
-    TEMP_EXTRACT=$(mktemp -d)
-
-    # Extract from libpam-web3-tools (NFT contract)
-    TOOLS_DEB=$(find "${PROJECT_DIR}/packages/host" -name "libpam-web3-tools_*.deb" -type f 2>/dev/null | head -1)
-    if [ -n "$TOOLS_DEB" ] && [ -f "$TOOLS_DEB" ]; then
-        dpkg-deb -x "$TOOLS_DEB" "$TEMP_EXTRACT"
-        if [ -d "$TEMP_EXTRACT/usr/share/blockhost/contracts" ]; then
-            cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
-            log "Extracted NFT contract from libpam-web3-tools"
-        fi
-    fi
-
-    # Extract from blockhost-engine (Subscription/PoS contract)
-    ENGINE_DEB=$(find "${PROJECT_DIR}/packages/host" -name "blockhost-engine_*.deb" -type f 2>/dev/null | head -1)
-    if [ -n "$ENGINE_DEB" ] && [ -f "$ENGINE_DEB" ]; then
-        rm -rf "$TEMP_EXTRACT"/*
-        dpkg-deb -x "$ENGINE_DEB" "$TEMP_EXTRACT"
-        if [ -d "$TEMP_EXTRACT/usr/share/blockhost/contracts" ]; then
-            cp -r "$TEMP_EXTRACT/usr/share/blockhost/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
-            log "Extracted Subscription contract from blockhost-engine"
-        fi
-    fi
-
-    rm -rf "$TEMP_EXTRACT"
-
-    # Also check for contracts in project directory (fallback)
-    if [ -d "${PROJECT_DIR}/contracts" ]; then
-        cp -r "${PROJECT_DIR}/contracts"/* "${ISO_EXTRACT}/blockhost/contracts/" 2>/dev/null || true
-        log "Copied contracts from project directory"
-    fi
-
-    # List what we have
-    if ls "${ISO_EXTRACT}/blockhost/contracts"/*.json >/dev/null 2>&1; then
-        log "Contract artifacts:"
-        ls -la "${ISO_EXTRACT}/blockhost/contracts/"
-    else
-        warn "No contract artifacts found - deployment will fail"
-        warn "Ensure submodule packages include compiled contracts in /usr/share/blockhost/contracts/"
-    fi
-}
 
 configure_testing_mode() {
     if [ "$TESTING_MODE" != "true" ]; then
@@ -396,7 +350,6 @@ main() {
     add_preseed
     add_blockhost_files
     add_packages
-    add_contracts
     configure_testing_mode
     rebuild_iso
     cleanup

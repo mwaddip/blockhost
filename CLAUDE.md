@@ -1,5 +1,21 @@
 # BlockHost - Custom Proxmox VE Image Project
 
+## SETTINGS.md (HIGHEST PRIORITY)
+
+**Read and internalize `SETTINGS.md` at the start of every session.** It defines persona, preferences, and behavioral overrides. It takes precedence over all other instructions in this file.
+
+## Plan Mode (PERSISTENT RULE)
+
+**Every plan must begin by reading `SETTINGS.md`.** When entering plan mode, the first action before any exploration or planning is to read and internalize `SETTINGS.md`. Context clears between plan mode and implementation — the persona and preferences do not survive unless explicitly reloaded.
+
+## Architecture Reference (PERSISTENT RULE)
+
+**`ARCHITECTURE.md` must be kept in sync with the codebase.** When any change affects the architecture — new routes, new config files, changed data flows, new finalization steps, session schema changes, new services, or modified submodule interfaces — update `ARCHITECTURE.md` to reflect the change. This file is LLM-optimized (dense, structured, no prose) and serves as the canonical reference for how components connect.
+
+## Validation Script (PERSISTENT RULE)
+
+**`installer/web/validate_system.py` must reflect the desired end state after wizard finalization.** After any change that affects the post-reboot system — new config files, changed file permissions, new services, new required keys in YAML/JSON configs, new environment variables, changed ownership, new systemd units — update `validate_system.py` so it verifies the change. This script is the definition of "a working system after reboot" and must stay in sync with what finalization actually produces.
+
 ## Submodule Separation (CRITICAL RULE)
 
 **You CANNOT modify files in submodules.** The following directories are submodules with their own Claude sessions:
@@ -14,18 +30,6 @@
 1. Do NOT attempt to edit files in submodule directories
 2. Instead, provide the user with a complete prompt to send to that submodule's Claude session
 3. Format the prompt clearly so the user can copy-paste it directly
-
-## Documentation Requirements (PERSISTENT RULE)
-
-**Every change made in this project MUST be documented in `docs/BUILD_GUIDE.md`:**
-
-1. **Commands**: Record every shell command executed with full context
-2. **File Changes**: Include diffs or full file contents for all created/modified files
-3. **Explanations**: Explain WHY each step is necessary
-4. **Prerequisites**: List any dependencies or assumptions
-5. **Verification**: Include commands to verify each step succeeded
-
-A human must be able to reproduce the entire build by following the guide step-by-step.
 
 ## Project Structure
 

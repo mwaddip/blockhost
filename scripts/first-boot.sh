@@ -192,6 +192,36 @@ else
 fi
 
 #
+# Step 2b1: Verify blockhost user (created by blockhost-common .deb)
+#
+log "Step 2b1: Verifying blockhost user..."
+if id -u blockhost >/dev/null 2>&1; then
+    log "Step 2b1 complete - blockhost user exists"
+else
+    log "ERROR: blockhost user not found (should be created by blockhost-common postinst)"
+    exit 1
+fi
+
+#
+# Step 2b2: Verify root agent (installed by blockhost-common .deb)
+#
+log "Step 2b2: Verifying root agent..."
+if ! systemctl is-active --quiet blockhost-root-agent; then
+    systemctl start blockhost-root-agent || log "WARNING: Failed to start root agent"
+fi
+
+for i in $(seq 1 10); do
+    [ -S /run/blockhost/root-agent.sock ] && break
+    sleep 1
+done
+
+if [ -S /run/blockhost/root-agent.sock ]; then
+    log "Step 2b2 complete - Root agent socket ready"
+else
+    log "WARNING: Root agent socket not ready after 10s"
+fi
+
+#
 # Step 2c: Install Foundry (for contract deployment)
 #
 STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
@@ -372,9 +402,9 @@ sleep 1
 # Explicitly pass PYTHONPATH to ensure module is found
 cd "$BLOCKHOST_DIR"
 if [ "$SCHEME" = "https" ]; then
-    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
 else
-    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
 fi
 
 sleep 3

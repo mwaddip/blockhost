@@ -1,0 +1,61 @@
+name: ISO Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      testing_mode:
+        description: 'Build with --testing flag (SSH root login, apt proxy, testing marker)'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-iso:
+    name: Build BlockHost ISO
+    runs-on: [self-hosted, blockhost-iso]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Symlink base ISO from project directory
+        run: |
+          mkdir -p build
+          if [ ! -f build/debian-12-netinst.iso ]; then
+            ln -s /home/mwaddip/projects/blockhost/build/debian-12-netinst.iso build/debian-12-netinst.iso
+          fi
+          if [ ! -f build/debian-12-netinst.iso ]; then
+            echo "Base Debian 12 netinst ISO not found"
+            echo "Download it to: /home/mwaddip/projects/blockhost/build/"
+            echo "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/"
+            exit 1
+          fi
+
+      - name: Build packages
+        run: ./scripts/build-packages.sh
+
+      - name: Verify packages
+        run: ./scripts/ci-verify-packages.sh
+
+      - name: Remove old ISO
+        run: sudo rm -f build/blockhost_0.1.0.iso
+
+      - name: Build ISO
+        run: |
+          ARGS=""
+          # workflow_dispatch: use input; tag push: always enable testing
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.testing_mode }}" = "true" ]; then
+              ARGS="--testing"
+            fi
+          fi
+          sudo ./scripts/build-iso.sh $ARGS
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockhost-iso
+          path: build/blockhost_0.1.0.iso
+          retention-days: ${{ github.event_name == 'push' && 30 || 3 }}

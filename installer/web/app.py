@@ -12,6 +12,7 @@ Provides web-based installation wizard with:
 - Package configuration
 """
 
+import grp
 import os
 import ssl
 import json
@@ -420,6 +421,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'contract_mode': request.form.get('contract_mode'),
                 'nft_contract': request.form.get('nft_contract'),
                 'subscription_contract': request.form.get('subscription_contract'),
+                'plan_name': request.form.get('plan_name', 'Basic VM'),
+                'plan_price_cents': int(request.form.get('plan_price_cents', 50)),
+                'revenue_share_enabled': request.form.get('revenue_share_enabled') == 'on',
+                'revenue_share_percent': float(request.form.get('revenue_share_percent', 1)),
+                'revenue_share_dev': request.form.get('revenue_share_dev') == 'on',
+                'revenue_share_broker': request.form.get('revenue_share_broker') == 'on',
             }
             return redirect(url_for('wizard_proxmox'))
 
@@ -548,6 +555,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'deploy_contracts': blockchain.get('contract_mode') == 'deploy',
                 'nft_contract': blockchain.get('nft_contract'),
                 'subscription_contract': blockchain.get('subscription_contract'),
+                'plan_name': blockchain.get('plan_name', 'Basic VM'),
+                'plan_price_cents': blockchain.get('plan_price_cents', 50),
+                'revenue_share_enabled': blockchain.get('revenue_share_enabled', False),
+                'revenue_share_percent': blockchain.get('revenue_share_percent', 1),
+                'revenue_share_dev': blockchain.get('revenue_share_dev', False),
+                'revenue_share_broker': blockchain.get('revenue_share_broker', False),
             },
             'proxmox': {
                 'node': proxmox.get('node'),
@@ -840,6 +853,105 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'error': 'Job not found'}), 404
         return jsonify(job)
 
+    # CI/CD test setup endpoint (testing mode only)
+    @app.route('/api/setup-test', methods=['POST'])
+    def api_setup_test():
+        """
+        One-shot endpoint: authenticate via OTP, populate session, trigger
+        finalization. Only available when the ISO was built with --testing.
+        Returns 404 on production systems.
+        """
+        testing_marker = Path('/etc/blockhost/.testing-mode')
+        if not testing_marker.exists():
+            abort(404)
+
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body required'}), 400
+
+        # Verify OTP
+        otp_code = data.get('otp', '').strip()
+        if not otp_code:
+            return jsonify({'error': 'otp field required'}), 400
+
+        success, message = otp_manager.verify(otp_code)
+        if not success:
+            return jsonify({'error': f'OTP verification failed: {message}'}), 403
+
+        # Populate session — mirrors the wizard steps
+        session['authenticated'] = True
+        session.permanent = True
+        session['admin_wallet'] = data.get('admin_wallet', '')
+        session['admin_signature'] = data.get('admin_signature', '')
+        session['admin_public_secret'] = data.get('admin_public_secret', 'blockhost-access')
+
+        # Blockchain config
+        session['blockchain'] = data.get('blockchain', {})
+
+        # Proxmox — auto-detect, then merge any explicit overrides
+        detected = _detect_proxmox_resources()
+        proxmox_defaults = {
+            'api_url': detected.get('api_url', 'https://127.0.0.1:8006'),
+            'node': detected.get('node_name', socket.gethostname()),
+            'storage': detected['storages'][0]['name'] if detected.get('storages') else 'local-lvm',
+            'bridge': detected['bridges'][0] if detected.get('bridges') else 'vmbr0',
+            'user': 'root@pam',
+            'template_vmid': 9001,
+            'vmid_start': 100,
+            'vmid_end': 999,
+            'ip_network': '192.168.122.0/24',
+            'ip_start': '200',
+            'ip_end': '250',
+            'gateway': '192.168.122.1',
+            'gc_grace_days': 7,
+        }
+        proxmox_overrides = data.get('proxmox', {})
+        # Remove the auto_detect flag — it's a signal, not config
+        proxmox_overrides.pop('auto_detect', None)
+        proxmox_defaults.update(proxmox_overrides)
+        session['proxmox'] = proxmox_defaults
+
+        # IPv6 config
+        session['ipv6'] = data.get('ipv6', {})
+
+        # Admin commands config
+        session['admin_commands'] = data.get('admin_commands', {'enabled': False})
+
+        # Build config dict identical to what /api/finalize uses
+        config = {
+            'blockchain': session.get('blockchain', {}),
+            'proxmox': session.get('proxmox', {}),
+            'ipv6': session.get('ipv6', {}),
+            'admin_wallet': session.get('admin_wallet', ''),
+            'admin_signature': session.get('admin_signature', ''),
+            'admin_public_secret': session.get('admin_public_secret', ''),
+            'admin_commands': session.get('admin_commands', {}),
+        }
+
+        # Start finalization (same as /api/finalize)
+        setup_state = SetupState()
+
+        if setup_state.state['status'] == 'completed':
+            return jsonify({
+                'status': 'completed',
+                'message': 'Setup already complete',
+                'poll_url': '/api/finalize/status',
+            })
+
+        setup_state.start(config)
+
+        thread = threading.Thread(
+            target=_run_finalization_with_state,
+            args=(setup_state, config)
+        )
+        thread.start()
+
+        return jsonify({
+            'status': 'running',
+            'message': 'Test setup started — finalization running',
+            'poll_url': '/api/finalize/status',
+        })
+
     # Finalization API endpoints
     @app.route('/api/finalize', methods=['POST'])
     @require_auth
@@ -1032,6 +1144,13 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
 
 # Helper functions
+
+def _set_blockhost_ownership(path, mode=0o640):
+    """Set file to root:blockhost with given mode."""
+    os.chmod(str(path), mode)
+    gid = grp.getgrnam('blockhost').gr_gid
+    os.chown(str(path), 0, gid)
+
 
 def _detect_disks() -> list[dict]:
     """Detect available disks."""
@@ -1587,7 +1706,7 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
         # Write private key without 0x prefix (pam_web3_tool expects raw hex)
         private_key_raw = private_key[2:] if private_key.startswith('0x') else private_key
         key_file.write_text(private_key_raw)
-        key_file.chmod(0o600)
+        _set_blockhost_ownership(key_file, 0o640)
 
         # Write public key separately (for signup page ECIES encryption)
         pubkey_file = config_dir / 'server.pubkey'
@@ -1616,7 +1735,7 @@ def _finalize_wallet(config: dict) -> tuple[bool, Optional[str]]:
         key_file.parent.mkdir(parents=True, exist_ok=True)
 
         key_file.write_text(deployer_key)
-        key_file.chmod(0o600)
+        _set_blockhost_ownership(key_file, 0o640)
 
         return True, None
     except Exception as e:
@@ -1653,7 +1772,7 @@ def _finalize_contracts(config: dict) -> tuple[bool, Optional[str]]:
             if not deployer_key.startswith('0x'):
                 deployer_key = '0x' + deployer_key
 
-            contracts_dir = Path('/opt/blockhost/contracts')
+            contracts_dir = Path('/usr/share/blockhost/contracts')
 
             # Deploy NFT contract (AccessCredentialNFT)
             # Constructor: (string name, string symbol, string defaultImageUri)
@@ -1828,6 +1947,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'gc_grace_days': proxmox.get('gc_grace_days', 7),
         }
         _write_yaml(config_dir / 'db.yaml', db_config)
+        _set_blockhost_ownership(config_dir / 'db.yaml', 0o640)
 
         # USDC addresses by chain
         usdc_addresses = {
@@ -1863,6 +1983,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             },
         }
         _write_yaml(config_dir / 'web3-defaults.yaml', web3_config)
+        _set_blockhost_ownership(config_dir / 'web3-defaults.yaml', 0o640)
 
         # Write blockhost.yaml (includes fields needed by generate-signup-page.py)
         blockhost_config = {
@@ -1896,6 +2017,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             blockhost_config['admin'] = admin_section
 
         _write_yaml(config_dir / 'blockhost.yaml', blockhost_config)
+        _set_blockhost_ownership(config_dir / 'blockhost.yaml', 0o640)
 
         # Write admin-commands.json if admin commands are enabled
         if admin_commands.get('enabled') and admin_commands.get('knock_command'):
@@ -1921,7 +2043,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         if admin_signature:
             sig_file = config_dir / 'admin-signature.key'
             sig_file.write_text(admin_signature)
-            sig_file.chmod(0o600)
+            _set_blockhost_ownership(sig_file, 0o640)
 
         # Write .env file for blockhost-monitor service
         env_file = Path('/opt/blockhost/.env')
@@ -1938,6 +2060,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             f"DEPLOYER_KEY_FILE=/etc/blockhost/deployer.key",
         ]
         env_file.write_text('\n'.join(env_lines) + '\n')
+        _set_blockhost_ownership(env_file, 0o640)
 
         return True, None
     except Exception as e:
@@ -1980,6 +2103,11 @@ def _finalize_token(config: dict) -> tuple[bool, Optional[str]]:
                 }
                 _write_tfvars(terraform_dir / 'terraform.tfvars', tfvars)
 
+                # Save token to /etc/blockhost/pve-token
+                token_file = Path('/etc/blockhost/pve-token')
+                token_file.write_text(f"{token_id}={token_value}")
+                _set_blockhost_ownership(token_file, 0o640)
+
                 return True, None
 
         return False, 'Failed to create API token'
@@ -2014,7 +2142,7 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
                 return False, f'SSH keygen failed: {result.stderr}'
 
             # Set correct permissions
-            ssh_key_file.chmod(0o600)
+            _set_blockhost_ownership(ssh_key_file, 0o640)
             ssh_pub_file.chmod(0o644)
 
         # Add public key to root's authorized_keys
@@ -2369,7 +2497,8 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
             prefix = ''
 
             if allocation_file.exists():
-                # broker-client wrote it — read prefix from there
+                # broker-client wrote it — fix permissions and read prefix
+                _set_blockhost_ownership(allocation_file, 0o640)
                 try:
                     alloc_data = json.loads(allocation_file.read_text())
                     prefix = alloc_data.get('prefix', alloc_data.get('ipv6_prefix', ''))
@@ -2440,6 +2569,7 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 'registry': '',
                 'mode': 'manual',
             }, indent=2))
+            _set_blockhost_ownership(allocation_file, 0o640)
             config['ipv6']['prefix'] = ipv6.get('prefix', '')
 
         # Step 4: Add gateway address to vmbr0 for VM connectivity
@@ -2603,7 +2733,7 @@ def _generate_self_signed_cert(hostname: str, ssl_dir: Path):
         '-subj', f'/CN={hostname}',
     ], capture_output=True, timeout=60)
 
-    key_path.chmod(0o600)
+    _set_blockhost_ownership(key_path, 0o640)
 
 
 def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
@@ -2673,6 +2803,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=blockhost
+Group=blockhost
 ExecStart=/usr/local/bin/blockhost-signup-server
 Restart=on-failure
 RestartSec=10
@@ -2689,6 +2821,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=blockhost
+Group=blockhost
 ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/www/blockhost
 Restart=on-failure
 RestartSec=10
@@ -2856,6 +2990,95 @@ def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
 
 
 
+def _write_revenue_share_config(config: dict):
+    """Write addressbook.json and revenue-share.json based on wizard settings."""
+    config_dir = Path('/etc/blockhost')
+    config_dir.mkdir(parents=True, exist_ok=True)
+    blockchain = config.get('blockchain', {})
+    share_dev = blockchain.get('revenue_share_dev', False) and blockchain.get('revenue_share_enabled', False)
+    share_broker = blockchain.get('revenue_share_broker', False) and blockchain.get('revenue_share_enabled', False)
+
+    # Build addressbook — always written, used beyond just revenue sharing
+    # Each entry is {address, keyfile?}. No "hot" entry — engine auto-generates it.
+    addressbook = {}
+
+    admin_wallet = config.get('admin_wallet', '')
+    if admin_wallet:
+        addressbook['admin'] = {'address': admin_wallet}
+
+    deployer_key = blockchain.get('deployer_key', '')
+    if deployer_key:
+        deployer_addr = _get_address_from_key(deployer_key)
+        if deployer_addr:
+            addressbook['server'] = {
+                'address': deployer_addr,
+                'keyfile': '/etc/blockhost/deployer.key',
+            }
+
+    # dev and broker only included when their revenue sharing role is enabled
+    if share_dev:
+        addressbook['dev'] = {'address': '0xe35B5D114eFEA216E6BB5Ff15C261d25dB9E2cb9'}
+
+    broker_wallet = None
+    if share_broker:
+        broker_wallet = _resolve_broker_wallet(config)
+        if broker_wallet:
+            addressbook['broker'] = {'address': broker_wallet}
+        else:
+            print("Warning: Could not resolve broker wallet, skipping broker from revenue share")
+
+    (config_dir / 'addressbook.json').write_text(json.dumps(addressbook, indent=2))
+    _set_blockhost_ownership(config_dir / 'addressbook.json', 0o640)
+
+    # Revenue share config
+    if not blockchain.get('revenue_share_enabled'):
+        (config_dir / 'revenue-share.json').write_text(json.dumps({
+            'enabled': False,
+            'total_percent': 0,
+            'recipients': [],
+        }, indent=2))
+        os.chmod(config_dir / 'revenue-share.json', 0o644)
+        return
+
+    total_percent = blockchain.get('revenue_share_percent', 1)
+
+    recipients = []
+    if share_dev:
+        recipients.append('dev')
+    if share_broker and broker_wallet:
+        recipients.append('broker')
+
+    per_recipient = round(total_percent / len(recipients), 4) if recipients else 0
+    (config_dir / 'revenue-share.json').write_text(json.dumps({
+        'enabled': True,
+        'total_percent': total_percent,
+        'recipients': [{'role': r, 'percent': per_recipient} for r in recipients],
+    }, indent=2))
+    os.chmod(config_dir / 'revenue-share.json', 0o644)
+
+
+def _resolve_broker_wallet(config: dict) -> Optional[str]:
+    """Read the broker's wallet address from broker-allocation.json.
+
+    The broker-client records the msg.sender of the broker's submitResponse
+    transaction as broker_wallet when saving the allocation config.
+    """
+    try:
+        alloc_file = Path('/etc/blockhost/broker-allocation.json')
+        if not alloc_file.exists():
+            return None
+
+        alloc = json.loads(alloc_file.read_text())
+        wallet = alloc.get('broker_wallet', '')
+        if wallet and wallet.startswith('0x') and len(wallet) == 42:
+            return wallet
+
+        return None
+    except Exception as e:
+        print(f"Warning: Failed to read broker wallet: {e}")
+        return None
+
+
 def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
     """Finalize setup: enable services, create default plan, mark complete.
 
@@ -2889,12 +3112,40 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
                 # Non-fatal - admin can create plan manually
                 print(f"Warning: Failed to create default plan: {e}")
 
+        # Write revenue sharing config (addressbook + revenue-share)
+        try:
+            _write_revenue_share_config(config)
+        except Exception as e:
+            # Non-fatal
+            print(f"Warning: Failed to write revenue share config: {e}")
+
+        # Ensure state dir is owned by blockhost user
+        subprocess.run(
+            ['chown', '-R', 'blockhost:blockhost', '/var/lib/blockhost'],
+            capture_output=True, timeout=30
+        )
+
+        # Ensure config dir has correct group ownership
+        subprocess.run(
+            ['chown', '-R', 'root:blockhost', '/etc/blockhost'],
+            capture_output=True, timeout=30
+        )
+        subprocess.run(
+            ['chmod', '750', '/etc/blockhost'],
+            capture_output=True, timeout=30
+        )
+
         # Write setup complete marker
         (marker_dir / '.setup-complete').touch()
 
-        # Disable first-boot service
+        # Disable and stop first-boot service
         subprocess.run(
-            ['systemctl', 'disable', 'blockhost-first-boot'],
+            ['systemctl', 'disable', 'blockhost-firstboot'],
+            capture_output=True,
+            timeout=30
+        )
+        subprocess.run(
+            ['systemctl', 'stop', 'blockhost-firstboot'],
             capture_output=True,
             timeout=30
         )
@@ -2948,14 +3199,17 @@ def _create_default_plan(config: dict):
 
     deployer_key = deployer_key_file.read_text().strip()
 
-    # Create default plan: 100 cents/day ($1/day)
+    # Use wizard-configured plan name and price, with sensible defaults
+    plan_name = blockchain.get('plan_name', 'Basic VM')
+    plan_price = str(blockchain.get('plan_price_cents', 50))
+
     # createPlan(string name, uint256 pricePerDayUsdCents)
     cmd = [
         'cast', 'send',
         subscription_contract,
         'createPlan(string,uint256)',
-        'Basic VM',         # name
-        '100',              # pricePerDayUsdCents ($1/day)
+        plan_name,
+        plan_price,
         '--private-key', deployer_key,
         '--rpc-url', rpc_url,
         '--json',
@@ -2971,7 +3225,7 @@ def _create_default_plan(config: dict):
     if result.returncode != 0:
         raise RuntimeError(f"Plan creation failed: {result.stderr}")
 
-    print("Default plan 'Basic VM' created")
+    print(f"Plan '{plan_name}' created at {plan_price} cents/day")
 
     # Set primary stablecoin (USDC) based on chain
     chain_id = int(blockchain.get('chain_id', 11155111))
