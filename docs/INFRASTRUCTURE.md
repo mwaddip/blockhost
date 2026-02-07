@@ -36,7 +36,6 @@ BlockHost runs on a Proxmox VE host. After installation, the system has two user
 
 /opt/blockhost/           # Application files (from ISO)
     installer/            #   Flask wizard
-    root-agent/           #   Root agent daemon source
     scripts/              #   First-boot script
     .env                  #   Environment for blockhost-monitor
 ```
@@ -309,7 +308,7 @@ Each step: checks if already completed, marks running, executes, marks completed
 
 ### Adding a new command
 
-1. **Write handler** in `root-agent/blockhost_root_agent.py`:
+1. **Write handler** in `blockhost-common: usr/share/blockhost/root-agent/blockhost_root_agent.py`:
    ```python
    def handle_my_action(params):
        # Validate params strictly

@@ -429,6 +429,7 @@ def run_full_validation() -> ValidationReport:
         (etc_blockhost / 'deployer.key', 'Deployer private key'),
         (etc_blockhost / 'terraform_ssh_key', 'Terraform SSH key'),
         (etc_blockhost / 'ssl' / 'key.pem', 'SSL private key'),
+        (etc_blockhost / 'pve-token', 'Proxmox API token'),
     ]
 
     for path, name in private_keys:
@@ -461,7 +462,8 @@ def run_full_validation() -> ValidationReport:
     report.add(_check_yaml_syntax(
         etc_blockhost / 'web3-defaults.yaml',
         "Config", "web3-defaults.yaml",
-        required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract']
+        required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract',
+                       'blockchain.subscription_contract', 'auth.public_secret', 'server.public_key']
     ))
 
     # blockhost.yaml
@@ -469,7 +471,7 @@ def run_full_validation() -> ValidationReport:
         etc_blockhost / 'blockhost.yaml',
         "Config", "blockhost.yaml",
         required_keys=['server.key_file', 'deployer.key_file', 'proxmox.node', 'proxmox.storage', 'proxmox.bridge',
-                       'admin.wallet_address']
+                       'admin.wallet_address', 'public_secret', 'server_public_key']
     ))
 
     # ========== JSON CONFIG FILES ==========
@@ -709,10 +711,22 @@ def run_full_validation() -> ValidationReport:
 
     # ========== ENVIRONMENT FILE ==========
 
+    env_path = Path('/opt/blockhost/.env')
     report.add(_check_env_file(
-        Path('/opt/blockhost/.env'),
-        required_vars=['NFT_CONTRACT', 'DEPLOYER_KEY_FILE']
+        env_path,
+        required_vars=['NFT_CONTRACT', 'DEPLOYER_KEY_FILE', 'BLOCKHOST_CONTRACT']
     ))
+    if env_path.exists():
+        report.add(_check_file_permissions(env_path, 0o640, "Permissions", ".env file"))
+        # Check that at least one RPC variable is set (SEPOLIA_RPC or CHAIN_*_RPC)
+        try:
+            env_content = env_path.read_text()
+            if 'RPC=' in env_content:
+                report.add(ValidationResult("Environment", "RPC variable", True, "RPC endpoint configured"))
+            else:
+                report.add(ValidationResult("Environment", "RPC variable", False, "No RPC variable found in .env"))
+        except Exception as e:
+            report.add(ValidationResult("Environment", "RPC variable", False, f"Error reading .env: {e}"))
 
     # ========== PRIVILEGE SEPARATION ==========
 
@@ -768,6 +782,56 @@ def run_full_validation() -> ValidationReport:
         report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost owner", False,
                                     "Directory does not exist"))
 
+    # /etc/blockhost directory permissions (750 root:blockhost)
+    if etc_blockhost.exists():
+        try:
+            import grp
+            dir_stat = etc_blockhost.stat()
+            dir_mode = stat.S_IMODE(dir_stat.st_mode)
+            if dir_mode == 0o750:
+                report.add(ValidationResult("Privilege Separation", "/etc/blockhost permissions", True, "750"))
+            else:
+                report.add(ValidationResult("Privilege Separation", "/etc/blockhost permissions", False,
+                                            f"Expected 0750, got {oct(dir_mode)}"))
+            try:
+                group_name = grp.getgrgid(dir_stat.st_gid).gr_name
+                if group_name == 'blockhost':
+                    report.add(ValidationResult("Privilege Separation", "/etc/blockhost group", True, "blockhost"))
+                else:
+                    report.add(ValidationResult("Privilege Separation", "/etc/blockhost group", False,
+                                                f"Expected blockhost, got {group_name}"))
+            except KeyError:
+                report.add(ValidationResult("Privilege Separation", "/etc/blockhost group", False,
+                                            f"Unknown GID {dir_stat.st_gid}"))
+        except Exception as e:
+            report.add(ValidationResult("Privilege Separation", "/etc/blockhost permissions", False, f"Error: {e}"))
+
+    # /var/lib/blockhost/terraform ownership
+    tf_state_dir = Path('/var/lib/blockhost/terraform')
+    if tf_state_dir.exists():
+        try:
+            import pwd
+            tf_stat = tf_state_dir.stat()
+            tf_owner = pwd.getpwuid(tf_stat.st_uid).pw_name
+            if tf_owner == 'blockhost':
+                report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost/terraform owner", True,
+                                            "Owned by blockhost"))
+            else:
+                report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost/terraform owner", False,
+                                            f"Owned by {tf_owner}, expected blockhost"))
+        except Exception as e:
+            report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost/terraform owner", False, f"Error: {e}"))
+
+    # YAML config file permissions (should be 0640 root:blockhost)
+    yaml_configs = [
+        (etc_blockhost / 'db.yaml', 'db.yaml'),
+        (etc_blockhost / 'web3-defaults.yaml', 'web3-defaults.yaml'),
+        (etc_blockhost / 'blockhost.yaml', 'blockhost.yaml'),
+    ]
+    for path, name in yaml_configs:
+        if path.exists():
+            report.add(_check_file_permissions(path, 0o640, "Permissions", name))
+
     # ========== SERVICES ==========
 
     # blockhost-signup should be enabled (may still be starting)
@@ -779,8 +843,8 @@ def run_full_validation() -> ValidationReport:
     # blockhost-gc.timer should be enabled
     report.add(_check_service_state('blockhost-gc.timer', expected_enabled=True, expected_active=None))
 
-    # blockhost-first-boot should be disabled
-    report.add(_check_service_state('blockhost-first-boot', expected_enabled=False, expected_active=False))
+    # blockhost-firstboot should be disabled after finalization
+    report.add(_check_service_state('blockhost-firstboot', expected_enabled=False, expected_active=False))
 
     # ========== NETWORK ==========
 

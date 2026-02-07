@@ -1,8 +1,20 @@
 # BlockHost - Custom Proxmox VE Image Project
 
+## SETTINGS.md (HIGHEST PRIORITY)
+
+**Read and internalize `SETTINGS.md` at the start of every session.** It defines persona, preferences, and behavioral overrides. It takes precedence over all other instructions in this file.
+
+## Plan Mode (PERSISTENT RULE)
+
+**Every plan must begin by reading `SETTINGS.md`.** When entering plan mode, the first action before any exploration or planning is to read and internalize `SETTINGS.md`. Context clears between plan mode and implementation — the persona and preferences do not survive unless explicitly reloaded.
+
 ## Architecture Reference (PERSISTENT RULE)
 
 **`ARCHITECTURE.md` must be kept in sync with the codebase.** When any change affects the architecture — new routes, new config files, changed data flows, new finalization steps, session schema changes, new services, or modified submodule interfaces — update `ARCHITECTURE.md` to reflect the change. This file is LLM-optimized (dense, structured, no prose) and serves as the canonical reference for how components connect.
+
+## Validation Script (PERSISTENT RULE)
+
+**`installer/web/validate_system.py` must reflect the desired end state after wizard finalization.** After any change that affects the post-reboot system — new config files, changed file permissions, new services, new required keys in YAML/JSON configs, new environment variables, changed ownership, new systemd units — update `validate_system.py` so it verifies the change. This script is the definition of "a working system after reboot" and must stay in sync with what finalization actually produces.
 
 ## Submodule Separation (CRITICAL RULE)
 

@@ -4,6 +4,7 @@ build/
 
 # Session context (Claude working memory, not for git)
 SESSION_CONTEXT.md
+SETTINGS.md
 
 # Python
 __pycache__/

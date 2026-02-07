@@ -192,71 +192,33 @@ else
 fi
 
 #
-# Step 2b1: Create blockhost system user
+# Step 2b1: Verify blockhost user (created by blockhost-common .deb)
 #
-STEP_USER="${STATE_DIR}/.step-user"
-if [ ! -f "$STEP_USER" ]; then
-    log "Step 2b1: Creating blockhost system user..."
-
-    # Create group first if it doesn't exist
-    if ! getent group blockhost >/dev/null 2>&1; then
-        groupadd --system blockhost
-    fi
-
-    # Create user
-    if ! id -u blockhost >/dev/null 2>&1; then
-        useradd --system --gid blockhost \
-            --home-dir /var/lib/blockhost \
-            --shell /usr/sbin/nologin \
-            --no-create-home blockhost
-    fi
-
-    # Set ownership on state directory
-    chown blockhost:blockhost /var/lib/blockhost
-    chmod 750 /var/lib/blockhost
-    [ -d /var/lib/blockhost/terraform ] && chown -R blockhost:blockhost /var/lib/blockhost/terraform
-
-    # Set config directory group ownership
-    mkdir -p /etc/blockhost
-    chown root:blockhost /etc/blockhost
-    chmod 750 /etc/blockhost
-
-    touch "$STEP_USER"
-    log "Step 2b1 complete - blockhost user created!"
+log "Step 2b1: Verifying blockhost user..."
+if id -u blockhost >/dev/null 2>&1; then
+    log "Step 2b1 complete - blockhost user exists"
 else
-    log "Step 2b1: blockhost user already created, skipping."
+    log "ERROR: blockhost user not found (should be created by blockhost-common postinst)"
+    exit 1
 fi
 
 #
-# Step 2b2: Install root agent
+# Step 2b2: Verify root agent (installed by blockhost-common .deb)
 #
-STEP_ROOT_AGENT="${STATE_DIR}/.step-root-agent"
-if [ ! -f "$STEP_ROOT_AGENT" ]; then
-    log "Step 2b2: Installing root agent..."
+log "Step 2b2: Verifying root agent..."
+if ! systemctl is-active --quiet blockhost-root-agent; then
+    systemctl start blockhost-root-agent || log "WARNING: Failed to start root agent"
+fi
 
-    mkdir -p /usr/share/blockhost/root-agent
-    cp "$BLOCKHOST_DIR/root-agent/blockhost_root_agent.py" /usr/share/blockhost/root-agent/
-    cp "$BLOCKHOST_DIR/root-agent/blockhost-root-agent.service" /etc/systemd/system/
-    systemctl daemon-reload
-    systemctl enable blockhost-root-agent
-    systemctl start blockhost-root-agent
+for i in $(seq 1 10); do
+    [ -S /run/blockhost/root-agent.sock ] && break
+    sleep 1
+done
 
-    # Wait for socket to appear
-    for i in $(seq 1 10); do
-        [ -S /run/blockhost/root-agent.sock ] && break
-        sleep 1
-    done
-
-    if [ -S /run/blockhost/root-agent.sock ]; then
-        log "Root agent socket ready"
-    else
-        log "WARNING: Root agent socket not ready after 10s"
-    fi
-
-    touch "$STEP_ROOT_AGENT"
-    log "Step 2b2 complete - Root agent installed!"
+if [ -S /run/blockhost/root-agent.sock ]; then
+    log "Step 2b2 complete - Root agent socket ready"
 else
-    log "Step 2b2: Root agent already installed, skipping."
+    log "WARNING: Root agent socket not ready after 10s"
 fi
 
 #

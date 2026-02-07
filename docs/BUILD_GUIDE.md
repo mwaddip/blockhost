@@ -408,7 +408,7 @@ ss -tlnp | grep :80
 ### Contract deployment fails
 - Check deployer wallet has ETH for gas
 - Verify RPC endpoint: `cast block-number --rpc-url $RPC`
-- Check contract artifacts exist in `/opt/blockhost/contracts/`
+- Check contract artifacts exist in `/usr/share/blockhost/contracts/`
 
 ### Template build fails
 - Check libpam-web3 `.deb` exists in `/var/lib/blockhost/template-packages/`
