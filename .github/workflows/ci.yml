@@ -22,7 +22,7 @@ jobs:
           workspaces: libpam-web3
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev libclang-dev
 
       - name: Run tests
         working-directory: libpam-web3
@@ -39,8 +39,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: npm
-          cache-dependency-path: blockhost-engine/package-lock.json
 
       - name: Install dependencies
         working-directory: blockhost-engine
@@ -62,7 +60,7 @@ jobs:
 
       - name: Install Solidity dependencies
         working-directory: libpam-web3/contracts
-        run: forge install
+        run: forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-commit
 
       - name: Run tests
         working-directory: libpam-web3/contracts
@@ -85,13 +83,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: npm
-          cache-dependency-path: blockhost-engine/package-lock.json
 
       - uses: foundry-rs/foundry-toolchain@v1
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev libclang-dev
 
       - name: Build all packages
         run: ./scripts/build-packages.sh
