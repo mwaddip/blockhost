@@ -42,7 +42,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: blockhost-engine
-        run: npm ci
+        run: npm install
 
       - name: Run tests
         working-directory: blockhost-engine
@@ -60,7 +60,7 @@ jobs:
 
       - name: Install Solidity dependencies
         working-directory: libpam-web3/contracts
-        run: forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-commit
+        run: forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
 
       - name: Run tests
         working-directory: libpam-web3/contracts
