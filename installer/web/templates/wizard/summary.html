@@ -60,6 +60,20 @@
             <span class="summary-label">Price per Day</span>
             <span class="summary-value">{{ summary.blockchain.plan_price_cents }} cents (${{ '%.2f' | format(summary.blockchain.plan_price_cents / 100) }}/day)</span>
         </div>
+        <div class="summary-item">
+            <span class="summary-label">Revenue Sharing</span>
+            <span class="summary-value">
+                {% if summary.blockchain.revenue_share_enabled %}
+                    {{ summary.blockchain.revenue_share_percent }}% to
+                    {% set recipients = [] %}
+                    {% if summary.blockchain.revenue_share_dev %}{% set _ = recipients.append('Dev') %}{% endif %}
+                    {% if summary.blockchain.revenue_share_broker %}{% set _ = recipients.append('Broker') %}{% endif %}
+                    {{ recipients | join(' + ') or 'None selected' }}
+                {% else %}
+                    Disabled
+                {% endif %}
+            </span>
+        </div>
     </div>
 
     <!-- Proxmox Summary -->

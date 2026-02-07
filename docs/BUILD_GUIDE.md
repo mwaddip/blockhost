@@ -324,13 +324,22 @@ Compiled in submodules during `.deb` builds, deployed during wizard finalization
 
 ## Testing
 
-### Build and boot a test VM
+### Full test cycle
+
+Each iteration: destroy the previous VM, remove the old ISO, rebuild, and boot fresh.
 
 ```bash
-# Build ISO
+# 1. Destroy the old test VM (if it exists)
+sudo virsh destroy blockhost-test 2>/dev/null
+sudo virsh undefine blockhost-test --remove-all-storage
+
+# 2. Remove the old ISO (root-owned from the build process)
+sudo rm -f build/blockhost_0.1.0.iso
+
+# 3. Rebuild packages and ISO
 ./scripts/build-iso.sh --build-deb --testing
 
-# Launch VM (requires libvirt)
+# 4. Launch a fresh test VM
 sudo virt-install \
     --name blockhost-test \
     --ram 4096 \

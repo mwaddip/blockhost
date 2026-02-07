@@ -214,6 +214,52 @@
             </div>
         </div>
 
+        <!-- Revenue Sharing -->
+        <div class="form-section">
+            <h3>Revenue Sharing</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                Optionally share a percentage of subscription revenue with the project developer and/or your IPv6 broker.
+            </p>
+
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="revenue_share_enabled" name="revenue_share_enabled"
+                           onchange="toggleRevenueShare()">
+                    <span>Share a percentage of revenue</span>
+                </label>
+            </div>
+
+            <div id="revenue-share-details" class="hidden">
+                <div class="form-group">
+                    <label for="revenue_share_percent">Percentage to share</label>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <input type="number" id="revenue_share_percent" name="revenue_share_percent"
+                               value="1" min="0.1" step="0.1" style="width: 6rem;">
+                        <span>%</span>
+                    </div>
+                    <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                        Split equally among selected recipients.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label>Recipients</label>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                            <input type="checkbox" name="revenue_share_dev" checked>
+                            <span>Developer</span>
+                            <span class="text-muted" style="font-size: 0.7rem;">0xe35B...2cb9</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                            <input type="checkbox" name="revenue_share_broker" checked>
+                            <span>Broker</span>
+                            <span class="text-muted" style="font-size: 0.7rem;">(resolved at setup time)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="flex justify-between" style="margin-top: 2rem;">
             <a href="{{ url_for('wizard_storage') }}" class="btn btn-secondary">Back</a>
             <button type="submit" class="btn btn-primary" id="continue-btn">Continue</button>
@@ -224,6 +270,12 @@
 
 {% block extra_js %}
 <script>
+// Toggle revenue sharing details
+function toggleRevenueShare() {
+    const enabled = document.getElementById('revenue_share_enabled').checked;
+    document.getElementById('revenue-share-details').classList.toggle('hidden', !enabled);
+}
+
 // Toggle sections based on radio selection
 function selectRadio(element) {
     const radio = element.querySelector('input[type="radio"]');
