@@ -30,8 +30,13 @@ RAM_MB=8192
 VCPUS=4
 DISK_GB=64
 NETWORK="default"
+LIBVIRT_URI="qemu:///system"
 SSH_PASS="blockhost"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+# Wrappers to ensure system connection (default network lives in qemu:///system)
+virsh()        { command virsh --connect "$LIBVIRT_URI" "$@"; }
+virt_install() { command virt-install --connect "$LIBVIRT_URI" "$@"; }
 
 # Timeouts (seconds)
 PRESEED_TIMEOUT=900     # 15 min for preseed install
@@ -110,8 +115,8 @@ fi
 [ -n "$CONFIG_FILE" ] || fail "--config is required"
 [ -f "$CONFIG_FILE" ] || fail "Config file not found: $CONFIG_FILE"
 
-command -v virsh >/dev/null         || fail "virsh not found"
-command -v virt-install >/dev/null   || fail "virt-install not found"
+command -v /usr/bin/virsh >/dev/null         || fail "virsh not found"
+command -v /usr/bin/virt-install >/dev/null   || fail "virt-install not found"
 command -v sshpass >/dev/null        || fail "sshpass not found"
 command -v jq >/dev/null             || fail "jq not found"
 command -v curl >/dev/null           || fail "curl not found"
@@ -145,7 +150,7 @@ info "Phase 1: Creating VM"
 virsh destroy "$VM_NAME" 2>/dev/null || true
 virsh undefine "$VM_NAME" --remove-all-storage 2>/dev/null || true
 
-virt-install \
+virt_install \
     --name "$VM_NAME" \
     --ram "$RAM_MB" \
     --vcpus "$VCPUS" \
