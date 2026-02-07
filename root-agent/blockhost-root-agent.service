@@ -1,0 +1,18 @@
+[Unit]
+Description=BlockHost Root Agent - Privileged Operations Daemon
+After=network.target
+Before=blockhost-monitor.service blockhost-gc.timer
+
+[Service]
+Type=simple
+RuntimeDirectory=blockhost
+ExecStart=/usr/bin/python3 /usr/share/blockhost/root-agent/blockhost_root_agent.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -42,6 +42,10 @@ blockhost/
 │               ├── ipv6.html
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
+├── root-agent/
+│   ├── blockhost_root_agent.py       # Root agent daemon (~350 lines)
+│   ├── blockhost-root-agent.service  # systemd unit for root agent
+│   └── client.py                     # Sync Python client for installer
 ├── packages/
 │   ├── host/                         # .debs installed on Proxmox host
 │   └── template/                     # .debs included in VM templates
@@ -101,8 +105,10 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
 
   Step 1 (.step-hostname):  Fix /etc/hosts for Proxmox (IP → hostname)
   Step 2 (.step-proxmox):   Install proxmox-ve, postfix, chrony
-  Step 2b (.step-packages): Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
-  Step 2c (.step-foundry):  Install Foundry (cast, forge, anvil) → /usr/local/bin/
+  Step 2b (.step-packages):  Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
+  Step 2b1 (.step-user):     Create blockhost system user/group, chown /var/lib/blockhost, /etc/blockhost
+  Step 2b2 (.step-root-agent): Install root agent daemon, enable + start service, wait for socket
+  Step 2c (.step-foundry):   Install Foundry (cast, forge, anvil) → /usr/local/bin/
   Step 2d (.step-terraform): Install Terraform + libguestfs (virt-customize, virt-sysprep)
   Step 3 (.step-network):   Verify network connectivity (DHCP fallback)
   Step 4 (.step-otp):       Generate OTP → /run/blockhost/otp.json, display on /etc/issue
@@ -121,7 +127,7 @@ Pre-wizard:
 Wizard steps (WIZARD_STEPS in app.py:52-60):
   1. /wizard/network        → DHCP or static IP
   2. /wizard/storage         → Disk selection for LVM
-  3. /wizard/blockchain      → chain_id, rpc_url, wallet (generate/import), contracts (deploy/existing), plan_name, plan_price_cents
+  3. /wizard/blockchain      → chain_id, rpc_url, wallet (generate/import), contracts (deploy/existing), plan_name, plan_price_cents, revenue_share_*
   4. /wizard/proxmox         → node, storage, bridge, vmid_range, ip_pool, gc_grace_days
   5. /wizard/ipv6            → broker allocation or manual prefix
   6. /wizard/admin_commands  → port knocking config
@@ -162,10 +168,11 @@ Each step: skip if completed, mark running → completed|failed, supports retry.
 ### Phase 6: Runtime (post-setup)
 
 ```
-Services enabled by finalization step 13:
-  blockhost-monitor.service   → TypeScript event watcher (blockhost-engine)
-  blockhost-signup.service    → Serve signup page (HTTPS)
-  blockhost-gc.timer          → Daily garbage collection (2 AM)
+Services enabled by finalization step 13 (all run as User=blockhost except root-agent):
+  blockhost-root-agent.service → Privileged ops daemon (root, started in Step 2b2)
+  blockhost-monitor.service    → TypeScript event watcher (blockhost-engine)
+  blockhost-signup.service     → Serve signup page (HTTPS)
+  blockhost-gc.timer           → Daily garbage collection (2 AM)
 
 Subscription purchase flow:
   1. User visits signup page → connects wallet → signs message
@@ -231,6 +238,10 @@ session = {
         'subscription_contract': '0x...',
         'plan_name': 'Basic VM',
         'plan_price_cents': 50,
+        'revenue_share_enabled': bool,
+        'revenue_share_percent': 1.0,
+        'revenue_share_dev': bool,
+        'revenue_share_broker': bool,
     },
 
     'proxmox': {                        # from /wizard/proxmox
@@ -273,21 +284,24 @@ session = {
 
 Directory: `/etc/blockhost/`
 
-| File | Format | Permissions | Written by step | Read by |
-|------|--------|-------------|-----------------|---------|
-| server.key | hex 64 chars | 0600 | keypair | blockhost-engine, provisioner |
-| server.pubkey | hex 0x04+... | 0644 | keypair | signup page, NFT mint |
-| deployer.key | hex 64 chars | 0600 | wallet | contract calls (cast send) |
-| db.yaml | YAML | 0644 | config | blockhost-provisioner, blockhost-gc |
-| web3-defaults.yaml | YAML | 0644 | config | blockhost-engine, blockhost-provisioner |
-| blockhost.yaml | YAML | 0644 | config | blockhost-engine, signup generator |
-| https.json | JSON | 0644 | https | blockhost-signup |
-| pve-token | text | 0600 | token | blockhost-provisioner (Terraform) |
-| terraform_ssh_key | PEM | 0600 | token | Terraform SSH provisioner |
-| terraform_ssh_key.pub | PEM | 0644 | token | VM authorized_keys |
-| admin-signature.key | hex | 0600 | config | admin command verification |
-| admin-commands.json | JSON | 0644 | config | blockhost-engine src/admin/ |
-| broker-allocation.json | JSON | 0644 | ipv6 | blockhost-broker-client |
+| File | Format | Owner:Group | Permissions | Written by step | Read by |
+|------|--------|-------------|-------------|-----------------|---------|
+| server.key | hex 64 chars | root:blockhost | 0640 | keypair | blockhost-engine, provisioner |
+| server.pubkey | hex 0x04+... | root:blockhost | 0644 | keypair | signup page, NFT mint |
+| deployer.key | hex 64 chars | root:blockhost | 0640 | wallet | contract calls (cast send) |
+| db.yaml | YAML | root:blockhost | 0644 | config | blockhost-provisioner, blockhost-gc |
+| web3-defaults.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, blockhost-provisioner |
+| blockhost.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, signup generator |
+| https.json | JSON | root:blockhost | 0644 | https | blockhost-signup |
+| pve-token | text | root:blockhost | 0640 | token | blockhost-provisioner (Terraform) |
+| terraform_ssh_key | PEM | root:blockhost | 0640 | token | Terraform SSH provisioner |
+| terraform_ssh_key.pub | PEM | root:blockhost | 0644 | token | VM authorized_keys |
+| admin-signature.key | hex | root:blockhost | 0640 | config | admin command verification |
+| admin-commands.json | JSON | root:blockhost | 0644 | config | blockhost-engine src/admin/ |
+| broker-allocation.json | JSON | root:blockhost | 0644 | ipv6 | blockhost-broker-client |
+| addressbook.json | JSON | root:blockhost | 0640 | finalize/root-agent | blockhost-engine fund-manager, bw, ab CLIs |
+| revenue-share.json | JSON | root:blockhost | 0644 | finalize | blockhost-engine fund-manager |
+| hot.key | hex 64 chars | root:blockhost | 0640 | root-agent (auto) | blockhost-engine fund-manager (hot wallet signing) |
 
 ### db.yaml structure
 ```yaml
@@ -319,6 +333,34 @@ public_secret: 'blockhost-access'
 admin: {wallet_address: '0x...', max_command_age: 300, destination_mode: 'self'}
 ```
 
+### addressbook.json structure
+```json
+{
+  "admin":  { "address": "0x1234...abcd" },
+  "server": { "address": "0x5678...ef01", "keyfile": "/etc/blockhost/deployer.key" },
+  "dev":    { "address": "0xe35B5D114eFEA216E6BB5Ff15C261d25dB9E2cb9" },
+  "broker": { "address": "0x6A5973DDe7E57686122Eb12DA85389c53fe2EE4b" }
+}
+```
+Maps role names to wallet objects. Each entry has `address` (required) and optionally `keyfile` (path to private key, only for wallets whose keys live on this machine). Always written during finalization. The engine's fundManager auto-generates a `hot` entry on first launch.
+- `admin`: always present — the operator's wallet, connected via MetaMask during the wizard wallet step
+- `server`: always present — the deployer wallet address (derived from deployer key), with `keyfile`
+- `dev`: only present when operator opted in to dev revenue sharing
+- `broker`: only present when operator opted in to broker revenue sharing AND a broker allocation exists; address read from `broker_wallet` in `broker-allocation.json` (recorded by broker-client from the broker's `submitResponse` transaction sender)
+
+### revenue-share.json structure
+```json
+{
+  "enabled": true,
+  "total_percent": 1.0,
+  "recipients": [
+    {"role": "dev", "percent": 0.5},
+    {"role": "broker", "percent": 0.5}
+  ]
+}
+```
+Revenue sharing config. References roles by name (wallets in addressbook.json). Percent split equally among selected recipients.
+
 ## STATE FILES (runtime)
 
 Directory: `/var/lib/blockhost/`
@@ -331,6 +373,7 @@ Directory: `/var/lib/blockhost/`
 | terraform/ | dir | Terraform state, provider config, .tfvars, per-VM .tf.json |
 | template-packages/ | dir | libpam-web3_*.deb for VM template builds |
 | validation-output.txt | text | Validation report (testing mode only) |
+| fund-manager-state.json | JSON | Fund manager last-run timestamps (auto-created by engine) |
 
 OTP state: `/run/blockhost/otp.json` (tmpfs, cleared on reboot)
 
@@ -441,6 +484,9 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 | `src/handlers/` | TypeScript | Event handlers (calls vm-generator.py, vm-gc.py) |
 | `src/admin/` | TypeScript | On-chain admin commands (ECIES-encrypted, anti-replay nonce) |
 | `src/reconcile/` | TypeScript | Periodic NFT state reconciliation (health check) |
+| `src/fund-manager/` | TypeScript | Automated fund withdrawal, revenue sharing, gas management |
+| `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`) |
+| `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`) |
 | `scripts/generate-signup-page.py` | Python | Generates signup.html from template |
 | `scripts/init-server.sh` | Bash | Generate server keys + config |
 
@@ -473,11 +519,18 @@ Events (monitored by blockhost-monitor):
 - ID 1 (primary stablecoin): Direct USD, no conversion. `amount = priceUsdCents * days * 10^decimals / 100`
 - ID 2+ (other tokens): Uniswap V2 constant product pricing with 1% slippage buffer, $10k minimum liquidity
 
+**Fund manager** (integrated into monitor polling loop):
+- Runs fund cycle (every 24h default): withdraw contract funds → hot wallet gas top-up → server stablecoin buffer → revenue shares → remainder to admin
+- Runs gas check (every 30min default): top up hot wallet ETH, swap USDC→ETH if server low
+- Hot wallet auto-generated on first fund cycle, key saved to `/etc/blockhost/hot.key` (0600), added to addressbook.json as `hot` entry
+- Config: `fund_manager:` key in `blockhost.yaml` (all settings have defaults, section optional)
+- Reads: `addressbook.json`, `revenue-share.json`
+
 **Services**:
-- `blockhost-monitor.service` — Event watcher (TypeScript: `npm run monitor`)
+- `blockhost-monitor.service` — Event watcher + fund manager (TypeScript: `npm run monitor`)
 - Maintenance scheduler — suspend/destroy lifecycle for expired subscriptions
 
-**Config reads**: `/etc/blockhost/web3-defaults.yaml`, `/etc/blockhost/blockhost.yaml`, `/etc/blockhost/admin-commands.json`
+**Config reads**: `/etc/blockhost/web3-defaults.yaml`, `/etc/blockhost/blockhost.yaml`, `/etc/blockhost/admin-commands.json`, `/etc/blockhost/addressbook.json`, `/etc/blockhost/revenue-share.json`
 
 ### blockhost-broker
 
@@ -641,6 +694,77 @@ Internet
           └─ VMs get /128 from ipv6_pool range (host routes added per VM)
 ```
 
+## PRIVILEGE SEPARATION
+
+### User Model
+
+| User | UID type | Purpose |
+|------|----------|---------|
+| root | system | Runs root-agent daemon only |
+| blockhost | system (nologin) | Runs all other runtime services |
+
+Created by first-boot Step 2b1. Group `blockhost` grants read access to config files in `/etc/blockhost/`.
+
+### Root Agent Daemon
+
+`blockhost-root-agent.service` — Python asyncio daemon running as root.
+
+- Socket: `/run/blockhost/root-agent.sock` (root:blockhost 0660, auto-created via `RuntimeDirectory=blockhost`)
+- Protocol: 4-byte big-endian length prefix + JSON payload (both directions)
+- Response: `{"ok": true, ...}` or `{"ok": false, "error": "reason"}`
+- Install path: `/usr/share/blockhost/root-agent/blockhost_root_agent.py`
+
+### Root Agent Action Catalog
+
+| Action | Params | Caller |
+|--------|--------|--------|
+| `qm-start` | vmid:int | provisioner (vm-resume), engine (cancellation) |
+| `qm-stop` | vmid:int | provisioner (vm-gc) |
+| `qm-shutdown` | vmid:int | provisioner (vm-gc) |
+| `qm-destroy` | vmid:int | provisioner (vm-gc) |
+| `qm-create` | vmid:int, name:str, args:list | provisioner (vm-generator) |
+| `qm-importdisk` | vmid:int, disk_path:str, storage:str | provisioner |
+| `qm-set` | vmid:int, options:dict | provisioner |
+| `qm-template` | vmid:int | provisioner |
+| `ip6-route-add` | address:str(/128), dev:str | provisioner (vm-generator) |
+| `ip6-route-del` | address:str(/128), dev:str | provisioner (vm-gc) |
+| `iptables-open` | port:int, proto:str, comment:str | engine (admin knock) |
+| `iptables-close` | port:int, proto:str, comment:str | engine (admin knock) |
+| `virt-customize` | image_path:str, commands:list | installer (template build) |
+| `generate-wallet` | name:str | engine (fund-manager, ab CLI) |
+| `addressbook-save` | entries:dict | engine (fund-manager, ab CLI) |
+
+### What Runs Without Root
+
+| Operation | Why unprivileged | Service |
+|-----------|-----------------|---------|
+| `terraform init/apply/destroy` | HTTP API auth, working dir owned by blockhost | provisioner |
+| `cast call/send` | HTTP RPC, reads deployer key via group perm (0640) | provisioner |
+| `pam_web3_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
+| `pgrep` | No privilege needed | engine (reconcile) |
+| python3 db scripts | Writes to blockhost-owned `/var/lib/blockhost/` | engine |
+
+### File Ownership Summary
+
+| Path | Owner:Group | Mode |
+|------|-------------|------|
+| `/etc/blockhost/` | root:blockhost | 750 |
+| `/etc/blockhost/*.key` | root:blockhost | 640 |
+| `/etc/blockhost/*.yaml` | root:blockhost | 640 |
+| `/var/lib/blockhost/` | blockhost:blockhost | 750 |
+| `/var/lib/blockhost/terraform/` | blockhost:blockhost | 750 |
+| `/run/blockhost/root-agent.sock` | root:blockhost | 660 |
+| `/opt/blockhost/.env` | root:blockhost | 640 |
+
+### Runtime Services
+
+| Service | User | Depends on root-agent |
+|---------|------|-----------------------|
+| blockhost-root-agent | root | — |
+| blockhost-monitor | blockhost | Yes (iptables, wallet, addressbook) |
+| blockhost-gc | blockhost | Yes (qm, ip6-route) |
+| blockhost-signup | blockhost | No |
+
 ## ENCRYPTION MODEL
 
 Three distinct encryption contexts:
@@ -659,7 +783,7 @@ Three distinct encryption contexts:
 ### Summary template (summary.html) receives:
 ```python
 summary.network.{ip, gateway}
-summary.blockchain.{chain_id, network_name, rpc_url, deployer_address, deploy_contracts, nft_contract, subscription_contract, plan_name, plan_price_cents}
+summary.blockchain.{chain_id, network_name, rpc_url, deployer_address, deploy_contracts, nft_contract, subscription_contract, plan_name, plan_price_cents, revenue_share_enabled, revenue_share_percent, revenue_share_dev, revenue_share_broker}
 summary.proxmox.{node, storage, bridge, vmid_start, vmid_end, ip_start, ip_end, gc_grace_days}
 summary.ipv6.{mode, prefix, broker_node, broker_registry}
 summary.admin.{wallet, enabled, destination_mode, command_count}

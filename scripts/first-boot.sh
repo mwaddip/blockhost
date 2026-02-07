@@ -192,6 +192,74 @@ else
 fi
 
 #
+# Step 2b1: Create blockhost system user
+#
+STEP_USER="${STATE_DIR}/.step-user"
+if [ ! -f "$STEP_USER" ]; then
+    log "Step 2b1: Creating blockhost system user..."
+
+    # Create group first if it doesn't exist
+    if ! getent group blockhost >/dev/null 2>&1; then
+        groupadd --system blockhost
+    fi
+
+    # Create user
+    if ! id -u blockhost >/dev/null 2>&1; then
+        useradd --system --gid blockhost \
+            --home-dir /var/lib/blockhost \
+            --shell /usr/sbin/nologin \
+            --no-create-home blockhost
+    fi
+
+    # Set ownership on state directory
+    chown blockhost:blockhost /var/lib/blockhost
+    chmod 750 /var/lib/blockhost
+    [ -d /var/lib/blockhost/terraform ] && chown -R blockhost:blockhost /var/lib/blockhost/terraform
+
+    # Set config directory group ownership
+    mkdir -p /etc/blockhost
+    chown root:blockhost /etc/blockhost
+    chmod 750 /etc/blockhost
+
+    touch "$STEP_USER"
+    log "Step 2b1 complete - blockhost user created!"
+else
+    log "Step 2b1: blockhost user already created, skipping."
+fi
+
+#
+# Step 2b2: Install root agent
+#
+STEP_ROOT_AGENT="${STATE_DIR}/.step-root-agent"
+if [ ! -f "$STEP_ROOT_AGENT" ]; then
+    log "Step 2b2: Installing root agent..."
+
+    mkdir -p /usr/share/blockhost/root-agent
+    cp "$BLOCKHOST_DIR/root-agent/blockhost_root_agent.py" /usr/share/blockhost/root-agent/
+    cp "$BLOCKHOST_DIR/root-agent/blockhost-root-agent.service" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable blockhost-root-agent
+    systemctl start blockhost-root-agent
+
+    # Wait for socket to appear
+    for i in $(seq 1 10); do
+        [ -S /run/blockhost/root-agent.sock ] && break
+        sleep 1
+    done
+
+    if [ -S /run/blockhost/root-agent.sock ]; then
+        log "Root agent socket ready"
+    else
+        log "WARNING: Root agent socket not ready after 10s"
+    fi
+
+    touch "$STEP_ROOT_AGENT"
+    log "Step 2b2 complete - Root agent installed!"
+else
+    log "Step 2b2: Root agent already installed, skipping."
+fi
+
+#
 # Step 2c: Install Foundry (for contract deployment)
 #
 STEP_FOUNDRY="${STATE_DIR}/.step-foundry"

@@ -12,6 +12,7 @@ Provides web-based installation wizard with:
 - Package configuration
 """
 
+import grp
 import os
 import ssl
 import json
@@ -422,6 +423,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'subscription_contract': request.form.get('subscription_contract'),
                 'plan_name': request.form.get('plan_name', 'Basic VM'),
                 'plan_price_cents': int(request.form.get('plan_price_cents', 50)),
+                'revenue_share_enabled': request.form.get('revenue_share_enabled') == 'on',
+                'revenue_share_percent': float(request.form.get('revenue_share_percent', 1)),
+                'revenue_share_dev': request.form.get('revenue_share_dev') == 'on',
+                'revenue_share_broker': request.form.get('revenue_share_broker') == 'on',
             }
             return redirect(url_for('wizard_proxmox'))
 
@@ -552,6 +557,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'subscription_contract': blockchain.get('subscription_contract'),
                 'plan_name': blockchain.get('plan_name', 'Basic VM'),
                 'plan_price_cents': blockchain.get('plan_price_cents', 50),
+                'revenue_share_enabled': blockchain.get('revenue_share_enabled', False),
+                'revenue_share_percent': blockchain.get('revenue_share_percent', 1),
+                'revenue_share_dev': blockchain.get('revenue_share_dev', False),
+                'revenue_share_broker': blockchain.get('revenue_share_broker', False),
             },
             'proxmox': {
                 'node': proxmox.get('node'),
@@ -1036,6 +1045,13 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
 
 # Helper functions
+
+def _set_blockhost_ownership(path, mode=0o640):
+    """Set file to root:blockhost with given mode."""
+    os.chmod(str(path), mode)
+    gid = grp.getgrnam('blockhost').gr_gid
+    os.chown(str(path), 0, gid)
+
 
 def _detect_disks() -> list[dict]:
     """Detect available disks."""
@@ -1591,7 +1607,7 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
         # Write private key without 0x prefix (pam_web3_tool expects raw hex)
         private_key_raw = private_key[2:] if private_key.startswith('0x') else private_key
         key_file.write_text(private_key_raw)
-        key_file.chmod(0o600)
+        _set_blockhost_ownership(key_file, 0o640)
 
         # Write public key separately (for signup page ECIES encryption)
         pubkey_file = config_dir / 'server.pubkey'
@@ -1620,7 +1636,7 @@ def _finalize_wallet(config: dict) -> tuple[bool, Optional[str]]:
         key_file.parent.mkdir(parents=True, exist_ok=True)
 
         key_file.write_text(deployer_key)
-        key_file.chmod(0o600)
+        _set_blockhost_ownership(key_file, 0o640)
 
         return True, None
     except Exception as e:
@@ -1925,7 +1941,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         if admin_signature:
             sig_file = config_dir / 'admin-signature.key'
             sig_file.write_text(admin_signature)
-            sig_file.chmod(0o600)
+            _set_blockhost_ownership(sig_file, 0o640)
 
         # Write .env file for blockhost-monitor service
         env_file = Path('/opt/blockhost/.env')
@@ -1942,6 +1958,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             f"DEPLOYER_KEY_FILE=/etc/blockhost/deployer.key",
         ]
         env_file.write_text('\n'.join(env_lines) + '\n')
+        _set_blockhost_ownership(env_file, 0o640)
 
         return True, None
     except Exception as e:
@@ -2018,7 +2035,7 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
                 return False, f'SSH keygen failed: {result.stderr}'
 
             # Set correct permissions
-            ssh_key_file.chmod(0o600)
+            _set_blockhost_ownership(ssh_key_file, 0o640)
             ssh_pub_file.chmod(0o644)
 
         # Add public key to root's authorized_keys
@@ -2607,7 +2624,7 @@ def _generate_self_signed_cert(hostname: str, ssl_dir: Path):
         '-subj', f'/CN={hostname}',
     ], capture_output=True, timeout=60)
 
-    key_path.chmod(0o600)
+    _set_blockhost_ownership(key_path, 0o640)
 
 
 def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
@@ -2677,6 +2694,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=blockhost
+Group=blockhost
 ExecStart=/usr/local/bin/blockhost-signup-server
 Restart=on-failure
 RestartSec=10
@@ -2693,6 +2712,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=blockhost
+Group=blockhost
 ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/www/blockhost
 Restart=on-failure
 RestartSec=10
@@ -2860,6 +2881,95 @@ def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
 
 
 
+def _write_revenue_share_config(config: dict):
+    """Write addressbook.json and revenue-share.json based on wizard settings."""
+    config_dir = Path('/etc/blockhost')
+    config_dir.mkdir(parents=True, exist_ok=True)
+    blockchain = config.get('blockchain', {})
+    share_dev = blockchain.get('revenue_share_dev', False) and blockchain.get('revenue_share_enabled', False)
+    share_broker = blockchain.get('revenue_share_broker', False) and blockchain.get('revenue_share_enabled', False)
+
+    # Build addressbook — always written, used beyond just revenue sharing
+    # Each entry is {address, keyfile?}. No "hot" entry — engine auto-generates it.
+    addressbook = {}
+
+    admin_wallet = config.get('admin_wallet', '')
+    if admin_wallet:
+        addressbook['admin'] = {'address': admin_wallet}
+
+    deployer_key = blockchain.get('deployer_key', '')
+    if deployer_key:
+        deployer_addr = _get_address_from_key(deployer_key)
+        if deployer_addr:
+            addressbook['server'] = {
+                'address': deployer_addr,
+                'keyfile': '/etc/blockhost/deployer.key',
+            }
+
+    # dev and broker only included when their revenue sharing role is enabled
+    if share_dev:
+        addressbook['dev'] = {'address': '0xe35B5D114eFEA216E6BB5Ff15C261d25dB9E2cb9'}
+
+    broker_wallet = None
+    if share_broker:
+        broker_wallet = _resolve_broker_wallet(config)
+        if broker_wallet:
+            addressbook['broker'] = {'address': broker_wallet}
+        else:
+            print("Warning: Could not resolve broker wallet, skipping broker from revenue share")
+
+    (config_dir / 'addressbook.json').write_text(json.dumps(addressbook, indent=2))
+    _set_blockhost_ownership(config_dir / 'addressbook.json', 0o640)
+
+    # Revenue share config
+    if not blockchain.get('revenue_share_enabled'):
+        (config_dir / 'revenue-share.json').write_text(json.dumps({
+            'enabled': False,
+            'total_percent': 0,
+            'recipients': [],
+        }, indent=2))
+        os.chmod(config_dir / 'revenue-share.json', 0o644)
+        return
+
+    total_percent = blockchain.get('revenue_share_percent', 1)
+
+    recipients = []
+    if share_dev:
+        recipients.append('dev')
+    if share_broker and broker_wallet:
+        recipients.append('broker')
+
+    per_recipient = round(total_percent / len(recipients), 4) if recipients else 0
+    (config_dir / 'revenue-share.json').write_text(json.dumps({
+        'enabled': True,
+        'total_percent': total_percent,
+        'recipients': [{'role': r, 'percent': per_recipient} for r in recipients],
+    }, indent=2))
+    os.chmod(config_dir / 'revenue-share.json', 0o644)
+
+
+def _resolve_broker_wallet(config: dict) -> Optional[str]:
+    """Read the broker's wallet address from broker-allocation.json.
+
+    The broker-client records the msg.sender of the broker's submitResponse
+    transaction as broker_wallet when saving the allocation config.
+    """
+    try:
+        alloc_file = Path('/etc/blockhost/broker-allocation.json')
+        if not alloc_file.exists():
+            return None
+
+        alloc = json.loads(alloc_file.read_text())
+        wallet = alloc.get('broker_wallet', '')
+        if wallet and wallet.startswith('0x') and len(wallet) == 42:
+            return wallet
+
+        return None
+    except Exception as e:
+        print(f"Warning: Failed to read broker wallet: {e}")
+        return None
+
+
 def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
     """Finalize setup: enable services, create default plan, mark complete.
 
@@ -2892,6 +3002,29 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
             except Exception as e:
                 # Non-fatal - admin can create plan manually
                 print(f"Warning: Failed to create default plan: {e}")
+
+        # Write revenue sharing config (addressbook + revenue-share)
+        try:
+            _write_revenue_share_config(config)
+        except Exception as e:
+            # Non-fatal
+            print(f"Warning: Failed to write revenue share config: {e}")
+
+        # Ensure state dir is owned by blockhost user
+        subprocess.run(
+            ['chown', '-R', 'blockhost:blockhost', '/var/lib/blockhost'],
+            capture_output=True, timeout=30
+        )
+
+        # Ensure config dir has correct group ownership
+        subprocess.run(
+            ['chown', '-R', 'root:blockhost', '/etc/blockhost'],
+            capture_output=True, timeout=30
+        )
+        subprocess.run(
+            ['chmod', '750', '/etc/blockhost'],
+            capture_output=True, timeout=30
+        )
 
         # Write setup complete marker
         (marker_dir / '.setup-complete').touch()

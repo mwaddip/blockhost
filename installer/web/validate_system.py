@@ -423,7 +423,7 @@ def run_full_validation() -> ValidationReport:
     # /etc/blockhost/ directory
     etc_blockhost = Path('/etc/blockhost')
 
-    # Private keys (must be 0600)
+    # Private keys (must be 0640, root:blockhost group-readable)
     private_keys = [
         (etc_blockhost / 'server.key', 'Server private key'),
         (etc_blockhost / 'deployer.key', 'Deployer private key'),
@@ -434,7 +434,7 @@ def run_full_validation() -> ValidationReport:
     for path, name in private_keys:
         report.add(_check_file_exists(path, "Files", name))
         if path.exists():
-            report.add(_check_file_permissions(path, 0o600, "Permissions", name))
+            report.add(_check_file_permissions(path, 0o640, "Permissions", name))
 
     # Public keys (should be readable)
     public_keys = [
@@ -488,6 +488,59 @@ def run_full_validation() -> ValidationReport:
         required_keys=['hostname', 'cert_file', 'key_file']
     ))
 
+    # addressbook.json (always written — admin and server at minimum)
+    addressbook_file = etc_blockhost / 'addressbook.json'
+    report.add(_check_json_syntax(addressbook_file, "Config", "addressbook.json",
+                                  required_keys=['admin', 'server']))
+    if addressbook_file.exists():
+        report.add(_check_file_permissions(addressbook_file, 0o640, "Permissions", "addressbook.json"))
+        try:
+            ab_data = json.loads(addressbook_file.read_text())
+            # Validate that admin and server have address fields
+            for role in ('admin', 'server'):
+                entry = ab_data.get(role, {})
+                addr = entry.get('address', '') if isinstance(entry, dict) else ''
+                report.add(_check_eth_address(addr, "Config", f"addressbook.json {role} address"))
+            # server should have keyfile
+            server_entry = ab_data.get('server', {})
+            if isinstance(server_entry, dict) and server_entry.get('keyfile'):
+                report.add(ValidationResult("Config", "addressbook.json server keyfile", True,
+                                            f"keyfile: {server_entry['keyfile']}"))
+            else:
+                report.add(ValidationResult("Config", "addressbook.json server keyfile", False,
+                                            "server entry missing keyfile"))
+            # Validate dev/broker addresses if present
+            for role in ('dev', 'broker'):
+                entry = ab_data.get(role)
+                if entry and isinstance(entry, dict):
+                    report.add(_check_eth_address(entry.get('address', ''), "Config",
+                                                  f"addressbook.json {role} address"))
+        except (json.JSONDecodeError, IOError):
+            pass  # Already caught by _check_json_syntax above
+
+    # revenue-share.json (always written)
+    revshare_file = etc_blockhost / 'revenue-share.json'
+    report.add(_check_json_syntax(revshare_file, "Config", "revenue-share.json",
+                                  required_keys=['enabled', 'total_percent', 'recipients']))
+    if revshare_file.exists():
+        report.add(_check_file_permissions(revshare_file, 0o644, "Permissions", "revenue-share.json"))
+        try:
+            rs_data = json.loads(revshare_file.read_text())
+            if rs_data.get('enabled'):
+                # When enabled, recipients must reference roles that exist in addressbook
+                if addressbook_file.exists():
+                    ab_roles = set(json.loads(addressbook_file.read_text()).keys())
+                    for recipient in rs_data.get('recipients', []):
+                        role = recipient.get('role', '')
+                        if role in ab_roles:
+                            report.add(ValidationResult("Config", f"revenue-share recipient '{role}'", True,
+                                                        f"Role exists in addressbook"))
+                        else:
+                            report.add(ValidationResult("Config", f"revenue-share recipient '{role}'", False,
+                                                        f"Role '{role}' not found in addressbook.json"))
+        except (json.JSONDecodeError, IOError):
+            pass
+
     # setup-state.json
     state_file = Path('/var/lib/blockhost/setup-state.json')
     report.add(_check_json_syntax(state_file, "Config", "setup-state.json", required_keys=['status']))
@@ -536,7 +589,7 @@ def run_full_validation() -> ValidationReport:
     admin_sig = etc_blockhost / 'admin-signature.key'
     report.add(_check_file_exists(admin_sig, "Admin", "Admin signature key"))
     if admin_sig.exists():
-        report.add(_check_file_permissions(admin_sig, 0o600, "Permissions", "Admin signature key"))
+        report.add(_check_file_permissions(admin_sig, 0o640, "Permissions", "Admin signature key"))
 
     # Validate admin wallet address from blockhost.yaml
     blockhost_yaml_admin = etc_blockhost / 'blockhost.yaml'
@@ -660,6 +713,60 @@ def run_full_validation() -> ValidationReport:
         Path('/opt/blockhost/.env'),
         required_vars=['NFT_CONTRACT', 'DEPLOYER_KEY_FILE']
     ))
+
+    # ========== PRIVILEGE SEPARATION ==========
+
+    # blockhost user exists
+    try:
+        result = subprocess.run(
+            ['id', '-u', 'blockhost'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            report.add(ValidationResult("Privilege Separation", "blockhost user", True, "User exists"))
+        else:
+            report.add(ValidationResult("Privilege Separation", "blockhost user", False, "blockhost system user not found"))
+    except Exception as e:
+        report.add(ValidationResult("Privilege Separation", "blockhost user", False, f"Error checking user: {e}"))
+
+    # Root agent socket
+    sock_path = Path('/run/blockhost/root-agent.sock')
+    if sock_path.exists():
+        report.add(ValidationResult("Privilege Separation", "Root agent socket", True, "Socket exists"))
+        # Check socket permissions (660 root:blockhost)
+        sock_stat = sock_path.stat()
+        sock_mode = stat.S_IMODE(sock_stat.st_mode)
+        if sock_mode == 0o660:
+            report.add(ValidationResult("Privilege Separation", "Root agent socket permissions", True, "0660"))
+        else:
+            report.add(ValidationResult("Privilege Separation", "Root agent socket permissions", False,
+                                        f"Expected 0660, got {oct(sock_mode)}"))
+    else:
+        report.add(ValidationResult("Privilege Separation", "Root agent socket", False,
+                                    "Socket not found: /run/blockhost/root-agent.sock"))
+
+    # Root agent service
+    report.add(_check_service_state('blockhost-root-agent', expected_enabled=True, expected_active=True,
+                                    category="Privilege Separation"))
+
+    # /var/lib/blockhost ownership
+    state_dir = Path('/var/lib/blockhost')
+    if state_dir.exists():
+        try:
+            import pwd
+            dir_stat = state_dir.stat()
+            owner = pwd.getpwuid(dir_stat.st_uid).pw_name
+            if owner == 'blockhost':
+                report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost owner", True,
+                                            "Owned by blockhost"))
+            else:
+                report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost owner", False,
+                                            f"Owned by {owner}, expected blockhost"))
+        except Exception as e:
+            report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost owner", False, f"Error: {e}"))
+    else:
+        report.add(ValidationResult("Privilege Separation", "/var/lib/blockhost owner", False,
+                                    "Directory does not exist"))
 
     # ========== SERVICES ==========
 
