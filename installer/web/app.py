@@ -853,6 +853,105 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'error': 'Job not found'}), 404
         return jsonify(job)
 
+    # CI/CD test setup endpoint (testing mode only)
+    @app.route('/api/setup-test', methods=['POST'])
+    def api_setup_test():
+        """
+        One-shot endpoint: authenticate via OTP, populate session, trigger
+        finalization. Only available when the ISO was built with --testing.
+        Returns 404 on production systems.
+        """
+        testing_marker = Path('/etc/blockhost/.testing-mode')
+        if not testing_marker.exists():
+            abort(404)
+
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body required'}), 400
+
+        # Verify OTP
+        otp_code = data.get('otp', '').strip()
+        if not otp_code:
+            return jsonify({'error': 'otp field required'}), 400
+
+        success, message = otp_manager.verify(otp_code)
+        if not success:
+            return jsonify({'error': f'OTP verification failed: {message}'}), 403
+
+        # Populate session — mirrors the wizard steps
+        session['authenticated'] = True
+        session.permanent = True
+        session['admin_wallet'] = data.get('admin_wallet', '')
+        session['admin_signature'] = data.get('admin_signature', '')
+        session['admin_public_secret'] = data.get('admin_public_secret', 'blockhost-access')
+
+        # Blockchain config
+        session['blockchain'] = data.get('blockchain', {})
+
+        # Proxmox — auto-detect, then merge any explicit overrides
+        detected = _detect_proxmox_resources()
+        proxmox_defaults = {
+            'api_url': detected.get('api_url', 'https://127.0.0.1:8006'),
+            'node': detected.get('node_name', socket.gethostname()),
+            'storage': detected['storages'][0]['name'] if detected.get('storages') else 'local-lvm',
+            'bridge': detected['bridges'][0] if detected.get('bridges') else 'vmbr0',
+            'user': 'root@pam',
+            'template_vmid': 9001,
+            'vmid_start': 100,
+            'vmid_end': 999,
+            'ip_network': '192.168.122.0/24',
+            'ip_start': '200',
+            'ip_end': '250',
+            'gateway': '192.168.122.1',
+            'gc_grace_days': 7,
+        }
+        proxmox_overrides = data.get('proxmox', {})
+        # Remove the auto_detect flag — it's a signal, not config
+        proxmox_overrides.pop('auto_detect', None)
+        proxmox_defaults.update(proxmox_overrides)
+        session['proxmox'] = proxmox_defaults
+
+        # IPv6 config
+        session['ipv6'] = data.get('ipv6', {})
+
+        # Admin commands config
+        session['admin_commands'] = data.get('admin_commands', {'enabled': False})
+
+        # Build config dict identical to what /api/finalize uses
+        config = {
+            'blockchain': session.get('blockchain', {}),
+            'proxmox': session.get('proxmox', {}),
+            'ipv6': session.get('ipv6', {}),
+            'admin_wallet': session.get('admin_wallet', ''),
+            'admin_signature': session.get('admin_signature', ''),
+            'admin_public_secret': session.get('admin_public_secret', ''),
+            'admin_commands': session.get('admin_commands', {}),
+        }
+
+        # Start finalization (same as /api/finalize)
+        setup_state = SetupState()
+
+        if setup_state.state['status'] == 'completed':
+            return jsonify({
+                'status': 'completed',
+                'message': 'Setup already complete',
+                'poll_url': '/api/finalize/status',
+            })
+
+        setup_state.start(config)
+
+        thread = threading.Thread(
+            target=_run_finalization_with_state,
+            args=(setup_state, config)
+        )
+        thread.start()
+
+        return jsonify({
+            'status': 'running',
+            'message': 'Test setup started — finalization running',
+            'poll_url': '/api/finalize/status',
+        })
+
     # Finalization API endpoints
     @app.route('/api/finalize', methods=['POST'])
     @require_auth
@@ -1673,7 +1772,7 @@ def _finalize_contracts(config: dict) -> tuple[bool, Optional[str]]:
             if not deployer_key.startswith('0x'):
                 deployer_key = '0x' + deployer_key
 
-            contracts_dir = Path('/opt/blockhost/contracts')
+            contracts_dir = Path('/usr/share/blockhost/contracts')
 
             # Deploy NFT contract (AccessCredentialNFT)
             # Constructor: (string name, string symbol, string defaultImageUri)
@@ -1848,6 +1947,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'gc_grace_days': proxmox.get('gc_grace_days', 7),
         }
         _write_yaml(config_dir / 'db.yaml', db_config)
+        _set_blockhost_ownership(config_dir / 'db.yaml', 0o640)
 
         # USDC addresses by chain
         usdc_addresses = {
@@ -1883,6 +1983,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             },
         }
         _write_yaml(config_dir / 'web3-defaults.yaml', web3_config)
+        _set_blockhost_ownership(config_dir / 'web3-defaults.yaml', 0o640)
 
         # Write blockhost.yaml (includes fields needed by generate-signup-page.py)
         blockhost_config = {
@@ -1916,6 +2017,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             blockhost_config['admin'] = admin_section
 
         _write_yaml(config_dir / 'blockhost.yaml', blockhost_config)
+        _set_blockhost_ownership(config_dir / 'blockhost.yaml', 0o640)
 
         # Write admin-commands.json if admin commands are enabled
         if admin_commands.get('enabled') and admin_commands.get('knock_command'):
@@ -2000,6 +2102,11 @@ def _finalize_token(config: dict) -> tuple[bool, Optional[str]]:
                     'proxmox_bridge': proxmox.get('bridge'),
                 }
                 _write_tfvars(terraform_dir / 'terraform.tfvars', tfvars)
+
+                # Save token to /etc/blockhost/pve-token
+                token_file = Path('/etc/blockhost/pve-token')
+                token_file.write_text(f"{token_id}={token_value}")
+                _set_blockhost_ownership(token_file, 0o640)
 
                 return True, None
 
@@ -2390,7 +2497,8 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
             prefix = ''
 
             if allocation_file.exists():
-                # broker-client wrote it — read prefix from there
+                # broker-client wrote it — fix permissions and read prefix
+                _set_blockhost_ownership(allocation_file, 0o640)
                 try:
                     alloc_data = json.loads(allocation_file.read_text())
                     prefix = alloc_data.get('prefix', alloc_data.get('ipv6_prefix', ''))
@@ -2461,6 +2569,7 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 'registry': '',
                 'mode': 'manual',
             }, indent=2))
+            _set_blockhost_ownership(allocation_file, 0o640)
             config['ipv6']['prefix'] = ipv6.get('prefix', '')
 
         # Step 4: Add gateway address to vmbr0 for VM connectivity
@@ -3029,9 +3138,14 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
         # Write setup complete marker
         (marker_dir / '.setup-complete').touch()
 
-        # Disable first-boot service
+        # Disable and stop first-boot service
         subprocess.run(
-            ['systemctl', 'disable', 'blockhost-first-boot'],
+            ['systemctl', 'disable', 'blockhost-firstboot'],
+            capture_output=True,
+            timeout=30
+        )
+        subprocess.run(
+            ['systemctl', 'stop', 'blockhost-firstboot'],
             capture_output=True,
             timeout=30
         )

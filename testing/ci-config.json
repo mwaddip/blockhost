@@ -1,0 +1,20 @@
+{
+  "admin_public_secret": "blockhost-access",
+  "blockchain": {
+    "chain_id": "11155111",
+    "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
+    "contract_mode": "existing",
+    "plan_name": "Basic VM",
+    "plan_price_cents": 50
+  },
+  "proxmox": {
+    "auto_detect": true
+  },
+  "ipv6": {
+    "mode": "broker",
+    "broker_registry": "0x0E5b567E7d5C5c36D8fD70DE8129c35B473d0Aaf"
+  },
+  "admin_commands": {
+    "enabled": false
+  }
+}

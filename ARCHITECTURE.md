@@ -18,7 +18,8 @@ blockhost/
 │   ├── build-iso.sh                   # ISO builder (419 lines)
 │   ├── build-packages.sh             # Build all submodule .debs (213 lines)
 │   ├── first-boot.sh                 # Post-install orchestrator (430 lines)
-│   └── check-build-deps.sh           # Verify build toolchain
+│   ├── check-build-deps.sh           # Verify build toolchain
+│   └── ci-verify-packages.sh         # CI: verify all 6 .debs exist
 ├── installer/
 │   ├── __init__.py
 │   ├── common/
@@ -28,7 +29,7 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + finalization (3142 lines)
+│       ├── app.py                    # Flask wizard + finalization (3389 lines)
 │       ├── validate_system.py        # Post-install validation (778 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
@@ -44,10 +45,14 @@ blockhost/
 │               ├── ipv6.html
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
-├── root-agent/
-│   ├── blockhost_root_agent.py       # Root agent daemon (~350 lines)
-│   ├── blockhost-root-agent.service  # systemd unit for root agent
-│   └── client.py                     # Sync Python client for installer
+├── testing/
+│   ├── integration-test.sh            # E2E subscription + provisioning test
+│   ├── ipv6-login-test.sh             # IPv6 PAM web3 SSH login test
+│   └── ci-provision.sh                # CI: VM lifecycle (create, boot, wizard, finalize)
+├── .github/workflows/
+│   ├── ci.yml                         # Push/PR: tests + package build
+│   ├── iso-build.yml                  # Manual/tag: ISO build (self-hosted)
+│   └── integration.yml                # Manual: full integration test (self-hosted)
 ├── packages/
 │   ├── host/                         # .debs installed on Proxmox host
 │   └── template/                     # .debs included in VM templates
@@ -108,8 +113,8 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
   Step 1 (.step-hostname):  Fix /etc/hosts for Proxmox (IP → hostname)
   Step 2 (.step-proxmox):   Install proxmox-ve, postfix, chrony
   Step 2b (.step-packages):  Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
-  Step 2b1 (.step-user):     Create blockhost system user/group, chown /var/lib/blockhost, /etc/blockhost
-  Step 2b2 (.step-root-agent): Install root agent daemon, enable + start service, wait for socket
+  Step 2b1: Verify blockhost user exists (created by blockhost-common .deb)
+  Step 2b2: Verify root agent running (installed + enabled by blockhost-common .deb), wait for socket
   Step 2c (.step-foundry):   Install Foundry (cast, forge, anvil) → /usr/local/bin/
   Step 2d (.step-terraform): Install Terraform + libguestfs (virt-customize, virt-sysprep)
   Step 3 (.step-network):   Verify network connectivity (DHCP fallback)
@@ -147,22 +152,22 @@ POST /api/finalize → _run_finalization_with_state() in thread
   Retry: POST /api/finalize/retry {step_id?}
   Reset: POST /api/finalize/reset
 
-Step dispatch (app.py:1486-1500):
+Step dispatch (app.py:1600-1616):
   #   step_id     function                    line
-  1   keypair     _finalize_keypair           1581   → server.key, server.pubkey
-  2   wallet      _finalize_wallet            1610   → deployer.key
-  3   contracts   _finalize_contracts         1630   → deploy via cast or verify existing
-  4   config      _finalize_config            1791   → db.yaml, web3-defaults.yaml, blockhost.yaml
-  5   token       _finalize_token             1951   → Proxmox API token via pveum
-  6   terraform   _finalize_terraform         1994   → provider.tf.json, variables.tf.json, terraform init
-  7   bridge      _finalize_bridge            2136   → vmbr0 via pvesh
-  8   ipv6        _finalize_ipv6              2319   → broker-client or manual prefix, WireGuard
-  9   https       _finalize_https             2485   → sslip.io hostname, Let's Encrypt cert
-  10  signup      _finalize_signup            2613   → generate-signup-page.py → /var/www/blockhost/signup.html
-  11  mint_nft    _finalize_mint_nft          2717   → Mint NFT #0 to admin wallet
-  12  template    _finalize_template          2798   → Build Debian VM template with libpam-web3
-  13  finalize    _finalize_complete          2863   → .setup-complete marker, enable services, create plan
-  14  validate    _finalize_validate          2911   → System validation (testing mode only)
+  1   keypair     _finalize_keypair           1696   → server.key, server.pubkey
+  2   wallet      _finalize_wallet            1725   → deployer.key
+  3   contracts   _finalize_contracts         1745   → deploy via cast or verify existing
+  4   config      _finalize_config            1906   → db.yaml, web3-defaults.yaml, blockhost.yaml
+  5   token       _finalize_token             2070   → Proxmox API token via pveum
+  6   terraform   _finalize_terraform         2118   → provider.tf.json, variables.tf.json, terraform init
+  7   bridge      _finalize_bridge            2260   → vmbr0 via pvesh
+  8   ipv6        _finalize_ipv6              2443   → broker-client or manual prefix, WireGuard
+  9   https       _finalize_https             2611   → sslip.io hostname, Let's Encrypt cert
+  10  signup      _finalize_signup            2739   → generate-signup-page.py → /var/www/blockhost/signup.html
+  11  mint_nft    _finalize_mint_nft          2847   → Mint NFT #0 to admin wallet
+  12  template    _finalize_template          2928   → Build Debian VM template with libpam-web3
+  13  finalize    _finalize_complete          3082   → .setup-complete marker, enable services, create plan
+  14  validate    _finalize_validate          3158   → System validation (testing mode only)
 
 Each step: skip if completed, mark running → completed|failed, supports retry.
 ```
@@ -171,7 +176,7 @@ Each step: skip if completed, mark running → completed|failed, supports retry.
 
 ```
 Services enabled by finalization step 13 (all run as User=blockhost except root-agent):
-  blockhost-root-agent.service → Privileged ops daemon (root, started in Step 2b2)
+  blockhost-root-agent.service → Privileged ops daemon (root, installed + enabled by blockhost-common .deb)
   blockhost-monitor.service    → TypeScript event watcher (blockhost-engine)
   blockhost-signup.service     → Serve signup page (HTTPS)
   blockhost-gc.timer           → Daily garbage collection (2 AM)
@@ -410,7 +415,7 @@ Two packages for different targets:
 - Handles blockchain queries for PAM module
 - Communicates via Unix socket
 
-**Contract artifacts**: extracted from libpam-web3-tools .deb during ISO build → `/opt/blockhost/contracts/`
+**Contract artifacts**: installed by .deb packages to `/usr/share/blockhost/contracts/`
 
 **Encryption schemes** (ecies.rs): secp256k1 ECIES, x25519, AES-256-GCM
 
@@ -605,11 +610,12 @@ Events (monitored by blockhost-monitor):
 | 490 | /wizard/admin-commands | GET, POST |
 | 524 | /wizard/summary | GET, POST |
 | 586 | /wizard/install | GET |
-| 848 | /api/finalize | POST |
-| 901 | /api/finalize/status | GET |
-| 908 | /api/finalize/retry | POST |
-| 967 | /api/finalize/reset | POST |
-| 1019 | /api/validation-output | GET |
+| 856 | /api/setup-test | POST (testing only) |
+| 956 | /api/finalize | POST |
+| 1009 | /api/finalize/status | GET |
+| 1016 | /api/finalize/retry | POST |
+| 1069 | /api/finalize/reset | POST |
+| 1127 | /api/validation-output | GET |
 
 ### API endpoints (AJAX from wizard UI)
 | Line | Route | Purpose |
@@ -622,37 +628,37 @@ Events (monitored by blockhost-monitor):
 ### Finalization functions
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1483 | _run_finalization_with_state | Step dispatcher loop |
-| 1581 | _finalize_keypair | Generate server secp256k1 key |
-| 1610 | _finalize_wallet | Write deployer.key |
-| 1630 | _finalize_contracts | Deploy or verify contracts |
-| 1693 | _deploy_contract_with_forge | Deploy contract via cast send --create |
-| 1791 | _finalize_config | Write YAML config files |
-| 1951 | _finalize_token | Create Proxmox API token (pveum) |
-| 1994 | _finalize_terraform | Generate .tf.json, terraform init |
-| 2136 | _finalize_bridge | Configure vmbr0 (pvesh) |
-| 2319 | _finalize_ipv6 | Broker allocation or manual prefix |
-| 2485 | _finalize_https | sslip.io hostname + Let's Encrypt |
-| 2613 | _finalize_signup | generate-signup-page.py |
-| 2717 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| 2798 | _finalize_template | Build Debian VM template |
-| 2863 | _finalize_complete | Enable services, create subscription plan |
-| 2911 | _finalize_validate | System validation (testing only) |
-| 2940 | _create_default_plan | Call createPlan() on subscription contract |
+| 1598 | _run_finalization_with_state | Step dispatcher loop |
+| 1696 | _finalize_keypair | Generate server secp256k1 key |
+| 1725 | _finalize_wallet | Write deployer.key |
+| 1745 | _finalize_contracts | Deploy or verify contracts |
+| 1808 | _deploy_contract_with_forge | Deploy contract via cast send --create |
+| 1906 | _finalize_config | Write YAML config files |
+| 2070 | _finalize_token | Create Proxmox API token (pveum) |
+| 2118 | _finalize_terraform | Generate .tf.json, terraform init |
+| 2260 | _finalize_bridge | Configure vmbr0 (pvesh) |
+| 2443 | _finalize_ipv6 | Broker allocation or manual prefix |
+| 2611 | _finalize_https | sslip.io hostname + Let's Encrypt |
+| 2739 | _finalize_signup | generate-signup-page.py |
+| 2847 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
+| 2928 | _finalize_template | Build Debian VM template |
+| 3082 | _finalize_complete | Enable services, create subscription plan |
+| 3158 | _finalize_validate | System validation (testing only) |
+| 3187 | _create_default_plan | Call createPlan() on subscription contract |
 
 ### Helpers
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1040 | _detect_disks | List available disks (lsblk) |
-| 1068 | _detect_proxmox_resources | Query PVE for storage, bridges |
-| 1142 | _generate_secp256k1_keypair | Generate wallet keypair |
-| 1229 | _get_address_from_key | Derive address from private key |
-| 1267 | _is_valid_address | Validate 0x + 40 hex |
-| 1298 | _get_broker_registry | Look up broker registry by chain_id |
-| 1309 | _get_wallet_balance | eth_getBalance via JSON-RPC |
-| 1346 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
-| 1378 | _request_broker_allocation | Call blockhost-broker-client CLI |
-| 3017 | _write_yaml | Write YAML file helper |
+| 1155 | _detect_disks | List available disks (lsblk) |
+| 1183 | _detect_proxmox_resources | Query PVE for storage, bridges |
+| 1257 | _generate_secp256k1_keypair | Generate wallet keypair |
+| 1344 | _get_address_from_key | Derive address from private key |
+| 1382 | _is_valid_address | Validate 0x + 40 hex |
+| 1413 | _get_broker_registry | Look up broker registry by chain_id |
+| 1424 | _get_wallet_balance | eth_getBalance via JSON-RPC |
+| 1461 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
+| 1493 | _request_broker_allocation | Call blockhost-broker-client CLI |
+| 3264 | _write_yaml | Write YAML file helper |
 
 ## BLOCKCHAIN INTERACTIONS
 
@@ -714,7 +720,7 @@ Created by first-boot Step 2b1. Group `blockhost` grants read access to config f
 - Socket: `/run/blockhost/root-agent.sock` (root:blockhost 0660, auto-created via `RuntimeDirectory=blockhost`)
 - Protocol: 4-byte big-endian length prefix + JSON payload (both directions)
 - Response: `{"ok": true, ...}` or `{"ok": false, "error": "reason"}`
-- Install path: `/usr/share/blockhost/root-agent/blockhost_root_agent.py`
+- Install path: `/usr/share/blockhost/root-agent/blockhost_root_agent.py` (shipped by blockhost-common .deb)
 
 ### Root Agent Action Catalog
 
@@ -795,3 +801,52 @@ summary.admin.{wallet, enabled, destination_mode, command_count}
 ```python
 wizard_steps  # WIZARD_STEPS list for step bar rendering
 ```
+
+## CI/CD
+
+### Workflows
+
+| Workflow | Trigger | Runner | Jobs |
+|----------|---------|--------|------|
+| `ci.yml` | Push develop, PR master | ubuntu-latest | rust-tests, engine-tests, forge-tests, build-packages |
+| `iso-build.yml` | workflow_dispatch, tag v* | self-hosted (blockhost-iso) | Build ISO, upload artifact |
+| `integration.yml` | workflow_dispatch only | self-hosted (blockhost-proxmox, blockhost-phone) | provision → integration-test → ipv6-login-test → cleanup |
+
+### Test Setup API (`/api/setup-test`)
+
+Testing-only endpoint that bypasses the browser wizard for CI automation.
+
+- **Guard**: Returns 404 unless `/etc/blockhost/.testing-mode` exists (created by `build-iso.sh --testing`)
+- **Auth**: Verifies OTP from request body (same as `/login`)
+- **Flow**: Populates Flask session → auto-detects Proxmox → triggers finalization
+- **Poll**: Returns `poll_url: /api/finalize/status` (use cookie jar for session)
+
+### CI Provision Script (`testing/ci-provision.sh`)
+
+VM lifecycle automation for integration tests:
+
+```
+Phase 1: virt-install (ISO boot, virbr0 NAT network)
+Phase 2: Wait for preseed install (VM shuts off)
+Phase 3: Eject ISO, boot from HDD (first-boot begins)
+Phase 4: Poll SSH + /run/blockhost/otp.json (first-boot complete)
+Phase 5: Read OTP via SSH
+Phase 6: POST /api/setup-test with OTP + config JSON
+Phase 7: Poll /api/finalize/status until completed
+Output:  VM_NAME, VM_IP (to GITHUB_OUTPUT if in Actions)
+```
+
+### GitHub Secrets (for integration workflow)
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOYER_KEY` | Deployer private key (owns contracts, funds test wallets) |
+| `NFT_CONTRACT` | AccessCredentialNFT address on Sepolia |
+| `SUBSCRIPTION_CONTRACT` | BlockhostSubscriptions address on Sepolia |
+
+### Self-Hosted Runner Labels
+
+Single runner on dev machine with three labels:
+- `blockhost-iso` — has xorriso, isolinux, build toolchains
+- `blockhost-proxmox` — has virsh, virt-install, sshpass, sudo
+- `blockhost-phone` — has adb-connected Android phone with carrier IPv6

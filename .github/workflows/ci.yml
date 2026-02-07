@@ -1,0 +1,114 @@
+name: CI — Tests & Package Build
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [master]
+
+jobs:
+  rust-tests:
+    name: Rust Tests (libpam-web3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libpam-web3
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev
+
+      - name: Run tests
+        working-directory: libpam-web3
+        run: cargo test --features nft
+
+  engine-tests:
+    name: Engine Tests (Hardhat)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: blockhost-engine/package-lock.json
+
+      - name: Install dependencies
+        working-directory: blockhost-engine
+        run: npm ci
+
+      - name: Run tests
+        working-directory: blockhost-engine
+        run: npm test
+
+  forge-tests:
+    name: Forge Tests (Contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Solidity dependencies
+        working-directory: libpam-web3/contracts
+        run: forge install
+
+      - name: Run tests
+        working-directory: libpam-web3/contracts
+        run: forge test -vv
+
+  build-packages:
+    name: Build Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libpam-web3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: blockhost-engine/package-lock.json
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev
+
+      - name: Build all packages
+        run: ./scripts/build-packages.sh
+
+      - name: Verify packages
+        run: ./scripts/ci-verify-packages.sh
+
+      - name: Upload host packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-packages
+          path: packages/host/*.deb
+          retention-days: 7
+
+      - name: Upload template packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: template-packages
+          path: packages/template/*.deb
+          retention-days: 7
