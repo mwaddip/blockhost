@@ -402,9 +402,9 @@ sleep 1
 # Explicitly pass PYTHONPATH to ensure module is found
 cd "$BLOCKHOST_DIR"
 if [ "$SCHEME" = "https" ]; then
-    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" --https >> "$LOG_FILE" 2>&1 &
 else
-    PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$BLOCKHOST_DIR" setsid python3 -m installer.web.app --host 0.0.0.0 --port "$PORT" >> "$LOG_FILE" 2>&1 &
 fi
 
 sleep 3
