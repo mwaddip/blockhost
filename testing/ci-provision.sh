@@ -158,7 +158,7 @@ virt_install \
     --cdrom "$ISO_PATH" \
     --os-variant debian12 \
     --network "network=${NETWORK}" \
-    --graphics none \
+    --graphics vnc,listen=127.0.0.1 \
     --noautoconsole \
     --boot cdrom,hd
 
