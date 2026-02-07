@@ -54,8 +54,9 @@ jobs:
           sudo ./scripts/build-iso.sh $ARGS
 
       - name: Upload ISO artifact
+        if: ${{ github.event_name == 'push' }}
         uses: actions/upload-artifact@v4
         with:
           name: blockhost-iso
           path: build/blockhost_0.1.0.iso
-          retention-days: ${{ github.event_name == 'push' && 30 || 3 }}
+          retention-days: 30
