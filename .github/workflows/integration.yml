@@ -44,10 +44,14 @@ jobs:
         env:
           DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
         run: |
+          # Create ramdisk for VM disk image (faster I/O)
+          sudo mkdir -p /mnt/ramdisk
+          mountpoint -q /mnt/ramdisk || sudo mount -t tmpfs -o size=16G tmpfs /mnt/ramdisk
           ./testing/ci-provision.sh \
             --iso build/blockhost_0.1.0.iso \
             --config testing/ci-config.json \
-            --name "blockhost-ci-${{ github.run_number }}"
+            --name "blockhost-ci-${{ github.run_number }}" \
+            --disk-path /mnt/ramdisk
 
   integration-test:
     name: Integration Test
@@ -156,7 +160,6 @@ jobs:
             --json > /dev/null
           echo "IPv6 tunnel lease released"
 
-      # TEMPORARY: disabled for debugging provider crash
-      # - name: Destroy VM
-      #   run: |
-      #     ./testing/ci-provision.sh --destroy "${{ needs.provision.outputs.vm_name }}"
+      - name: Destroy VM
+        run: |
+          ./testing/ci-provision.sh --destroy "${{ needs.provision.outputs.vm_name }}"

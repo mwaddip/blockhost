@@ -29,6 +29,7 @@ DESTROY_VM=""
 RAM_MB=8192
 VCPUS=4
 DISK_GB=64
+DISK_PATH=""
 NETWORK="default"
 LIBVIRT_URI="qemu:///system"
 SSH_PASS="blockhost"
@@ -96,6 +97,7 @@ while [ $# -gt 0 ]; do
         --ram)      RAM_MB="$2"; shift 2 ;;
         --vcpus)    VCPUS="$2"; shift 2 ;;
         --disk)     DISK_GB="$2"; shift 2 ;;
+        --disk-path) DISK_PATH="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 --iso <path> --config <config.json> [--name <vm-name>]"
             echo "       $0 --destroy <vm-name>"
@@ -108,6 +110,7 @@ while [ $# -gt 0 ]; do
             echo "  --ram <MB>         RAM in MB (default: 8192)"
             echo "  --vcpus <N>        vCPUs (default: 4)"
             echo "  --disk <GB>        Disk in GB (default: 64)"
+    echo "  --disk-path <dir>  Directory for VM disk image (default: libvirt pool)"
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;
@@ -172,7 +175,7 @@ virt_install \
     --name "$VM_NAME" \
     --ram "$RAM_MB" \
     --vcpus "$VCPUS" \
-    --disk "size=${DISK_GB},format=qcow2" \
+    --disk "${DISK_PATH:+path=${DISK_PATH}/${VM_NAME}.qcow2,}size=${DISK_GB},format=qcow2" \
     --cdrom "$ISO_PATH" \
     --os-variant debian12 \
     --network "network=${NETWORK}" \
