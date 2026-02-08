@@ -2167,7 +2167,7 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
                 "required_providers": {
                     "proxmox": {
                         "source": "bpg/proxmox",
-                        "version": ">= 0.50.0"
+                        "version": "~> 0.93.0"
                     }
                 }
             },
