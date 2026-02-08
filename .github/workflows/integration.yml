@@ -137,6 +137,7 @@ jobs:
 
       - name: Release IPv6 tunnel lease
         if: ${{ needs.provision.outputs.nft_contract != '' }}
+        continue-on-error: true
         env:
           DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
           NFT_CONTRACT: ${{ needs.provision.outputs.nft_contract }}
