@@ -181,6 +181,7 @@ virt_install \
     --network "network=${NETWORK}" \
     --graphics vnc,listen=127.0.0.1 \
     --noautoconsole \
+    --check disk_size=off \
     --boot cdrom,hd
 
 pass "VM created: $VM_NAME"
