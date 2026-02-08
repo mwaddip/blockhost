@@ -110,7 +110,7 @@ jobs:
 
   ipv6-login-test:
     name: IPv6 Login Test
-    needs: [integration-test]
+    needs: [provision, integration-test]
     if: ${{ inputs.run_ipv6_test == true && needs.integration-test.result == 'success' }}
     runs-on: [self-hosted, blockhost-phone]
     steps:
