@@ -290,18 +290,27 @@ ADMIN_PUBLIC_SECRET=$(jq -r '.admin_public_secret // "blockhost-access"' "$CONFI
 ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOYER_KEY")
 [ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
 
-# Inject OTP + secrets into config (contracts deployed fresh by wizard)
+# Fetch broker registry address from GitHub (single source of truth)
+REGISTRY_URL="https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry.json"
+BROKER_REGISTRY=$(curl -sf "$REGISTRY_URL" | jq -r '.registry_contract // empty')
+[ -n "$BROKER_REGISTRY" ] || fail "Could not fetch broker registry from $REGISTRY_URL"
+info "Broker registry: $BROKER_REGISTRY"
+
+# Inject OTP + secrets + broker registry into config
 SUBMIT_JSON=$(jq \
     --arg otp "$OTP_CODE" \
     --arg deployer_key "$DEPLOYER_KEY" \
     --arg admin_wallet "$ADMIN_WALLET" \
     --arg admin_sig "$ADMIN_SIGNATURE" \
+    --arg broker_registry "$BROKER_REGISTRY" \
     '. + {
         otp: $otp,
         admin_wallet: $admin_wallet,
         admin_signature: $admin_sig
     } | .blockchain += {
         deployer_key: $deployer_key
+    } | .ipv6 += {
+        broker_registry: $broker_registry
     }' "$CONFIG_FILE")
 
 RESPONSE=$(curl -s -w "\n%{http_code}" \

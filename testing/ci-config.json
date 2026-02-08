@@ -11,8 +11,7 @@
     "auto_detect": true
   },
   "ipv6": {
-    "mode": "broker",
-    "broker_registry": "0x0E5b567E7d5C5c36D8fD70DE8129c35B473d0Aaf"
+    "mode": "broker"
   },
   "admin_commands": {
     "enabled": false
