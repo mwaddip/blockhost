@@ -56,6 +56,17 @@ pass()  { echo "[PASS]  $(date +%H:%M:%S) $*"; }
 fail()  { echo "[FAIL]  $(date +%H:%M:%S) $*" >&2; exit 1; }
 wait_() { echo "[WAIT]  $(date +%H:%M:%S) $*"; }
 
+refresh_ip() {
+    # Re-check DHCP leases — Proxmox install and finalization can change the IP
+    local new_ip
+    new_ip=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
+        grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
+    if [ -n "$new_ip" ] && [ "$new_ip" != "$VM_IP" ]; then
+        [ -n "$VM_IP" ] && info "IP changed: $VM_IP -> $new_ip"
+        VM_IP="$new_ip"
+    fi
+}
+
 elapsed() {
     local secs=$(( $(date +%s) - START_TIME ))
     printf "%dm %02ds" $(( secs / 60 )) $(( secs % 60 ))
@@ -214,14 +225,7 @@ VM_IP=""
 ELAPSED=0
 
 while [ "$ELAPSED" -lt "$FIRSTBOOT_TIMEOUT" ]; do
-    # Re-check DHCP every iteration — Proxmox install changes hostname/client ID
-    # which can result in a new lease with a different IP
-    NEW_IP=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
-        grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
-    if [ -n "$NEW_IP" ] && [ "$NEW_IP" != "$VM_IP" ]; then
-        [ -n "$VM_IP" ] && info "IP changed: $VM_IP -> $NEW_IP"
-        VM_IP="$NEW_IP"
-    fi
+    refresh_ip
 
     if [ -n "$VM_IP" ]; then
         # Try SSH connection
@@ -312,6 +316,7 @@ info "Phase 7: Polling finalization (timeout: ${FINALIZE_TIMEOUT}s)"
 
 ELAPSED=0
 while [ "$ELAPSED" -lt "$FINALIZE_TIMEOUT" ]; do
+    refresh_ip
     POLL=$(curl -s \
         -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
         "http://${VM_IP}/api/finalize/status" 2>/dev/null || echo '{}')
