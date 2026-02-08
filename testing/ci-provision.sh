@@ -264,6 +264,11 @@ OTP_CODE=$(echo "$OTP_JSON" | jq -r '.code')
 
 pass "OTP: $OTP_CODE"
 
+# Lock the IP — networking is stable after first-boot completes.
+# DHCP lease table becomes unreliable after Proxmox reconfigures bridges.
+STABLE_IP="$VM_IP"
+info "Locking IP to $STABLE_IP for remaining phases"
+
 # =============================================================================
 # Phase 6 — Submit wizard config via /api/setup-test
 # =============================================================================
@@ -316,7 +321,6 @@ info "Phase 7: Polling finalization (timeout: ${FINALIZE_TIMEOUT}s)"
 
 ELAPSED=0
 while [ "$ELAPSED" -lt "$FINALIZE_TIMEOUT" ]; do
-    refresh_ip
     POLL=$(curl -s \
         -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
         "http://${VM_IP}/api/finalize/status" 2>/dev/null || echo '{}')
