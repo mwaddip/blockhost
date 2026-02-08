@@ -2982,6 +2982,7 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
             config['mint_nft_result'] = {
                 'token_id': token_id,
                 'tx_hash': 'updated (existing NFT)',
+                'message': f'Existing NFT #{token_id} found, updated metadata',
             }
         else:
             # MINT path: fresh install, no existing NFT

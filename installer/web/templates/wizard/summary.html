@@ -290,6 +290,7 @@
                 <span class="step-name">Mint admin NFT</span>
                 <span class="step-status"></span>
                 <div id="mint-nft-data" class="hidden" style="margin-top: 0.5rem;">
+                    <div id="mint-nft-message" class="hidden" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.25rem;"></div>
                     <div class="contract-addr-row">
                         <span class="contract-addr-label">Token ID:</span>
                         <code id="mint-nft-token-id" class="contract-addr"></code>
@@ -829,6 +830,11 @@ function updateProgress(data) {
                 document.getElementById('https-data').classList.remove('hidden');
             }
             if (stepId === 'mint_nft' && stepData.data) {
+                if (stepData.data.message) {
+                    const msgEl = document.getElementById('mint-nft-message');
+                    msgEl.textContent = stepData.data.message;
+                    msgEl.classList.remove('hidden');
+                }
                 if (stepData.data.token_id) {
                     document.getElementById('mint-nft-token-id').textContent = stepData.data.token_id;
                 }
@@ -846,6 +852,26 @@ function updateProgress(data) {
             icon.innerHTML = '&#10007;';
             status.textContent = stepData.error || 'Failed';
             retryBtn.classList.remove('hidden');
+            // Broker allocation has a 2-minute cooldown between requests
+            if (stepId === 'ipv6' && stepData.error && stepData.error.includes('roker')) {
+                const hint = document.createElement('div');
+                hint.style.cssText = 'font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;';
+                hint.textContent = 'Broker requests expire after 2 minutes. Wait before retrying.';
+                status.parentNode.appendChild(hint);
+                retryBtn.disabled = true;
+                retryBtn.textContent = 'Wait 2m...';
+                let remaining = 120;
+                const countdown = setInterval(() => {
+                    remaining--;
+                    if (remaining <= 0) {
+                        clearInterval(countdown);
+                        retryBtn.disabled = false;
+                        retryBtn.textContent = 'Retry';
+                    } else {
+                        retryBtn.textContent = `Wait ${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}`;
+                    }
+                }, 1000);
+            }
         } else {
             icon.innerHTML = '&#9675;';
             status.textContent = '';
