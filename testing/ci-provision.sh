@@ -57,10 +57,17 @@ fail()  { echo "[FAIL]  $(date +%H:%M:%S) $*" >&2; exit 1; }
 wait_() { echo "[WAIT]  $(date +%H:%M:%S) $*"; }
 
 refresh_ip() {
-    # Re-check DHCP leases — Proxmox install and finalization can change the IP
+    # Use ARP table — DHCP leases are unreliable after Proxmox installs a bridge.
+    # The bridge (vmbr0) gets a new DHCP lease with a different client ID that
+    # doesn't always show in virsh net-dhcp-leases. ARP reflects actual reality.
     local new_ip
-    new_ip=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
-        grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
+    # First try ARP (works once the VM has talked on the network)
+    new_ip=$(arp -an 2>/dev/null | grep -i "$MAC" | grep -oP '\(\K[0-9.]+(?=\))' | tail -1 || true)
+    # Fall back to DHCP leases if ARP has nothing yet (early boot)
+    if [ -z "$new_ip" ]; then
+        new_ip=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
+            grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
+    fi
     if [ -n "$new_ip" ] && [ "$new_ip" != "$VM_IP" ]; then
         [ -n "$VM_IP" ] && info "IP changed: $VM_IP -> $new_ip"
         VM_IP="$new_ip"
