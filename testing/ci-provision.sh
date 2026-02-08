@@ -214,10 +214,13 @@ VM_IP=""
 ELAPSED=0
 
 while [ "$ELAPSED" -lt "$FIRSTBOOT_TIMEOUT" ]; do
-    # Try to get IP from DHCP leases
-    if [ -z "$VM_IP" ]; then
-        VM_IP=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
-            grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | head -1 || true)
+    # Re-check DHCP every iteration — Proxmox install changes hostname/client ID
+    # which can result in a new lease with a different IP
+    NEW_IP=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
+        grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
+    if [ -n "$NEW_IP" ] && [ "$NEW_IP" != "$VM_IP" ]; then
+        [ -n "$VM_IP" ] && info "IP changed: $VM_IP -> $NEW_IP"
+        VM_IP="$NEW_IP"
     fi
 
     if [ -n "$VM_IP" ]; then
