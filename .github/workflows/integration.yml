@@ -90,10 +90,15 @@ jobs:
         env:
           VM_IP: ${{ steps.vm.outputs.vm_ip }}
         run: |
-          OUTPUT=$(sshpass -p blockhost ssh \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "root@${VM_IP}" \
-            "chmod +x /tmp/integration-test.sh && sudo -u blockhost /tmp/integration-test.sh --cleanup")
+          SSH_CMD="sshpass -p blockhost ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          OUTPUT=$($SSH_CMD "root@${VM_IP}" \
+            "chmod +x /tmp/integration-test.sh && sudo -u blockhost /tmp/integration-test.sh --cleanup") || {
+            EXIT_CODE=$?
+            echo "$OUTPUT"
+            echo "--- Integration test failed (exit $EXIT_CODE), fetching monitor logs ---"
+            $SSH_CMD "root@${VM_IP}" "journalctl -u blockhost-monitor --no-pager -n 100" || true
+            exit $EXIT_CODE
+          }
           echo "$OUTPUT"
           # Extract wallet key from output (last non-empty line after "Test wallet private key")
           WALLET_KEY=$(echo "$OUTPUT" | grep -A1 "Test wallet private key" | tail -1 | tr -d '[:space:]')
