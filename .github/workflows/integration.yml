@@ -156,6 +156,7 @@ jobs:
             --json > /dev/null
           echo "IPv6 tunnel lease released"
 
-      - name: Destroy VM
-        run: |
-          ./testing/ci-provision.sh --destroy "${{ needs.provision.outputs.vm_name }}"
+      # TEMPORARY: disabled for debugging provider crash
+      # - name: Destroy VM
+      #   run: |
+      #     ./testing/ci-provision.sh --destroy "${{ needs.provision.outputs.vm_name }}"
