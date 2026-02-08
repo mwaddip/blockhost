@@ -1463,7 +1463,10 @@ def _fetch_broker_registry_from_github(chain_id: str) -> Optional[str]:
     import urllib.request
     import urllib.error
 
-    url = 'https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry.json'
+    # Use testnet registry when running from a testing ISO
+    testing_marker = Path('/etc/blockhost/.testing-mode')
+    registry_file = 'registry-testnet.json' if testing_marker.exists() else 'registry.json'
+    url = f'https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/{registry_file}'
 
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'BlockHost-Installer'})

@@ -291,10 +291,24 @@ ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOY
 [ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
 
 # Fetch broker registry address from GitHub (single source of truth)
-REGISTRY_URL="https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry.json"
+# CI always uses testnet registry
+REGISTRY_URL="https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry-testnet.json"
 BROKER_REGISTRY=$(curl -sf "$REGISTRY_URL" | jq -r '.registry_contract // empty')
 [ -n "$BROKER_REGISTRY" ] || fail "Could not fetch broker registry from $REGISTRY_URL"
 info "Broker registry: $BROKER_REGISTRY"
+
+# Look up the broker's requests contract from the on-chain registry (broker ID 1)
+# getBroker returns a struct; requestsContract is the second address field
+SEPOLIA_RPC="https://ethereum-sepolia-rpc.publicnode.com"
+RAW=$(cast call "$BROKER_REGISTRY" "getBroker(uint256)" 1 --rpc-url "$SEPOLIA_RPC") \
+    || fail "Could not call getBroker on registry $BROKER_REGISTRY"
+# Struct has offset pointer (32B), then operator (32B), then requestsContract (32B)
+# Address is last 20 bytes (40 hex chars) of its 32-byte slot
+RAW_HEX="${RAW#0x}"
+REQUESTS_CONTRACT="0x${RAW_HEX:152:40}"
+[ "$REQUESTS_CONTRACT" != "0x0000000000000000000000000000000000000000" ] \
+    || fail "Requests contract is zero address — broker not registered?"
+info "Requests contract: $REQUESTS_CONTRACT"
 
 # Inject OTP + secrets + broker registry into config
 SUBMIT_JSON=$(jq \
@@ -429,4 +443,5 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "vm_name=$VM_NAME" >> "$GITHUB_OUTPUT"
     echo "vm_ip=$VM_IP" >> "$GITHUB_OUTPUT"
     echo "nft_contract=$NFT_CONTRACT" >> "$GITHUB_OUTPUT"
+    echo "requests_contract=$REQUESTS_CONTRACT" >> "$GITHUB_OUTPUT"
 fi

@@ -21,6 +21,7 @@ jobs:
       vm_name: ${{ steps.provision.outputs.vm_name }}
       vm_ip: ${{ steps.provision.outputs.vm_ip }}
       nft_contract: ${{ steps.provision.outputs.nft_contract }}
+      requests_contract: ${{ steps.provision.outputs.requests_contract }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -142,14 +143,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Release IPv6 tunnel lease
-        if: ${{ needs.provision.outputs.nft_contract != '' }}
+        if: ${{ needs.provision.outputs.nft_contract != '' && needs.provision.outputs.requests_contract != '' }}
         env:
           BROKER_OPERATOR_KEY: ${{ secrets.BROKER_OPERATOR_KEY }}
           NFT_CONTRACT: ${{ needs.provision.outputs.nft_contract }}
+          REQUESTS_CONTRACT: ${{ needs.provision.outputs.requests_contract }}
           RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
         run: |
           echo "Releasing IPv6 tunnel allocation for NFT contract: $NFT_CONTRACT"
-          cast send 0xCD75c00dBB3F05cF27f16699591f4256a798e694 \
+          echo "Requests contract: $REQUESTS_CONTRACT"
+          cast send "$REQUESTS_CONTRACT" \
             "releaseAllocation(address)" \
             "$NFT_CONTRACT" \
             --rpc-url "$RPC_URL" \
