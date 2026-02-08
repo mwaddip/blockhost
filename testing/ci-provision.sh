@@ -385,7 +385,7 @@ ELAPSED=0
 REBOOT_TIMEOUT=300
 while [ "$ELAPSED" -lt "$REBOOT_TIMEOUT" ]; do
     if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=5 \
-        "root@${VM_IP}" "systemctl is-active blockhost-engine" 2>/dev/null | grep -q "active"; then
+        "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active"; then
         break
     fi
     wait_ "Waiting for reboot + services (${ELAPSED}s / ${REBOOT_TIMEOUT}s)"
@@ -394,8 +394,8 @@ while [ "$ELAPSED" -lt "$REBOOT_TIMEOUT" ]; do
 done
 
 sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=10 \
-    "root@${VM_IP}" "systemctl is-active blockhost-engine" 2>/dev/null | grep -q "active" || \
-    fail "blockhost-engine not running after reboot"
+    "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active" || \
+    fail "blockhost-monitor not running after reboot"
 
 pass "System rebooted, services running ($(elapsed))"
 
