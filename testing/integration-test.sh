@@ -342,7 +342,15 @@ if [ "$NFT_BALANCE" = "0" ]; then
     NFT_BALANCE=$(cast call "$NFT_CONTRACT" "balanceOf(address)(uint256)" "$TEST_ADDR" --rpc-url "$RPC" | sed 's/\[.*//;s/[[:space:]]//g')
 fi
 
-[ "$NFT_BALANCE" -gt 0 ] 2>/dev/null || fail "NFT balance is $NFT_BALANCE, expected > 0"
+if ! [ "$NFT_BALANCE" -gt 0 ] 2>/dev/null; then
+    info "=== Monitor journal (last 50 lines) ==="
+    journalctl -u blockhost-monitor --no-pager -n 50 2>/dev/null || true
+    info "=== Reserved NFT tokens in database ==="
+    jq '.reserved_nft_tokens // empty' "$VMS_JSON" 2>/dev/null || true
+    info "=== On-chain NFT totalSupply ==="
+    cast call "$NFT_CONTRACT" "totalSupply()(uint256)" --rpc-url "$RPC" 2>/dev/null || true
+    fail "NFT balance is $NFT_BALANCE, expected > 0"
+fi
 
 # Get token ID
 TOKEN_ID=$(cast call "$NFT_CONTRACT" "tokenOfOwnerByIndex(address,uint256)(uint256)" \
@@ -472,3 +480,7 @@ echo "=== ALL TESTS PASSED ($(elapsed)) ==="
 echo ""
 echo "Test wallet private key (for ipv6-login-test.sh):"
 echo "  $TEST_KEY"
+echo "VM IPv6 address:"
+echo "  $FOUND_IPV6"
+echo "VM name:"
+echo "  $FOUND_NAME"

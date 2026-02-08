@@ -294,6 +294,19 @@ function selectRadio(element) {
         if (radio.value === 'import') {
             document.getElementById('deployer-key-hidden').value = '';
         }
+        // When generating a new wallet, contracts MUST be deployed (admin = deployer)
+        const contractSection = document.querySelector('.form-section:has([name="contract_mode"])');
+        if (radio.value === 'generate') {
+            contractSection.style.display = 'none';
+            const deployRadio = document.querySelector('input[name="contract_mode"][value="deploy"]');
+            deployRadio.checked = true;
+            deployRadio.closest('.radio-option').classList.add('selected');
+            document.querySelector('input[name="contract_mode"][value="existing"]')
+                .closest('.radio-option').classList.remove('selected');
+            document.getElementById('contracts-existing').classList.add('hidden');
+        } else {
+            contractSection.style.display = '';
+        }
     } else if (radio.name === 'contract_mode') {
         document.getElementById('contracts-existing').classList.toggle('hidden', radio.value !== 'existing');
     }

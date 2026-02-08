@@ -42,7 +42,8 @@ error() {
     exit 1
 }
 
-# Ensure output directories exist
+# Clean and recreate output directories (no stale packages from previous builds)
+rm -rf "$HOST_PKG_DIR" "$TEMPLATE_PKG_DIR"
 mkdir -p "$HOST_PKG_DIR" "$TEMPLATE_PKG_DIR"
 
 log "Building BlockHost packages..."
@@ -60,6 +61,7 @@ FAILED_PACKAGES=()
 log "=== Building libpam-web3-tools ==="
 if [ -d "$PROJECT_DIR/libpam-web3/packaging" ]; then
     cd "$PROJECT_DIR/libpam-web3"
+    rm -f packaging/libpam-web3-tools_*.deb
     if ./packaging/build-deb-tools.sh; then
         DEB=$(find packaging -name "libpam-web3-tools_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
@@ -82,6 +84,7 @@ echo ""
 log "=== Building libpam-web3 (PAM module for VMs) ==="
 if [ -d "$PROJECT_DIR/libpam-web3/packaging" ]; then
     cd "$PROJECT_DIR/libpam-web3"
+    rm -f packaging/libpam-web3_*.deb
     if ./packaging/build-deb.sh; then
         DEB=$(find packaging -name "libpam-web3_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
@@ -104,6 +107,7 @@ echo ""
 log "=== Building blockhost-common ==="
 if [ -f "$PROJECT_DIR/blockhost-common/build.sh" ]; then
     cd "$PROJECT_DIR/blockhost-common"
+    rm -f "$PROJECT_DIR"/blockhost-common_*.deb
     if ./build.sh; then
         DEB=$(find .. -maxdepth 1 -name "blockhost-common_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
@@ -126,6 +130,7 @@ echo ""
 log "=== Building blockhost-provisioner ==="
 if [ -f "$PROJECT_DIR/blockhost-provisioner/build-deb.sh" ]; then
     cd "$PROJECT_DIR/blockhost-provisioner"
+    rm -rf build
     if ./build-deb.sh; then
         DEB=$(find build -name "blockhost-provisioner_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
@@ -148,6 +153,7 @@ echo ""
 log "=== Building blockhost-engine ==="
 if [ -f "$PROJECT_DIR/blockhost-engine/packaging/build.sh" ]; then
     cd "$PROJECT_DIR/blockhost-engine"
+    rm -f packaging/blockhost-engine_*.deb
     if ./packaging/build.sh; then
         DEB=$(find packaging -name "blockhost-engine_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
@@ -170,6 +176,7 @@ echo ""
 log "=== Building blockhost-broker-client ==="
 if [ -f "$PROJECT_DIR/blockhost-broker/scripts/build-deb.sh" ]; then
     cd "$PROJECT_DIR/blockhost-broker/scripts"
+    rm -rf build
     if ./build-deb.sh; then
         DEB=$(find build -name "blockhost-broker-client_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then

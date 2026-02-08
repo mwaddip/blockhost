@@ -26,6 +26,8 @@ SSH_KEY="${SCRIPT_DIR}/blockhost-test-key"
 # Defaults
 HOST=""
 PRIVATE_KEY=""
+VM_IPV6=""
+VM_NAME=""
 SKIP_HTTP=false
 START_TIME=$(date +%s)
 
@@ -50,13 +52,17 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --host)       HOST="$2"; shift 2 ;;
         --private-key) PRIVATE_KEY="$2"; shift 2 ;;
+        --ipv6)       VM_IPV6="$2"; shift 2 ;;
+        --vm-name)    VM_NAME="$2"; shift 2 ;;
         --skip-http)  SKIP_HTTP=true; shift ;;
         --help|-h)
-            echo "Usage: $0 --host <proxmox-ip> --private-key <0x...> [--skip-http]"
+            echo "Usage: $0 --host <proxmox-ip> --private-key <0x...> [--ipv6 <addr> --vm-name <name>] [--skip-http]"
             echo ""
             echo "Options:"
-            echo "  --host         Proxmox host IP (SSH access required)"
+            echo "  --host         Proxmox host IP (SSH access required, unless --ipv6/--vm-name given)"
             echo "  --private-key  Test wallet private key (must own NFT on the VM)"
+            echo "  --ipv6         VM IPv6 address (skip Proxmox SSH lookup)"
+            echo "  --vm-name      VM name (skip Proxmox SSH lookup)"
             echo "  --skip-http    Skip signing page HTTP check"
             exit 0
             ;;
@@ -64,8 +70,15 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$HOST" ]        || fail "Missing --host <proxmox-ip>"
 [ -n "$PRIVATE_KEY" ] || fail "Missing --private-key <0x...>"
+
+# If IPv6 and vm-name provided directly, skip Proxmox SSH entirely
+if [ -n "$VM_IPV6" ] && [ -n "$VM_NAME" ]; then
+    DIRECT_MODE=true
+else
+    DIRECT_MODE=false
+    [ -n "$HOST" ] || fail "Missing --host <proxmox-ip> (or provide --ipv6 and --vm-name)"
+fi
 
 PX_SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $SSH_KEY root@$HOST"
 
@@ -93,29 +106,33 @@ WALLET_ADDR=$(cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null) \
 WALLET_SHORT="${WALLET_ADDR:0:6}...${WALLET_ADDR: -4}"
 info "Test wallet: $WALLET_SHORT"
 
-# SSH to Proxmox
-$PX_SSH "hostname" > /dev/null 2>&1 || fail "Cannot SSH to Proxmox host at $HOST"
+if [ "$DIRECT_MODE" = true ]; then
+    pass "Pre-flight: VM $VM_NAME at $VM_IPV6 (direct mode)"
+else
+    # SSH to Proxmox
+    $PX_SSH "hostname" > /dev/null 2>&1 || fail "Cannot SSH to Proxmox host at $HOST"
 
-# Read VM data and find matching VM
-VM_JSON=$($PX_SSH "cat /var/lib/blockhost/vms.json" 2>/dev/null) \
-    || fail "Cannot read vms.json from Proxmox host"
+    # Read VM data and find matching VM
+    VM_JSON=$($PX_SSH "cat /var/lib/blockhost/vms.json" 2>/dev/null) \
+        || fail "Cannot read vms.json from Proxmox host"
 
-VM_ENTRY=$(echo "$VM_JSON" | jq -r --arg addr "$WALLET_ADDR" \
-    '[.vms | to_entries[] | select(.value.status == "active") |
-     select((.value.wallet_address | ascii_downcase) == ($addr | ascii_downcase)) |
-     .value] | first' 2>/dev/null)
+    VM_ENTRY=$(echo "$VM_JSON" | jq -r --arg addr "$WALLET_ADDR" \
+        '[.vms | to_entries[] | select(.value.status == "active") |
+         select((.value.wallet_address | ascii_downcase) == ($addr | ascii_downcase)) |
+         .value] | first' 2>/dev/null)
 
-[ -n "$VM_ENTRY" ] && [ "$VM_ENTRY" != "null" ] \
-    || fail "No active VM found for wallet $WALLET_SHORT"
+    [ -n "$VM_ENTRY" ] && [ "$VM_ENTRY" != "null" ] \
+        || fail "No active VM found for wallet $WALLET_SHORT"
 
-VM_IPV6=$(echo "$VM_ENTRY" | jq -r '.ipv6_address')
-VM_NAME=$(echo "$VM_ENTRY" | jq -r '.vm_name')
-VMID=$(echo "$VM_ENTRY" | jq -r '.vmid')
+    VM_IPV6=$(echo "$VM_ENTRY" | jq -r '.ipv6_address')
+    VM_NAME=$(echo "$VM_ENTRY" | jq -r '.vm_name')
+    VMID=$(echo "$VM_ENTRY" | jq -r '.vmid')
 
-[ -n "$VM_IPV6" ] && [ "$VM_IPV6" != "null" ] \
-    || fail "VM $VM_NAME has no IPv6 address"
+    [ -n "$VM_IPV6" ] && [ "$VM_IPV6" != "null" ] \
+        || fail "VM $VM_NAME has no IPv6 address"
 
-pass "Pre-flight: VM $VM_NAME (VMID $VMID) at $VM_IPV6"
+    pass "Pre-flight: VM $VM_NAME (VMID $VMID) at $VM_IPV6"
+fi
 
 # =============================================================================
 # Phase 2 — IPv6 ping from phone

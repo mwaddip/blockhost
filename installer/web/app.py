@@ -1463,7 +1463,10 @@ def _fetch_broker_registry_from_github(chain_id: str) -> Optional[str]:
     import urllib.request
     import urllib.error
 
-    url = 'https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry.json'
+    # Use testnet registry when running from a testing ISO
+    testing_marker = Path('/etc/blockhost/.testing-mode')
+    registry_file = 'registry-testnet.json' if testing_marker.exists() else 'registry.json'
+    url = f'https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/{registry_file}'
 
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'BlockHost-Installer'})
@@ -2167,7 +2170,7 @@ def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
                 "required_providers": {
                     "proxmox": {
                         "source": "bpg/proxmox",
-                        "version": ">= 0.50.0"
+                        "version": "~> 0.93.0"
                     }
                 }
             },
@@ -2895,30 +2898,109 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
         if not ciphertext_hex:
             return False, f'Could not parse ciphertext from output: {encrypt_result.stdout}'
 
-        # Step 2: Mint NFT using blockhost.mint_nft module
+        # Step 2: Mint or update NFT
         try:
             sys.path.insert(0, '/usr/lib/python3/dist-packages')
-            from blockhost.mint_nft import mint_nft
+            from blockhost.mint_nft import mint_nft, load_signing_page
             from blockhost.config import load_web3_config
         except ImportError as e:
             return False, f'Cannot import minting module: {e}'
 
         web3_config = load_web3_config()
+        nft_contract = web3_config['blockchain']['nft_contract']
+        rpc_url = web3_config['blockchain']['rpc_url']
 
-        result = mint_nft(
-            owner_wallet=admin_wallet,
-            machine_id='blockhost-admin',
-            user_encrypted=ciphertext_hex,
-            public_secret=admin_public_secret,
-            config=web3_config,
-        )
+        # Check if admin already owns an NFT
+        check_cmd = ['cast', 'call', nft_contract,
+                     'balanceOf(address)', admin_wallet,
+                     '--rpc-url', rpc_url]
+        check_result = subprocess.run(check_cmd, capture_output=True,
+                                      text=True, timeout=30)
+        if check_result.returncode == 0:
+            raw = check_result.stdout.strip()
+            balance = int(raw, 16) if raw.startswith('0x') else int(raw)
+        else:
+            balance = 0
 
-        # Store result for step data display
-        # mint_nft() returns a tx hash string (or None for dry run)
-        config['mint_nft_result'] = {
-            'token_id': '0',
-            'tx_hash': result or '',
-        }
+        if balance > 0:
+            # UPDATE path: admin already has an NFT, update instead of re-minting
+            token_cmd = ['cast', 'call', nft_contract,
+                         'tokenOfOwnerByIndex(address,uint256)',
+                         admin_wallet, '0',
+                         '--rpc-url', rpc_url]
+            token_result = subprocess.run(token_cmd, capture_output=True,
+                                          text=True, timeout=30)
+            if token_result.returncode != 0:
+                return False, f'Cannot find admin token: {token_result.stderr}'
+
+            raw = token_result.stdout.strip()
+            token_id = str(int(raw, 16) if raw.startswith('0x') else int(raw))
+
+            deployer_key = Path('/etc/blockhost/deployer.key').read_text().strip()
+
+            # Read existing publicSecret (immutable after mint, must reuse)
+            ps_cmd = ['cast', 'call', nft_contract,
+                      'getAccessData(uint256)(bytes,string)',
+                      token_id, '--rpc-url', rpc_url]
+            ps_result = subprocess.run(ps_cmd, capture_output=True,
+                                       text=True, timeout=30)
+            existing_public_secret = ''
+            if ps_result.returncode == 0:
+                # cast decodes as two lines: bytes hex, then the string
+                lines = [l.strip() for l in ps_result.stdout.strip().split('\n') if l.strip()]
+                if len(lines) >= 2:
+                    existing_public_secret = lines[1]
+
+            # Regenerate signing page with existing publicSecret + new ciphertext
+            signing_page_base64 = load_signing_page(
+                web3_config,
+                user_encrypted=ciphertext_hex,
+                public_secret=existing_public_secret or admin_public_secret,
+            )
+
+            # Update userEncrypted
+            update_cmd = ['cast', 'send', nft_contract,
+                          'updateUserEncrypted(uint256,bytes)',
+                          token_id, ciphertext_hex,
+                          '--private-key', deployer_key,
+                          '--rpc-url', rpc_url, '--json']
+            update_result = subprocess.run(update_cmd, capture_output=True,
+                                           text=True, timeout=120)
+            if update_result.returncode != 0:
+                return False, f'updateUserEncrypted failed: {update_result.stderr}'
+
+            # Update signing page (animationUrl)
+            anim_cmd = ['cast', 'send', nft_contract,
+                        'updateAnimationUrl(uint256,string)',
+                        token_id, signing_page_base64,
+                        '--private-key', deployer_key,
+                        '--rpc-url', rpc_url, '--json']
+            anim_result = subprocess.run(anim_cmd, capture_output=True,
+                                         text=True, timeout=120)
+            if anim_result.returncode != 0:
+                return False, f'updateAnimationUrl failed: {anim_result.stderr}'
+
+            print(f"Updated existing NFT #{token_id} instead of minting")
+
+            config['mint_nft_result'] = {
+                'token_id': token_id,
+                'tx_hash': 'updated (existing NFT)',
+                'message': f'Existing NFT #{token_id} found, updated metadata',
+            }
+        else:
+            # MINT path: fresh install, no existing NFT
+            result = mint_nft(
+                owner_wallet=admin_wallet,
+                machine_id='blockhost-admin',
+                user_encrypted=ciphertext_hex,
+                public_secret=admin_public_secret,
+                config=web3_config,
+            )
+
+            config['mint_nft_result'] = {
+                'token_id': '0',
+                'tx_hash': result or '',
+            }
 
         return True, None
     except Exception as e:
@@ -3203,29 +3285,43 @@ def _create_default_plan(config: dict):
     plan_name = blockchain.get('plan_name', 'Basic VM')
     plan_price = str(blockchain.get('plan_price_cents', 50))
 
-    # createPlan(string name, uint256 pricePerDayUsdCents)
-    cmd = [
-        'cast', 'send',
-        subscription_contract,
-        'createPlan(string,uint256)',
-        plan_name,
-        plan_price,
-        '--private-key', deployer_key,
-        '--rpc-url', rpc_url,
-        '--json',
-    ]
+    # Check if plans already exist (idempotency)
+    skip_plan = False
+    check_cmd = ['cast', 'call', subscription_contract,
+                 'nextPlanId()', '--rpc-url', rpc_url]
+    check_result = subprocess.run(check_cmd, capture_output=True,
+                                  text=True, timeout=30)
+    if check_result.returncode == 0:
+        raw = check_result.stdout.strip()
+        next_plan_id = int(raw, 16) if raw.startswith('0x') else int(raw)
+        if next_plan_id > 1:
+            print(f"Plans already exist (nextPlanId={next_plan_id}), skipping plan creation")
+            skip_plan = True
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=120
-    )
+    if not skip_plan:
+        # createPlan(string name, uint256 pricePerDayUsdCents)
+        cmd = [
+            'cast', 'send',
+            subscription_contract,
+            'createPlan(string,uint256)',
+            plan_name,
+            plan_price,
+            '--private-key', deployer_key,
+            '--rpc-url', rpc_url,
+            '--json',
+        ]
 
-    if result.returncode != 0:
-        raise RuntimeError(f"Plan creation failed: {result.stderr}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
 
-    print(f"Plan '{plan_name}' created at {plan_price} cents/day")
+        if result.returncode != 0:
+            raise RuntimeError(f"Plan creation failed: {result.stderr}")
+
+        print(f"Plan '{plan_name}' created at {plan_price} cents/day")
 
     # Set primary stablecoin (USDC) based on chain
     chain_id = int(blockchain.get('chain_id', 11155111))
@@ -3238,6 +3334,18 @@ def _create_default_plan(config: dict):
 
     usdc_address = usdc_addresses.get(chain_id)
     if usdc_address:
+        # Check current stablecoin before writing (idempotency)
+        check_cmd = ['cast', 'call', subscription_contract,
+                     'primaryStablecoin()', '--rpc-url', rpc_url]
+        check_result = subprocess.run(check_cmd, capture_output=True,
+                                      text=True, timeout=30)
+        if check_result.returncode == 0:
+            raw = check_result.stdout.strip()
+            current = '0x' + raw[-40:] if len(raw) >= 40 else raw
+            if current.lower() == usdc_address.lower():
+                print(f"Primary stablecoin already set to {usdc_address}, skipping")
+                return
+
         cmd = [
             'cast', 'send',
             subscription_contract,

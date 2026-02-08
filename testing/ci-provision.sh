@@ -29,9 +29,15 @@ DESTROY_VM=""
 RAM_MB=8192
 VCPUS=4
 DISK_GB=64
+DISK_PATH=""
 NETWORK="default"
+LIBVIRT_URI="qemu:///system"
 SSH_PASS="blockhost"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+# Wrappers to ensure system connection (default network lives in qemu:///system)
+virsh()        { command virsh --connect "$LIBVIRT_URI" "$@"; }
+virt_install() { command virt-install --connect "$LIBVIRT_URI" "$@"; }
 
 # Timeouts (seconds)
 PRESEED_TIMEOUT=900     # 15 min for preseed install
@@ -50,6 +56,24 @@ info()  { echo "[INFO]  $(date +%H:%M:%S) $*"; }
 pass()  { echo "[PASS]  $(date +%H:%M:%S) $*"; }
 fail()  { echo "[FAIL]  $(date +%H:%M:%S) $*" >&2; exit 1; }
 wait_() { echo "[WAIT]  $(date +%H:%M:%S) $*"; }
+
+refresh_ip() {
+    # Use ARP table — DHCP leases are unreliable after Proxmox installs a bridge.
+    # The bridge (vmbr0) gets a new DHCP lease with a different client ID that
+    # doesn't always show in virsh net-dhcp-leases. ARP reflects actual reality.
+    local new_ip
+    # First try ARP (works once the VM has talked on the network)
+    new_ip=$(arp -an 2>/dev/null | grep -i "$MAC" | grep -oP '\(\K[0-9.]+(?=\))' | tail -1 || true)
+    # Fall back to DHCP leases if ARP has nothing yet (early boot)
+    if [ -z "$new_ip" ]; then
+        new_ip=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
+            grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | tail -1 || true)
+    fi
+    if [ -n "$new_ip" ] && [ "$new_ip" != "$VM_IP" ]; then
+        [ -n "$VM_IP" ] && info "IP changed: $VM_IP -> $new_ip"
+        VM_IP="$new_ip"
+    fi
+}
 
 elapsed() {
     local secs=$(( $(date +%s) - START_TIME ))
@@ -73,6 +97,7 @@ while [ $# -gt 0 ]; do
         --ram)      RAM_MB="$2"; shift 2 ;;
         --vcpus)    VCPUS="$2"; shift 2 ;;
         --disk)     DISK_GB="$2"; shift 2 ;;
+        --disk-path) DISK_PATH="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 --iso <path> --config <config.json> [--name <vm-name>]"
             echo "       $0 --destroy <vm-name>"
@@ -85,6 +110,7 @@ while [ $# -gt 0 ]; do
             echo "  --ram <MB>         RAM in MB (default: 8192)"
             echo "  --vcpus <N>        vCPUs (default: 4)"
             echo "  --disk <GB>        Disk in GB (default: 64)"
+    echo "  --disk-path <dir>  Directory for VM disk image (default: libvirt pool)"
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;
@@ -110,8 +136,8 @@ fi
 [ -n "$CONFIG_FILE" ] || fail "--config is required"
 [ -f "$CONFIG_FILE" ] || fail "Config file not found: $CONFIG_FILE"
 
-command -v virsh >/dev/null         || fail "virsh not found"
-command -v virt-install >/dev/null   || fail "virt-install not found"
+command -v /usr/bin/virsh >/dev/null         || fail "virsh not found"
+command -v /usr/bin/virt-install >/dev/null   || fail "virt-install not found"
 command -v sshpass >/dev/null        || fail "sshpass not found"
 command -v jq >/dev/null             || fail "jq not found"
 command -v curl >/dev/null           || fail "curl not found"
@@ -145,16 +171,17 @@ info "Phase 1: Creating VM"
 virsh destroy "$VM_NAME" 2>/dev/null || true
 virsh undefine "$VM_NAME" --remove-all-storage 2>/dev/null || true
 
-virt-install \
+virt_install \
     --name "$VM_NAME" \
     --ram "$RAM_MB" \
     --vcpus "$VCPUS" \
-    --disk "size=${DISK_GB},format=qcow2" \
+    --disk "${DISK_PATH:+path=${DISK_PATH}/${VM_NAME}.qcow2,}size=${DISK_GB},format=qcow2" \
     --cdrom "$ISO_PATH" \
     --os-variant debian12 \
     --network "network=${NETWORK}" \
-    --graphics none \
+    --graphics vnc,listen=127.0.0.1 \
     --noautoconsole \
+    --check disk_size=off \
     --boot cdrom,hd
 
 pass "VM created: $VM_NAME"
@@ -209,11 +236,7 @@ VM_IP=""
 ELAPSED=0
 
 while [ "$ELAPSED" -lt "$FIRSTBOOT_TIMEOUT" ]; do
-    # Try to get IP from DHCP leases
-    if [ -z "$VM_IP" ]; then
-        VM_IP=$(virsh net-dhcp-leases "$NETWORK" 2>/dev/null | \
-            grep -i "$MAC" | awk '{print $5}' | cut -d'/' -f1 | head -1 || true)
-    fi
+    refresh_ip
 
     if [ -n "$VM_IP" ]; then
         # Try SSH connection
@@ -252,6 +275,11 @@ OTP_CODE=$(echo "$OTP_JSON" | jq -r '.code')
 
 pass "OTP: $OTP_CODE"
 
+# Lock the IP — networking is stable after first-boot completes.
+# DHCP lease table becomes unreliable after Proxmox reconfigures bridges.
+STABLE_IP="$VM_IP"
+info "Locking IP to $STABLE_IP for remaining phases"
+
 # =============================================================================
 # Phase 6 — Submit wizard config via /api/setup-test
 # =============================================================================
@@ -262,18 +290,41 @@ ADMIN_PUBLIC_SECRET=$(jq -r '.admin_public_secret // "blockhost-access"' "$CONFI
 ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOYER_KEY")
 [ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
 
-# Inject OTP + secrets into config (contracts deployed fresh by wizard)
+# Fetch broker registry address from GitHub (single source of truth)
+# CI always uses testnet registry
+REGISTRY_URL="https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry-testnet.json"
+BROKER_REGISTRY=$(curl -sf "$REGISTRY_URL" | jq -r '.registry_contract // empty')
+[ -n "$BROKER_REGISTRY" ] || fail "Could not fetch broker registry from $REGISTRY_URL"
+info "Broker registry: $BROKER_REGISTRY"
+
+# Look up the broker's requests contract from the on-chain registry (broker ID 1)
+# getBroker returns a struct; requestsContract is the second address field
+SEPOLIA_RPC="https://ethereum-sepolia-rpc.publicnode.com"
+RAW=$(cast call "$BROKER_REGISTRY" "getBroker(uint256)" 1 --rpc-url "$SEPOLIA_RPC") \
+    || fail "Could not call getBroker on registry $BROKER_REGISTRY"
+# Struct has offset pointer (32B), then operator (32B), then requestsContract (32B)
+# Address is last 20 bytes (40 hex chars) of its 32-byte slot
+RAW_HEX="${RAW#0x}"
+REQUESTS_CONTRACT="0x${RAW_HEX:152:40}"
+[ "$REQUESTS_CONTRACT" != "0x0000000000000000000000000000000000000000" ] \
+    || fail "Requests contract is zero address — broker not registered?"
+info "Requests contract: $REQUESTS_CONTRACT"
+
+# Inject OTP + secrets + broker registry into config
 SUBMIT_JSON=$(jq \
     --arg otp "$OTP_CODE" \
     --arg deployer_key "$DEPLOYER_KEY" \
     --arg admin_wallet "$ADMIN_WALLET" \
     --arg admin_sig "$ADMIN_SIGNATURE" \
+    --arg broker_registry "$BROKER_REGISTRY" \
     '. + {
         otp: $otp,
         admin_wallet: $admin_wallet,
         admin_signature: $admin_sig
     } | .blockchain += {
         deployer_key: $deployer_key
+    } | .ipv6 += {
+        broker_registry: $broker_registry
     }' "$CONFIG_FILE")
 
 RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -347,6 +398,35 @@ NFT_CONTRACT=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" \
 pass "NFT contract: $NFT_CONTRACT"
 
 # =============================================================================
+# Phase 9 — Reboot and wait for services
+# =============================================================================
+info "Phase 9: Rebooting VM (services start after reboot)"
+
+sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" "shutdown -r now" 2>/dev/null || true
+
+# Wait for SSH to go down
+sleep 10
+
+# Wait for SSH to come back
+ELAPSED=0
+REBOOT_TIMEOUT=300
+while [ "$ELAPSED" -lt "$REBOOT_TIMEOUT" ]; do
+    if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=5 \
+        "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active"; then
+        break
+    fi
+    wait_ "Waiting for reboot + services (${ELAPSED}s / ${REBOOT_TIMEOUT}s)"
+    sleep "$POLL_INTERVAL"
+    ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
+done
+
+sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=10 \
+    "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active" || \
+    fail "blockhost-monitor not running after reboot"
+
+pass "System rebooted, services running ($(elapsed))"
+
+# =============================================================================
 # Output — VM details for subsequent CI jobs
 # =============================================================================
 echo ""
@@ -363,4 +443,5 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "vm_name=$VM_NAME" >> "$GITHUB_OUTPUT"
     echo "vm_ip=$VM_IP" >> "$GITHUB_OUTPUT"
     echo "nft_contract=$NFT_CONTRACT" >> "$GITHUB_OUTPUT"
+    echo "requests_contract=$REQUESTS_CONTRACT" >> "$GITHUB_OUTPUT"
 fi

@@ -374,6 +374,68 @@ When built with `--testing`:
 - Testing marker at `/etc/blockhost/.testing-mode`
 - System validation runs as final finalization step
 
+### Unit Tests
+
+Three test suites run locally and in CI:
+
+**Solidity — Forge (AccessCredentialNFT)**
+```bash
+cd libpam-web3/contracts
+forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
+forge test -vv
+```
+26 tests covering minting, batch minting, data retrieval, updates (userEncrypted, expiration, animationUrl), token URIs with embedded signing pages, ERC721 enumeration/transfers, and expiration logic. Uses `vm.warp()` for time manipulation and `vm.prank()` for access control.
+
+**Solidity — Hardhat (BlockhostSubscriptions)**
+```bash
+cd blockhost-engine
+npm install
+npm test
+```
+39 tests covering plan management, stablecoin/token payments with Uniswap price calculation, subscription lifecycle (create, extend, cancel, expire), fund withdrawal, and security edge cases (low liquidity, slippage). Uses mock ERC20 tokens and a mock Uniswap V2 pair.
+
+**Rust (libpam-web3)**
+```bash
+cd libpam-web3
+cargo test --features nft
+```
+Compiles and runs any tests in the PAM module and web3-auth-svc. Currently no unit tests — the authentication path is validated through the end-to-end integration test.
+
+### Integration Test
+
+Exercises the full subscription → provisioning → NFT flow on a finalized system:
+
+```bash
+# Run on the BlockHost machine as the blockhost user
+sudo -u blockhost ./testing/integration-test.sh [--cleanup]
+```
+
+9 phases: pre-flight checks → wallet generation → funding from deployer → message signing → on-chain `buySubscription()` → wait for monitor to detect event + provision VM → verify VM via Proxmox API → verify NFT minted + decrypt `userEncrypted` → cleanup (optional: destroy VM, withdraw funds).
+
+Requires: finalized system, `blockhost-engine` running, deployer key, Foundry (`cast`), `pam_web3_tool`.
+
+### IPv6 Login Test
+
+Proves external users can reach and authenticate to a provisioned VM over carrier IPv6:
+
+```bash
+./testing/ipv6-login-test.sh --host <proxmox-ip> --private-key <wallet-key>
+```
+
+5 phases: pre-flight (ADB device, tools) → IPv6 ping from phone → SSH port reachability → full PAM login (capture prompt, sign message, feed signature, verify shell) → signing page HTTP check.
+
+Requires: ADB-connected Android phone with carrier IPv6, SSH key to Proxmox host, test wallet key from integration test.
+
+### CI/CD
+
+Three GitHub Actions workflows:
+
+| Workflow | Trigger | Runs on | What |
+|----------|---------|---------|------|
+| **CI — Tests & Package Build** | Push to `develop`, PR to `master` | GitHub cloud | Forge + Hardhat + Rust tests in parallel, package build + verify |
+| **ISO Build** | Manual dispatch, tag push `v*` | Self-hosted (`blockhost-iso`) | Build packages, build ISO, upload artifact on tagged releases |
+| **Integration Tests** | Manual dispatch | Self-hosted (`blockhost-proxmox`) | Boot VM from ISO, run wizard via API, run integration test, release IPv6 lease, destroy VM |
+
 ### Validation
 
 The validation module checks files, permissions, configs, services, and network after finalization:
