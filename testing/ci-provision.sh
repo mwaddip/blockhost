@@ -371,6 +371,35 @@ NFT_CONTRACT=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" \
 pass "NFT contract: $NFT_CONTRACT"
 
 # =============================================================================
+# Phase 9 — Reboot and wait for services
+# =============================================================================
+info "Phase 9: Rebooting VM (services start after reboot)"
+
+sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" "shutdown -r now" 2>/dev/null || true
+
+# Wait for SSH to go down
+sleep 10
+
+# Wait for SSH to come back
+ELAPSED=0
+REBOOT_TIMEOUT=300
+while [ "$ELAPSED" -lt "$REBOOT_TIMEOUT" ]; do
+    if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=5 \
+        "root@${VM_IP}" "systemctl is-active blockhost-engine" 2>/dev/null | grep -q "active"; then
+        break
+    fi
+    wait_ "Waiting for reboot + services (${ELAPSED}s / ${REBOOT_TIMEOUT}s)"
+    sleep "$POLL_INTERVAL"
+    ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
+done
+
+sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=10 \
+    "root@${VM_IP}" "systemctl is-active blockhost-engine" 2>/dev/null | grep -q "active" || \
+    fail "blockhost-engine not running after reboot"
+
+pass "System rebooted, services running ($(elapsed))"
+
+# =============================================================================
 # Output — VM details for subsequent CI jobs
 # =============================================================================
 echo ""
