@@ -137,9 +137,8 @@ jobs:
 
       - name: Release IPv6 tunnel lease
         if: ${{ needs.provision.outputs.nft_contract != '' }}
-        continue-on-error: true
         env:
-          DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
+          BROKER_OPERATOR_KEY: ${{ secrets.BROKER_OPERATOR_KEY }}
           NFT_CONTRACT: ${{ needs.provision.outputs.nft_contract }}
           RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
         run: |
@@ -148,7 +147,7 @@ jobs:
             "releaseAllocation(address)" \
             "$NFT_CONTRACT" \
             --rpc-url "$RPC_URL" \
-            --private-key "$DEPLOYER_KEY" \
+            --private-key "$BROKER_OPERATOR_KEY" \
             --json > /dev/null
           echo "IPv6 tunnel lease released"
 
