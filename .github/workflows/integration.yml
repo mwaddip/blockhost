@@ -60,6 +60,8 @@ jobs:
     runs-on: [self-hosted, blockhost-proxmox]
     outputs:
       wallet_key: ${{ steps.test.outputs.wallet_key }}
+      vm_ipv6: ${{ steps.test.outputs.vm_ipv6 }}
+      vm_name: ${{ steps.test.outputs.vm_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -106,35 +108,30 @@ jobs:
           echo "$OUTPUT"
           # Extract wallet key from output (last non-empty line after "Test wallet private key")
           WALLET_KEY=$(echo "$OUTPUT" | grep -A1 "Test wallet private key" | tail -1 | tr -d '[:space:]')
+          VM_IPV6=$(echo "$OUTPUT" | grep -A1 "VM IPv6 address" | tail -1 | tr -d '[:space:]')
+          VM_NAME=$(echo "$OUTPUT" | grep -A1 "VM name" | tail -1 | tr -d '[:space:]')
           echo "wallet_key=$WALLET_KEY" >> "$GITHUB_OUTPUT"
+          echo "vm_ipv6=$VM_IPV6" >> "$GITHUB_OUTPUT"
+          echo "vm_name=$VM_NAME" >> "$GITHUB_OUTPUT"
 
   ipv6-login-test:
     name: IPv6 Login Test
-    needs: [provision, integration-test]
+    needs: [integration-test]
     if: ${{ inputs.run_ipv6_test == true && needs.integration-test.result == 'success' }}
     runs-on: [self-hosted, blockhost-phone]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get VM IP
-        id: vm
-        run: |
-          if [ "${{ inputs.skip_provision }}" = "true" ]; then
-            VM_IP=$(virsh net-dhcp-leases default 2>/dev/null | \
-              grep "blockhost-ci" | awk '{print $5}' | cut -d'/' -f1 | tail -1)
-            echo "vm_ip=$VM_IP" >> "$GITHUB_OUTPUT"
-          else
-            echo "vm_ip=${{ needs.provision.outputs.vm_ip }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Run IPv6 login test
         env:
-          VM_IP: ${{ steps.vm.outputs.vm_ip }}
           WALLET_KEY: ${{ needs.integration-test.outputs.wallet_key }}
+          VM_IPV6: ${{ needs.integration-test.outputs.vm_ipv6 }}
+          VM_NAME: ${{ needs.integration-test.outputs.vm_name }}
         run: |
           ./testing/ipv6-login-test.sh \
-            --host "$VM_IP" \
-            --private-key "$WALLET_KEY"
+            --private-key "$WALLET_KEY" \
+            --ipv6 "$VM_IPV6" \
+            --vm-name "$VM_NAME"
 
   cleanup:
     name: Cleanup
