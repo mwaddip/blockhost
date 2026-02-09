@@ -633,18 +633,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 provisioner_summary = prov_mod.get_summary_data(dict(session))
             if hasattr(prov_mod, 'get_summary_template'):
                 provisioner_summary_template = prov_mod.get_summary_template()
-        elif not _provisioner:
-            # Fallback: hardcoded Proxmox summary for transition period
-            provisioner_summary = {
-                'node': proxmox.get('node'),
-                'storage': proxmox.get('storage'),
-                'bridge': proxmox.get('bridge'),
-                'vmid_start': proxmox.get('vmid_start'),
-                'vmid_end': proxmox.get('vmid_end'),
-                'ip_start': proxmox.get('ip_start'),
-                'ip_end': proxmox.get('ip_end'),
-                'gc_grace_days': proxmox.get('gc_grace_days', 7),
-            }
 
         if request.method == 'POST':
             if request.form.get('confirm') == 'yes':
@@ -1643,9 +1631,15 @@ def _build_vm_template(job_id: str):
         _jobs[job_id]['message'] = 'Downloading base image...'
         _jobs[job_id]['progress'] = 10
 
-        # Run template build script
+        # Run template build script via provisioner manifest
+        build_cmd = _provisioner['manifest']['commands']['build-template'] if _provisioner else None
+        if not build_cmd:
+            _jobs[job_id]['status'] = 'failed'
+            _jobs[job_id]['error'] = 'No provisioner installed'
+            return
+
         result = subprocess.run(
-            ['/opt/blockhost-provisioner-proxmox/scripts/build-template.sh'],
+            [build_cmd],
             capture_output=True,
             text=True,
             timeout=1800  # 30 minutes
@@ -3121,11 +3115,10 @@ def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
                 # Use the most recent one if multiple exist
                 libpam_deb = str(sorted(debs, key=lambda p: p.stat().st_mtime, reverse=True)[0])
 
-        # Build template - check both installed location and development location
-        build_script = Path('/usr/bin/blockhost-build-template')
-        if not build_script.exists():
-            build_script = Path('/opt/blockhost-provisioner-proxmox/scripts/build-template.sh')
-        if build_script.exists():
+        # Build template via provisioner manifest command
+        build_cmd = _provisioner['manifest']['commands']['build-template'] if _provisioner else None
+        build_script = Path(f'/usr/bin/{build_cmd}') if build_cmd else None
+        if build_script and build_script.exists():
             # Set up environment for build script
             env = os.environ.copy()
             env['TEMPLATE_VMID'] = str(template_vmid)

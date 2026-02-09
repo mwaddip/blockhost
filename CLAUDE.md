@@ -16,6 +16,19 @@
 
 **`installer/web/validate_system.py` must reflect the desired end state after wizard finalization.** After any change that affects the post-reboot system — new config files, changed file permissions, new services, new required keys in YAML/JSON configs, new environment variables, changed ownership, new systemd units — update `validate_system.py` so it verifies the change. This script is the definition of "a working system after reboot" and must stay in sync with what finalization actually produces.
 
+## Interface Integrity (PERSISTENT RULE)
+
+**When interfaces don't match, fix the interface — never wrap the mismatch.** If two components miscommunicate, the problem is in the contract definition, not in missing glue code. Do not write adapters, shims, or wrappers to paper over interface disagreements. Trace the mismatch to whichever side is wrong and fix it at the source. This applies across all boundaries: CLI contracts, wizard plugins, root agent actions, manifest schemas, and inter-session prompts. Duct tape hides the bug and breeds more duct tape.
+
+## Interface Contracts (REFERENCE)
+
+**Contract specs live in the `facts/` submodule (blockhost-facts repo).** Read and internalize the relevant contract before modifying any code that touches that boundary. Do not rely on memory or assumptions about how a component interfaces — read the contract.
+
+| Contract | Covers | Read when touching... |
+|----------|--------|----------------------|
+| `facts/PROVISIONER_INTERFACE.md` | Manifest, CLI commands, wizard plugin, root agent actions, first-boot hook | Provisioner integration, wizard, engine dispatch, first-boot |
+| `facts/COMMON_INTERFACE.md` | Config API, VM database, root agent protocol, cloud-init, dispatcher | Any import from `blockhost.*`, config files, root agent |
+
 ## Submodule Separation (CRITICAL RULE)
 
 **You CANNOT modify files in submodules.** The following directories are submodules with their own Claude sessions:

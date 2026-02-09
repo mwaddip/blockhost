@@ -16,3 +16,6 @@
 [submodule "blockhost-provisioner-libvirt"]
 	path = blockhost-provisioner-libvirt
 	url = git@github.com:mwaddip/blockhost-provisioner-libvirt.git
+[submodule "facts"]
+	path = facts
+	url = git@github.com:mwaddip/blockhost-facts.git
