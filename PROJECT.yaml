@@ -37,9 +37,9 @@ submodules:
   blockhost-common:
     packages: [blockhost-common]
     purpose: Shared config and database modules
-  blockhost-provisioner:
-    packages: [blockhost-provisioner]
-    purpose: VM creation, garbage collection, NFT minting
+  blockhost-provisioner-proxmox:
+    packages: [blockhost-provisioner-proxmox]
+    purpose: VM creation, garbage collection, NFT minting (Proxmox backend)
   blockhost-engine:
     packages: [blockhost-engine]
     service: blockhost-monitor.service

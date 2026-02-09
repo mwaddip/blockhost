@@ -144,7 +144,7 @@ For detailed component interfaces, configuration files, network topology, and th
 | Component | Language | Role |
 |-----------|----------|------|
 | **blockhost-engine** | TypeScript | Monitors blockchain events, triggers provisioning, admin commands, fund management, `bw`/`ab` CLIs |
-| **blockhost-provisioner** | Python | VM lifecycle: create, suspend, destroy, resume, template build, NFT minting |
+| **blockhost-provisioner-proxmox** | Python | VM lifecycle: create, suspend, destroy, resume, template build, NFT minting |
 | **blockhost-common** | Python | Shared library: config loading, VM database, root agent client |
 | **libpam-web3** | Rust | PAM module (in VMs) + host tools: wallet auth at SSH, ECIES encryption |
 | **blockhost-broker-client** | Python | IPv6 prefix allocation via on-chain broker registry + WireGuard tunnel |

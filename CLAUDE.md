@@ -22,7 +22,7 @@
 
 - `libpam-web3/`
 - `blockhost-common/`
-- `blockhost-provisioner/`
+- `blockhost-provisioner-proxmox/`
 - `blockhost-engine/`
 - `blockhost-broker/`
 
@@ -73,7 +73,7 @@ Packages built from submodules during first-boot:
 | libpam-web3 | `packaging/build-deb-tools.sh` | libpam-web3-tools | Proxmox host |
 | libpam-web3 | `packaging/build-deb.sh` | libpam-web3 | VM template dir |
 | blockhost-common | `build.sh` | blockhost-common | Proxmox host |
-| blockhost-provisioner | `build-deb.sh` | blockhost-provisioner | Proxmox host |
+| blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Proxmox host |
 | blockhost-engine | `packaging/build.sh` | blockhost-engine | Proxmox host |
 | blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Proxmox host |
 

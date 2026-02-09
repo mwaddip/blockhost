@@ -85,7 +85,7 @@ blockhost/
 |-----------|------------|---------|
 | `libpam-web3/` | libpam-web3-tools (host), libpam-web3 (template) | PAM module, signing page, crypto tools |
 | `blockhost-common/` | blockhost-common | Shared config loading, VM database |
-| `blockhost-provisioner/` | blockhost-provisioner | VM creation via Terraform, NFT minting |
+| `blockhost-provisioner-proxmox/` | blockhost-provisioner-proxmox | VM creation via Terraform, NFT minting |
 | `blockhost-engine/` | blockhost-engine | Blockchain event monitor, signup page generator |
 | `blockhost-broker/` | blockhost-broker-client | IPv6 tunnel broker client |
 
@@ -107,7 +107,7 @@ xorriso cpio gzip dpkg isolinux coreutils findutils sed wget/curl
 | forge | libpam-web3-tools, blockhost-engine | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
 | node 18+ | blockhost-engine | https://nodejs.org/ or nvm |
 | npm | blockhost-engine | (comes with node) |
-| python3 | blockhost-provisioner, blockhost-broker | `apt install python3` |
+| python3 | blockhost-provisioner-proxmox, blockhost-broker | `apt install python3` |
 | git | submodule operations | `apt install git` |
 | curl | various downloads | `apt install curl` |
 
@@ -128,7 +128,7 @@ Builds 6 packages in dependency order:
 | 1 | libpam-web3-tools | libpam-web3/ | `packaging/build-deb-tools.sh` | packages/host/ |
 | 2 | libpam-web3 | libpam-web3/ | `packaging/build-deb.sh` | packages/template/ |
 | 3 | blockhost-common | blockhost-common/ | `build.sh` | packages/host/ |
-| 4 | blockhost-provisioner | blockhost-provisioner/ | `build-deb.sh` | packages/host/ |
+| 4 | blockhost-provisioner-proxmox | blockhost-provisioner-proxmox/ | `build-deb.sh` | packages/host/ |
 | 5 | blockhost-engine | blockhost-engine/ | `packaging/build.sh` | packages/host/ |
 | 6 | blockhost-broker-client | blockhost-broker/ | `scripts/build-deb.sh` | packages/host/ |
 
@@ -193,7 +193,7 @@ Runs once via `blockhost-firstboot.service` (condition: `/var/lib/blockhost/.set
 Package install order (respects dependencies):
 1. blockhost-common
 2. libpam-web3-tools
-3. blockhost-provisioner
+3. blockhost-provisioner-proxmox
 4. blockhost-engine
 5. blockhost-broker-client
 
@@ -280,7 +280,7 @@ User → Blockchain (purchase subscription)
               ↓
        blockhost-engine (monitors events)
               ↓
-       blockhost-provisioner (creates VM via Terraform)
+       blockhost-provisioner-proxmox (creates VM via Terraform)
               ↓
        Mints NFT with encrypted connection details
               ↓

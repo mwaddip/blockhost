@@ -93,7 +93,7 @@ Each submodule has a defined scope. Keep functionality in the right place.
 | Submodule | Scope | Contains |
 |-----------|-------|----------|
 | **blockhost-common** | Shared libraries | Config loading, VM database, root agent Python client |
-| **blockhost-provisioner** | VM lifecycle | Create, suspend, destroy, resume, template build, NFT mint |
+| **blockhost-provisioner-proxmox** | VM lifecycle | Create, suspend, destroy, resume, template build, NFT mint |
 | **blockhost-engine** | Blockchain interaction | Event monitor, admin commands, fund manager, `bw`/`ab` CLIs, root agent TS client |
 | **libpam-web3** | Authentication + crypto | PAM module (in VMs), `pam_web3_tool` CLI, signing page, ECIES encryption |
 | **blockhost-broker** | IPv6 allocation | Broker client, on-chain registry interaction, WireGuard config |
@@ -102,7 +102,7 @@ Each submodule has a defined scope. Keep functionality in the right place.
 ### Guidelines
 
 - **If multiple submodules need it** → put it in `blockhost-common`.
-- **If it touches Proxmox/Terraform/VMs** → `blockhost-provisioner`.
+- **If it touches Proxmox/Terraform/VMs** → `blockhost-provisioner-proxmox`.
 - **If it watches the chain or manages wallets** → `blockhost-engine`.
 - **If it involves PAM, ECIES, or runs inside VMs** → `libpam-web3`.
 - **If it only runs during installation** → main repo.

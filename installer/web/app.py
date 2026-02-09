@@ -1645,7 +1645,7 @@ def _build_vm_template(job_id: str):
 
         # Run template build script
         result = subprocess.run(
-            ['/opt/blockhost-provisioner/scripts/build-template.sh'],
+            ['/opt/blockhost-provisioner-proxmox/scripts/build-template.sh'],
             capture_output=True,
             text=True,
             timeout=1800  # 30 minutes
@@ -3124,7 +3124,7 @@ def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
         # Build template - check both installed location and development location
         build_script = Path('/usr/bin/blockhost-build-template')
         if not build_script.exists():
-            build_script = Path('/opt/blockhost-provisioner/scripts/build-template.sh')
+            build_script = Path('/opt/blockhost-provisioner-proxmox/scripts/build-template.sh')
         if build_script.exists():
             # Set up environment for build script
             env = os.environ.copy()

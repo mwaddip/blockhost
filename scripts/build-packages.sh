@@ -125,25 +125,25 @@ fi
 echo ""
 
 #
-# 4. blockhost-provisioner
+# 4. blockhost-provisioner-proxmox
 #
-log "=== Building blockhost-provisioner ==="
-if [ -f "$PROJECT_DIR/blockhost-provisioner/build-deb.sh" ]; then
-    cd "$PROJECT_DIR/blockhost-provisioner"
+log "=== Building blockhost-provisioner-proxmox ==="
+if [ -f "$PROJECT_DIR/blockhost-provisioner-proxmox/build-deb.sh" ]; then
+    cd "$PROJECT_DIR/blockhost-provisioner-proxmox"
     rm -rf build
     if ./build-deb.sh; then
-        DEB=$(find build -name "blockhost-provisioner_*.deb" -type f | head -1)
+        DEB=$(find build -name "blockhost-provisioner-proxmox_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$HOST_PKG_DIR/"
-            BUILT_PACKAGES+=("blockhost-provisioner")
+            BUILT_PACKAGES+=("blockhost-provisioner-proxmox")
             log "Built: $(basename "$DEB")"
         fi
     else
-        FAILED_PACKAGES+=("blockhost-provisioner")
-        warn "Failed to build blockhost-provisioner"
+        FAILED_PACKAGES+=("blockhost-provisioner-proxmox")
+        warn "Failed to build blockhost-provisioner-proxmox"
     fi
 else
-    warn "blockhost-provisioner/build-deb.sh not found"
+    warn "blockhost-provisioner-proxmox/build-deb.sh not found"
 fi
 echo ""
 

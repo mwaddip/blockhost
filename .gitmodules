@@ -4,12 +4,12 @@
 [submodule "blockhost-common"]
 	path = blockhost-common
 	url = https://github.com/mwaddip/blockhost-common
-[submodule "blockhost-provisioner"]
-	path = blockhost-provisioner
-	url = https://github.com/mwaddip/blockhost-provisioner
 [submodule "blockhost-engine"]
 	path = blockhost-engine
 	url = https://github.com/mwaddip/blockhost-engine
 [submodule "blockhost-broker"]
 	path = blockhost-broker
 	url = https://github.com/mwaddip/blockhost-broker
+[submodule "blockhost-provisioner-proxmox"]
+	path = blockhost-provisioner-proxmox
+	url = https://github.com/mwaddip/blockhost-provisioner-proxmox

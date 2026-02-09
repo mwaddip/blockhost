@@ -43,7 +43,7 @@ if [ -d "$HOST_PKG_DIR" ] && ls "$HOST_PKG_DIR"/*.deb >/dev/null 2>&1; then
     INSTALL_ORDER=(
         "blockhost-common"
         "libpam-web3-tools"
-        "blockhost-provisioner"
+        "blockhost-provisioner-proxmox"
         "blockhost-engine"
         "blockhost-broker-client"
     )

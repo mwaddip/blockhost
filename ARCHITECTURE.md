@@ -58,7 +58,7 @@ blockhost/
 └── submodules (READ-ONLY, own repos):
     ├── libpam-web3/
     ├── blockhost-common/
-    ├── blockhost-provisioner/
+    ├── blockhost-provisioner-proxmox/
     ├── blockhost-engine/
     └── blockhost-broker/
 ```
@@ -72,7 +72,7 @@ build-packages.sh
   → libpam-web3/packaging/build-deb-tools.sh  → packages/host/libpam-web3-tools_*.deb
   → libpam-web3/packaging/build-deb.sh        → packages/template/libpam-web3_*.deb
   → blockhost-common/build.sh                 → packages/host/blockhost-common_*.deb
-  → blockhost-provisioner/build-deb.sh        → packages/host/blockhost-provisioner_*.deb
+  → blockhost-provisioner-proxmox/build-deb.sh → packages/host/blockhost-provisioner-proxmox_*.deb
   → blockhost-engine/packaging/build.sh       → packages/host/blockhost-engine_*.deb
   → blockhost-broker/scripts/build-deb.sh     → packages/host/blockhost-broker-client_*.deb
 
@@ -117,7 +117,7 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
     → Hook path: manifest.setup.first_boot_hook (e.g. provisioner-hooks/first-boot.sh)
     → Proxmox hook: hostname fix, install proxmox-ve, terraform, libguestfs-tools
     → Receives STATE_DIR, LOG_FILE as env vars; uses own step markers
-    → Requires packages installed first (manifest + hook script are in blockhost-provisioner.deb)
+    → Requires packages installed first (manifest + hook script are in blockhost-provisioner-proxmox.deb)
   Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/
   Step 4 (.step-network):             Verify network connectivity (DHCP fallback)
   Step 5 (.step-otp):                 Generate OTP → /run/blockhost/otp.json, display on /etc/issue
@@ -360,11 +360,11 @@ Directory: `/etc/blockhost/`
 | server.key | hex 64 chars | root:blockhost | 0640 | keypair | blockhost-engine, provisioner |
 | server.pubkey | hex 0x04+... | root:blockhost | 0644 | keypair | signup page, NFT mint |
 | deployer.key | hex 64 chars | root:blockhost | 0640 | wallet | contract calls (cast send) |
-| db.yaml | YAML | root:blockhost | 0644 | config | blockhost-provisioner, blockhost-gc |
-| web3-defaults.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, blockhost-provisioner |
+| db.yaml | YAML | root:blockhost | 0644 | config | blockhost-provisioner-proxmox, blockhost-gc |
+| web3-defaults.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, blockhost-provisioner-proxmox |
 | blockhost.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, signup generator |
 | https.json | JSON | root:blockhost | 0644 | https | blockhost-signup |
-| pve-token | text | root:blockhost | 0640 | token | blockhost-provisioner (Terraform) |
+| pve-token | text | root:blockhost | 0640 | token | blockhost-provisioner-proxmox (Terraform) |
 | terraform_ssh_key | PEM | root:blockhost | 0640 | token | Terraform SSH provisioner |
 | terraform_ssh_key.pub | PEM | root:blockhost | 0644 | token | VM authorized_keys |
 | admin-signature.key | hex | root:blockhost | 0640 | config | admin command verification |
@@ -505,13 +505,13 @@ db.mark_nft_failed(token_id) # If VM creation fails (never reuse failed IDs)
 Reads: `/etc/blockhost/db.yaml`, `/etc/blockhost/web3-defaults.yaml`
 Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
-**Dependency**: Required by blockhost-provisioner and blockhost-engine.
+**Dependency**: Required by blockhost-provisioner-proxmox and blockhost-engine.
 
-### blockhost-provisioner
+### blockhost-provisioner-proxmox
 
 | Package | Build | Install target |
 |---------|-------|----------------|
-| blockhost-provisioner | build-deb.sh | Proxmox host |
+| blockhost-provisioner-proxmox | build-deb.sh | Proxmox host |
 
 **Scripts**:
 

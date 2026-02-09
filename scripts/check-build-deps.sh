@@ -161,7 +161,7 @@ main() {
     # npm (blockhost-engine)
     check_command npm npm
 
-    # Python 3 (blockhost-provisioner, blockhost-broker)
+    # Python 3 (blockhost-provisioner-proxmox, blockhost-broker)
     if command -v python3 >/dev/null 2>&1; then
         log_ok "python3 ($(python3 --version 2>/dev/null))"
     else
@@ -232,7 +232,7 @@ main() {
     local required_host_pkgs=(
         "blockhost-common"
         "libpam-web3-tools"
-        "blockhost-provisioner"
+        "blockhost-provisioner-proxmox"
         "blockhost-engine"
         "blockhost-broker-client"
     )

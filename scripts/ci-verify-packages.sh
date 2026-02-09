@@ -44,7 +44,7 @@ echo ""
 # Host packages (5)
 check_package "$HOST_DIR" "blockhost-common_*.deb"        "blockhost-common"
 check_package "$HOST_DIR" "libpam-web3-tools_*.deb"       "libpam-web3-tools"
-check_package "$HOST_DIR" "blockhost-provisioner_*.deb"    "blockhost-provisioner"
+check_package "$HOST_DIR" "blockhost-provisioner-proxmox_*.deb" "blockhost-provisioner-proxmox"
 check_package "$HOST_DIR" "blockhost-engine_*.deb"         "blockhost-engine"
 check_package "$HOST_DIR" "blockhost-broker-client_*.deb"  "blockhost-broker-client"
 
