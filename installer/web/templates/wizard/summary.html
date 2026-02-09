@@ -296,12 +296,6 @@
                     <div class="contract-addr-row">
                         <span class="contract-addr-label">Token ID:</span>
                         <code id="mint-nft-token-id" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('mint-nft-token-id')" title="Copy">&#128203;</button>
-                    </div>
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">TX Hash:</span>
-                        <code id="mint-nft-tx-hash" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('mint-nft-tx-hash')" title="Copy">&#128203;</button>
                     </div>
                 </div>
             </div>
@@ -341,9 +335,7 @@
         </p>
         <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
             <button onclick="reboot()" class="btn btn-primary">Reboot System</button>
-            <a href="https://{{ request.host.split(':')[0] }}:8006" class="btn btn-secondary">
-                Open Proxmox
-            </a>
+            <a href="/api/finalize/config" class="btn btn-secondary" download>Download Encrypted Config</a>
         </div>
     </div>
 
@@ -828,9 +820,6 @@ function updateProgress(data) {
                 if (stepData.data.token_id) {
                     document.getElementById('mint-nft-token-id').textContent = stepData.data.token_id;
                 }
-                if (stepData.data.tx_hash) {
-                    document.getElementById('mint-nft-tx-hash').textContent = stepData.data.tx_hash;
-                }
                 document.getElementById('mint-nft-data').classList.remove('hidden');
             }
         } else if (stepData.status === 'in_progress' || stepId === currentStep) {
@@ -960,14 +949,11 @@ function copyAddress(elementId) {
 }
 
 function reboot() {
-    if (!confirm('This will reboot the system. Continue?')) {
+    if (!confirm('Setup is complete. The system will reboot now. After reboot the system is ready to accept orders.')) {
         return;
     }
 
     fetch('/api/reboot', {method: 'POST'})
-    .then(() => {
-        alert('System is rebooting. You will need to reconnect after reboot completes.');
-    })
     .catch(error => {
         alert('Reboot failed: ' + error.message);
     });

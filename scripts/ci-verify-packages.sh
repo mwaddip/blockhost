@@ -3,6 +3,8 @@
 # Verify all BlockHost .deb packages exist with non-zero size.
 # Used by CI after build-packages.sh to confirm build output.
 #
+# Usage: ./scripts/ci-verify-packages.sh --backend <name>
+#
 # Exit 1 if any package is missing or empty.
 #
 
@@ -10,6 +12,32 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BACKEND=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --backend)
+            BACKEND="$2"
+            shift 2
+            ;;
+        --backend=*)
+            BACKEND="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 --backend <provisioner-name>"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$BACKEND" ]; then
+    echo "Error: --backend is required"
+    echo "Usage: $0 --backend <provisioner-name>"
+    exit 1
+fi
 
 HOST_DIR="$PROJECT_DIR/packages/host"
 TEMPLATE_DIR="$PROJECT_DIR/packages/template"
@@ -44,7 +72,7 @@ echo ""
 # Host packages (5)
 check_package "$HOST_DIR" "blockhost-common_*.deb"        "blockhost-common"
 check_package "$HOST_DIR" "libpam-web3-tools_*.deb"       "libpam-web3-tools"
-check_package "$HOST_DIR" "blockhost-provisioner-proxmox_*.deb" "blockhost-provisioner-proxmox"
+check_package "$HOST_DIR" "blockhost-provisioner-${BACKEND}_*.deb" "blockhost-provisioner-${BACKEND}"
 check_package "$HOST_DIR" "blockhost-engine_*.deb"         "blockhost-engine"
 check_package "$HOST_DIR" "blockhost-broker-client_*.deb"  "blockhost-broker-client"
 

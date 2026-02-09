@@ -5,7 +5,7 @@
 # Creates a preseeded Debian 12 ISO that:
 # 1. Auto-installs Debian
 # 2. Installs BlockHost first-boot service
-# 3. On first boot: installs Proxmox VE and runs web installer
+# 3. On first boot: installs provisioner backend and runs web installer
 #
 
 set -e
@@ -20,9 +20,10 @@ VERSION="${VERSION:-0.1.0}"
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
 OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 
-# Testing mode settings
+# Build settings
 TESTING_MODE=false
 BUILD_DEBS=false
+BACKEND=""
 APT_PROXY="http://192.168.122.1:3142"
 
 # Colors
@@ -36,12 +37,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 usage() {
-    echo "Usage: $0 [OPTIONS]"
+    echo "Usage: $0 --backend <name> [OPTIONS]"
+    echo ""
+    echo "Required:"
+    echo "  --backend <name>  Provisioner backend (e.g., proxmox, libvirt)"
     echo ""
     echo "Options:"
-    echo "  --build-deb  Build all .deb packages from submodules before ISO creation"
-    echo "  --testing    Enable testing mode (apt proxy, SSH root login)"
-    echo "  --help       Show this help message"
+    echo "  --build-deb       Build all .deb packages from submodules before ISO creation"
+    echo "  --testing         Enable testing mode (apt proxy, SSH root login)"
+    echo "  --help            Show this help message"
     echo ""
     echo "Testing mode enables:"
     echo "  - apt proxy at $APT_PROXY for faster package downloads"
@@ -53,6 +57,14 @@ parse_args() {
         case $1 in
             --build-deb)
                 BUILD_DEBS=true
+                shift
+                ;;
+            --backend)
+                BACKEND="$2"
+                shift 2
+                ;;
+            --backend=*)
+                BACKEND="${1#*=}"
                 shift
                 ;;
             --testing)
@@ -327,8 +339,13 @@ cleanup() {
 main() {
     parse_args "$@"
 
+    if [ -z "$BACKEND" ]; then
+        error "--backend is required\nUse --help for usage"
+    fi
+
     log "BlockHost ISO Builder v${VERSION}"
     log "Building from Debian 12 base"
+    log "Backend: $BACKEND"
 
     if [ "$TESTING_MODE" = "true" ]; then
         log "TESTING MODE ENABLED"
@@ -338,7 +355,7 @@ main() {
 
     if [ "$BUILD_DEBS" = "true" ]; then
         log "Building .deb packages from submodules..."
-        if ! "${SCRIPT_DIR}/build-packages.sh"; then
+        if ! "${SCRIPT_DIR}/build-packages.sh" --backend "$BACKEND"; then
             error "Package build failed. Fix errors above and retry."
         fi
         log "All packages built successfully"

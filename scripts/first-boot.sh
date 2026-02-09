@@ -88,7 +88,7 @@ fi
 # Step 2: Install BlockHost packages
 #
 # Packages must be installed before the provisioner hook because the hook
-# script and manifest are shipped inside blockhost-provisioner-proxmox.deb.
+# script and manifest are shipped inside the provisioner .deb.
 #
 STEP_PACKAGES="${STATE_DIR}/.step-packages"
 if [ ! -f "$STEP_PACKAGES" ]; then
@@ -99,7 +99,19 @@ if [ ! -f "$STEP_PACKAGES" ]; then
     elif [ -d "$BLOCKHOST_DIR/packages/host" ]; then
         # Fallback: install packages directly
         log "Installing host packages..."
-        for pkg in blockhost-common libpam-web3-tools blockhost-provisioner-proxmox blockhost-engine blockhost-broker-client; do
+
+        # Auto-detect provisioner package
+        PROV_DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "blockhost-provisioner-*_*.deb" -type f 2>/dev/null | head -1)
+        PROV_PKG=""
+        if [ -n "$PROV_DEB" ]; then
+            PROV_PKG=$(basename "$PROV_DEB" | sed 's/_.*$//')
+        fi
+
+        FALLBACK_ORDER=(blockhost-common libpam-web3-tools)
+        [ -n "$PROV_PKG" ] && FALLBACK_ORDER+=("$PROV_PKG")
+        FALLBACK_ORDER+=(blockhost-engine blockhost-broker-client)
+
+        for pkg in "${FALLBACK_ORDER[@]}"; do
             DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "${pkg}_*.deb" -type f 2>/dev/null | head -1)
             if [ -n "$DEB" ] && [ -f "$DEB" ]; then
                 log "Installing: $(basename "$DEB")"
@@ -160,7 +172,7 @@ fi
 #
 # The provisioner hook handles installing hypervisor-specific software
 # (e.g. Proxmox VE, Terraform). Discovered from the provisioner manifest
-# installed by blockhost-provisioner-proxmox.deb in Step 2.
+# installed by the provisioner .deb in Step 2.
 #
 STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
 if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then

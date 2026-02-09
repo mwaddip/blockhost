@@ -5,6 +5,12 @@ on:
     branches: [develop]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: 'Provisioner backend to build'
+        type: string
+        default: 'proxmox'
 
 jobs:
   rust-tests:
@@ -12,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init required submodules
+        run: git submodule update --init libpam-web3
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -33,8 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init required submodules
+        run: git submodule update --init blockhost-engine
 
       - uses: actions/setup-node@v4
         with:
@@ -53,8 +59,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init required submodules
+        run: git submodule update --init libpam-web3
 
       - uses: foundry-rs/foundry-toolchain@v1
 
@@ -69,10 +75,14 @@ jobs:
   build-packages:
     name: Build Packages
     runs-on: ubuntu-latest
+    env:
+      BACKEND: ${{ inputs.backend || 'proxmox' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init required submodules
+        run: |
+          git submodule update --init blockhost-common blockhost-engine blockhost-broker libpam-web3 facts
+          git submodule update --init blockhost-provisioner-${{ env.BACKEND }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -90,10 +100,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev libclang-dev
 
       - name: Build all packages
-        run: ./scripts/build-packages.sh
+        run: ./scripts/build-packages.sh --backend "$BACKEND"
 
       - name: Verify packages
-        run: ./scripts/ci-verify-packages.sh
+        run: ./scripts/ci-verify-packages.sh --backend "$BACKEND"
 
       - name: Upload host packages
         uses: actions/upload-artifact@v4

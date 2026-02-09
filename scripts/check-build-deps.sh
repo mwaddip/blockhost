@@ -229,10 +229,20 @@ main() {
     echo ""
     echo "  Checking specific packages..."
 
+    # Auto-detect provisioner package or use --backend if provided
+    local prov_pkg=""
+    local prov_deb
+    prov_deb=$(find "${PROJECT_DIR}/packages/host" -maxdepth 1 -name "blockhost-provisioner-*_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$prov_deb" ]; then
+        prov_pkg=$(basename "$prov_deb" | sed 's/_.*$//')
+    fi
+
     local required_host_pkgs=(
         "blockhost-common"
         "libpam-web3-tools"
-        "blockhost-provisioner-proxmox"
+    )
+    [ -n "$prov_pkg" ] && required_host_pkgs+=("$prov_pkg")
+    required_host_pkgs+=(
         "blockhost-engine"
         "blockhost-broker-client"
     )

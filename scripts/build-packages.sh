@@ -6,7 +6,13 @@
 #   packages/host/     - Packages to install on Proxmox host
 #   packages/template/ - Packages for VM template (libpam-web3)
 #
-# Usage: ./scripts/build-packages.sh
+# Usage: ./scripts/build-packages.sh --backend <provisioner-name>
+#
+# Example: ./scripts/build-packages.sh --backend proxmox
+#          ./scripts/build-packages.sh --backend libvirt
+#
+# The --backend flag tells the script which provisioner submodule to build.
+# It looks for ./blockhost-provisioner-<name>/ and runs its build-deb.sh.
 #
 # Prerequisites:
 #   - Rust toolchain (for libpam-web3)
@@ -18,6 +24,38 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BACKEND=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --backend)
+            BACKEND="$2"
+            shift 2
+            ;;
+        --backend=*)
+            BACKEND="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 --backend <provisioner-name>"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$BACKEND" ]; then
+    echo "Error: --backend is required"
+    echo "Usage: $0 --backend <provisioner-name>"
+    exit 1
+fi
+
+PROVISIONER_DIR="$PROJECT_DIR/blockhost-provisioner-${BACKEND}"
+if [ ! -d "$PROVISIONER_DIR" ]; then
+    echo "Error: Provisioner directory not found: $PROVISIONER_DIR"
+    exit 1
+fi
 
 # Output directories
 HOST_PKG_DIR="$PROJECT_DIR/packages/host"
@@ -125,25 +163,26 @@ fi
 echo ""
 
 #
-# 4. blockhost-provisioner-proxmox
+# 4. blockhost-provisioner-${BACKEND}
 #
-log "=== Building blockhost-provisioner-proxmox ==="
-if [ -f "$PROJECT_DIR/blockhost-provisioner-proxmox/build-deb.sh" ]; then
-    cd "$PROJECT_DIR/blockhost-provisioner-proxmox"
+PROV_PKG="blockhost-provisioner-${BACKEND}"
+log "=== Building ${PROV_PKG} ==="
+if [ -f "${PROVISIONER_DIR}/build-deb.sh" ]; then
+    cd "$PROVISIONER_DIR"
     rm -rf build
     if ./build-deb.sh; then
-        DEB=$(find build -name "blockhost-provisioner-proxmox_*.deb" -type f | head -1)
+        DEB=$(find build -name "${PROV_PKG}_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$HOST_PKG_DIR/"
-            BUILT_PACKAGES+=("blockhost-provisioner-proxmox")
+            BUILT_PACKAGES+=("${PROV_PKG}")
             log "Built: $(basename "$DEB")"
         fi
     else
-        FAILED_PACKAGES+=("blockhost-provisioner-proxmox")
-        warn "Failed to build blockhost-provisioner-proxmox"
+        FAILED_PACKAGES+=("${PROV_PKG}")
+        warn "Failed to build ${PROV_PKG}"
     fi
 else
-    warn "blockhost-provisioner-proxmox/build-deb.sh not found"
+    warn "${PROV_PKG}/build-deb.sh not found"
 fi
 echo ""
 

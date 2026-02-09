@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from flask import (
-    Flask, render_template, request, redirect, url_for,
+    Flask, Response, render_template, request, redirect, url_for,
     session, flash, jsonify, abort
 )
 
@@ -411,6 +411,54 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         # If wallet already connected, allow re-doing or skip
         return render_template('wizard/wallet.html')
+
+    @app.route('/api/restore-config', methods=['POST'])
+    @require_auth
+    def api_restore_config():
+        """Decrypt an uploaded config file and restore session data."""
+        admin_signature = request.form.get('admin_signature', '').strip()
+        if not admin_signature or not admin_signature.startswith('0x'):
+            return jsonify({'error': 'Missing admin signature'}), 400
+
+        uploaded = request.files.get('config_file')
+        if not uploaded:
+            return jsonify({'error': 'No file uploaded'}), 400
+
+        ciphertext = uploaded.read().decode('utf-8', errors='ignore').strip()
+        if not ciphertext.startswith('0x'):
+            return jsonify({'error': 'Invalid config file (expected hex ciphertext)'}), 400
+
+        try:
+            result = subprocess.run(
+                ['pam_web3_tool', 'decrypt-symmetric',
+                 '--signature', admin_signature,
+                 '--ciphertext', ciphertext],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return jsonify({'error': 'Decryption failed — wrong wallet or corrupted file'}), 400
+
+            import yaml
+            config = yaml.safe_load(result.stdout)
+            if not isinstance(config, dict):
+                return jsonify({'error': 'Decrypted content is not valid config'}), 400
+
+            # Restore session data from config
+            for key in ('blockchain', 'proxmox', 'ipv6', 'admin_commands',
+                        'admin_wallet', 'admin_public_secret'):
+                if key in config:
+                    session[key] = config[key]
+
+            # Signature comes from the current session (just signed), not the file
+            session['admin_signature'] = admin_signature
+
+            return jsonify({'status': 'ok', 'redirect': url_for('wizard_summary')})
+        except FileNotFoundError:
+            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': 'Decryption timed out'}), 500
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/wizard/network', methods=['GET', 'POST'])
     @require_auth
@@ -1066,6 +1114,51 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """Get finalization status from persistent state."""
         setup_state = SetupState()
         return jsonify(setup_state.to_api_response())
+
+    @app.route('/api/finalize/config')
+    @require_auth
+    def api_finalize_config():
+        """Download applied configuration, encrypted with admin's wallet key."""
+        setup_state = SetupState()
+        config = setup_state.state.get('config', {})
+        if not config:
+            return jsonify({'error': 'No configuration available'}), 404
+
+        import yaml
+        plaintext = yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+        admin_signature = config.get('admin_signature', '')
+        if not admin_signature:
+            return jsonify({'error': 'No admin signature available for encryption'}), 500
+
+        try:
+            result = subprocess.run(
+                ['pam_web3_tool', 'encrypt-symmetric',
+                 '--signature', admin_signature,
+                 '--plaintext', plaintext],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return jsonify({'error': f'Encryption failed: {result.stderr}'}), 500
+
+            ciphertext_hex = None
+            for line in result.stdout.split('\n'):
+                if 'Ciphertext' in line and '0x' in line:
+                    ciphertext_hex = line[line.index('0x'):].strip()
+                    break
+
+            if not ciphertext_hex:
+                return jsonify({'error': 'Could not parse encrypted output'}), 500
+
+            return Response(
+                ciphertext_hex,
+                mimetype='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=blockhost-config.enc'},
+            )
+        except FileNotFoundError:
+            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': 'Encryption timed out'}), 500
 
     @app.route('/api/finalize/retry', methods=['POST'])
     @require_auth

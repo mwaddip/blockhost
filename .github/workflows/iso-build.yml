@@ -3,6 +3,10 @@ name: ISO Build
 on:
   workflow_dispatch:
     inputs:
+      backend:
+        description: 'Provisioner backend to build'
+        type: string
+        default: 'proxmox'
       testing_mode:
         description: 'Build with --testing flag (SSH root login, apt proxy, testing marker)'
         type: boolean
@@ -15,10 +19,14 @@ jobs:
   build-iso:
     name: Build BlockHost ISO
     runs-on: [self-hosted, blockhost-iso]
+    env:
+      BACKEND: ${{ inputs.backend || 'proxmox' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init required submodules
+        run: |
+          git submodule update --init blockhost-common blockhost-engine blockhost-broker libpam-web3 facts
+          git submodule update --init blockhost-provisioner-${{ env.BACKEND }}
 
       - name: Symlink base ISO from project directory
         run: |
@@ -34,21 +42,21 @@ jobs:
           fi
 
       - name: Build packages
-        run: ./scripts/build-packages.sh
+        run: ./scripts/build-packages.sh --backend "$BACKEND"
 
       - name: Verify packages
-        run: ./scripts/ci-verify-packages.sh
+        run: ./scripts/ci-verify-packages.sh --backend "$BACKEND"
 
       - name: Remove old ISO
         run: sudo rm -f build/blockhost_0.1.0.iso
 
       - name: Build ISO
         run: |
-          ARGS=""
+          ARGS="--backend $BACKEND"
           # workflow_dispatch: use input; tag push: always enable testing
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ inputs.testing_mode }}" = "true" ]; then
-              ARGS="--testing"
+              ARGS="$ARGS --testing"
             fi
           fi
           sudo ./scripts/build-iso.sh $ARGS

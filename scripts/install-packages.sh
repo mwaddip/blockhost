@@ -39,11 +39,20 @@ log "Installing BlockHost packages..."
 if [ -d "$HOST_PKG_DIR" ] && ls "$HOST_PKG_DIR"/*.deb >/dev/null 2>&1; then
     log "Installing host packages from $HOST_PKG_DIR"
 
+    # Auto-detect provisioner package name
+    PROV_PKG=""
+    PROV_DEB=$(find "$HOST_PKG_DIR" -maxdepth 1 -name "blockhost-provisioner-*_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$PROV_DEB" ]; then
+        PROV_PKG=$(basename "$PROV_DEB" | sed 's/_.*$//')
+    fi
+
     # Install in order: common first (dependency), then others
     INSTALL_ORDER=(
         "blockhost-common"
         "libpam-web3-tools"
-        "blockhost-provisioner-proxmox"
+    )
+    [ -n "$PROV_PKG" ] && INSTALL_ORDER+=("$PROV_PKG")
+    INSTALL_ORDER+=(
         "blockhost-engine"
         "blockhost-broker-client"
     )

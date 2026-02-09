@@ -66,6 +66,22 @@
         </div>
     </div>
 
+    <!-- Step 4: Restore config (shown after sign) -->
+    <div class="form-section hidden" id="section-restore">
+        <h3>Restore Settings</h3>
+        <p class="text-muted mb-2" style="font-size: 0.875rem;">
+            Have an encrypted config file from a previous setup? Upload it to restore your settings.
+            The file can only be decrypted if you signed the same message as when it was created.
+        </p>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <input type="file" id="restore-file" accept=".enc" style="flex: 1; font-size: 0.875rem;">
+            <button type="button" class="btn btn-secondary" id="btn-restore" onclick="restoreConfig()">
+                Restore
+            </button>
+        </div>
+        <div id="restore-status" style="margin-top: 0.5rem;"></div>
+    </div>
+
     <!-- Hidden form for POST -->
     <form method="POST" action="{{ url_for('wizard_wallet') }}" id="wallet-form" class="hidden">
         <input type="hidden" name="admin_wallet" id="input-wallet">
@@ -139,6 +155,7 @@ $('btn-sign').addEventListener('click', async () => {
         // Update UI
         $('section-sign').classList.add('hidden');
         $('section-confirmed').classList.remove('hidden');
+        $('section-restore').classList.remove('hidden');
         $('confirmed-address').textContent = adminAddress;
 
         // Fill hidden form
@@ -159,6 +176,46 @@ $('btn-sign').addEventListener('click', async () => {
 
 function submitForm() {
     $('wallet-form').submit();
+}
+
+async function restoreConfig() {
+    const fileInput = $('restore-file');
+    const statusEl = $('restore-status');
+
+    if (!fileInput.files.length) {
+        statusEl.innerHTML = '<div class="alert alert-error">Please select a .enc file.</div>';
+        return;
+    }
+    if (!adminSignature) {
+        statusEl.innerHTML = '<div class="alert alert-error">Sign with your wallet first.</div>';
+        return;
+    }
+
+    $('btn-restore').disabled = true;
+    $('btn-restore').textContent = 'Decrypting...';
+    statusEl.innerHTML = '';
+
+    const formData = new FormData();
+    formData.append('config_file', fileInput.files[0]);
+    formData.append('admin_signature', adminSignature);
+
+    try {
+        const resp = await fetch('/api/restore-config', { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        if (resp.ok && data.redirect) {
+            statusEl.innerHTML = '<div class="alert alert-success">Config restored. Redirecting to finalization...</div>';
+            setTimeout(() => { window.location.href = data.redirect; }, 1000);
+        } else {
+            statusEl.innerHTML = '<div class="alert alert-error">' + (data.error || 'Restore failed') + '</div>';
+            $('btn-restore').disabled = false;
+            $('btn-restore').textContent = 'Restore';
+        }
+    } catch (e) {
+        statusEl.innerHTML = '<div class="alert alert-error">Network error: ' + e.message + '</div>';
+        $('btn-restore').disabled = false;
+        $('btn-restore').textContent = 'Restore';
+    }
 }
 
 // Auto-connect if already connected
