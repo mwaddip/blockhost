@@ -3,10 +3,12 @@
 # BlockHost First-Boot Script
 #
 # Runs on first boot after Debian installation to:
-# 1. Install Proxmox VE
-# 2. Configure network
-# 3. Generate and display OTP
-# 4. Start web installer for final configuration
+# 1. Wait for network
+# 2. Install BlockHost packages
+# 3. Run provisioner first-boot hook (installs hypervisor software)
+# 4. Install Foundry, verify network
+# 5. Generate and display OTP
+# 6. Start web installer for final configuration
 #
 # Tracks progress so it can resume if interrupted.
 #
@@ -19,7 +21,7 @@ LOG_FILE="/var/log/blockhost-firstboot.log"
 CONSOLE="/dev/tty1"
 
 # Step markers
-STEP_HOSTNAME="${STATE_DIR}/.step-hostname"
+STEP_NETWORK_WAIT="${STATE_DIR}/.step-network-wait"
 STEP_NETWORK="${STATE_DIR}/.step-network"
 STEP_OTP="${STATE_DIR}/.step-otp"
 
@@ -63,7 +65,7 @@ export PYTHONPATH="${BLOCKHOST_DIR}:${PYTHONPATH}"
 #
 # Step 1: Wait for network
 #
-if [ ! -f "$STEP_HOSTNAME" ]; then
+if [ ! -f "$STEP_NETWORK_WAIT" ]; then
     log "Step 1: Waiting for network..."
 
     for i in {1..30}; do
@@ -79,64 +81,18 @@ if [ ! -f "$STEP_HOSTNAME" ]; then
     fi
 
     log "Network up: $CURRENT_IP"
-    touch "$STEP_HOSTNAME"
+    touch "$STEP_NETWORK_WAIT"
 fi
 
 #
-# Step 2: Run provisioner first-boot hook
+# Step 2: Install BlockHost packages
 #
-# The provisioner hook handles installing hypervisor-specific software
-# (e.g. Proxmox VE, Terraform). It's discovered from the provisioner manifest
-# or from the ISO submodule path during initial boot.
-#
-STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
-if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then
-    log "Step 2: Running provisioner first-boot hook..."
-
-    # Find the hook script: check manifest first, then ISO submodule path
-    PROVISIONER_HOOK=""
-    MANIFEST="/usr/share/blockhost/provisioner.json"
-    MANIFEST_ISO="${BLOCKHOST_DIR}/blockhost-provisioner/provisioner.json"
-
-    if [ -f "$MANIFEST" ]; then
-        PROVISIONER_HOOK=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
-    elif [ -f "$MANIFEST_ISO" ]; then
-        PROVISIONER_HOOK=$(python3 -c "import json; print(json.load(open('$MANIFEST_ISO')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
-    fi
-
-    # If no manifest hook, check the ISO submodule for a hook script directly
-    if [ -z "$PROVISIONER_HOOK" ] || [ ! -x "$PROVISIONER_HOOK" ]; then
-        PROVISIONER_HOOK_ISO="${BLOCKHOST_DIR}/blockhost-provisioner/provisioner-hooks/first-boot.sh"
-        if [ -x "$PROVISIONER_HOOK_ISO" ]; then
-            PROVISIONER_HOOK="$PROVISIONER_HOOK_ISO"
-        fi
-    fi
-
-    if [ -n "$PROVISIONER_HOOK" ] && [ -x "$PROVISIONER_HOOK" ]; then
-        log "Running provisioner hook: $PROVISIONER_HOOK"
-        export STATE_DIR LOG_FILE
-        "$PROVISIONER_HOOK" 2>&1 | tee -a "$LOG_FILE"
-        HOOK_RC=${PIPESTATUS[0]}
-        if [ "$HOOK_RC" -ne 0 ]; then
-            log "ERROR: Provisioner hook failed (exit $HOOK_RC)"
-            exit 1
-        fi
-    else
-        log "WARNING: No provisioner hook found, skipping provisioner setup"
-    fi
-
-    touch "$STEP_PROVISIONER_HOOK"
-    log "Step 2 complete - Provisioner hook finished!"
-else
-    log "Step 2: Provisioner hook already completed, skipping."
-fi
-
-#
-# Step 2b: Install BlockHost packages
+# Packages must be installed before the provisioner hook because the hook
+# script and manifest are shipped inside blockhost-provisioner.deb.
 #
 STEP_PACKAGES="${STATE_DIR}/.step-packages"
 if [ ! -f "$STEP_PACKAGES" ]; then
-    log "Step 2b: Installing BlockHost packages..."
+    log "Step 2: Installing BlockHost packages..."
 
     if [ -x "$BLOCKHOST_DIR/scripts/install-packages.sh" ]; then
         "$BLOCKHOST_DIR/scripts/install-packages.sh" 2>&1 | tee -a "$LOG_FILE"
@@ -164,26 +120,26 @@ if [ ! -f "$STEP_PACKAGES" ]; then
     fi
 
     touch "$STEP_PACKAGES"
-    log "Step 2b complete - BlockHost packages installed!"
+    log "Step 2 complete - BlockHost packages installed!"
 else
-    log "Step 2b: Packages already installed, skipping."
+    log "Step 2: Packages already installed, skipping."
 fi
 
 #
-# Step 2b1: Verify blockhost user (created by blockhost-common .deb)
+# Step 2b: Verify blockhost user (created by blockhost-common .deb)
 #
-log "Step 2b1: Verifying blockhost user..."
+log "Step 2b: Verifying blockhost user..."
 if id -u blockhost >/dev/null 2>&1; then
-    log "Step 2b1 complete - blockhost user exists"
+    log "Step 2b complete - blockhost user exists"
 else
     log "ERROR: blockhost user not found (should be created by blockhost-common postinst)"
     exit 1
 fi
 
 #
-# Step 2b2: Verify root agent (installed by blockhost-common .deb)
+# Step 2c: Verify root agent (installed by blockhost-common .deb)
 #
-log "Step 2b2: Verifying root agent..."
+log "Step 2c: Verifying root agent..."
 if ! systemctl is-active --quiet blockhost-root-agent; then
     systemctl start blockhost-root-agent || log "WARNING: Failed to start root agent"
 fi
@@ -194,17 +150,56 @@ for i in $(seq 1 10); do
 done
 
 if [ -S /run/blockhost/root-agent.sock ]; then
-    log "Step 2b2 complete - Root agent socket ready"
+    log "Step 2c complete - Root agent socket ready"
 else
     log "WARNING: Root agent socket not ready after 10s"
 fi
 
 #
-# Step 2c: Install Foundry (for contract deployment)
+# Step 3: Run provisioner first-boot hook
+#
+# The provisioner hook handles installing hypervisor-specific software
+# (e.g. Proxmox VE, Terraform). Discovered from the provisioner manifest
+# installed by blockhost-provisioner.deb in Step 2.
+#
+STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
+if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then
+    log "Step 3: Running provisioner first-boot hook..."
+
+    PROVISIONER_HOOK=""
+    MANIFEST="/usr/share/blockhost/provisioner.json"
+
+    if [ -f "$MANIFEST" ]; then
+        PROVISIONER_HOOK=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
+    fi
+
+    if [ -n "$PROVISIONER_HOOK" ] && [ -x "$PROVISIONER_HOOK" ]; then
+        log "Running provisioner hook: $PROVISIONER_HOOK"
+        export STATE_DIR LOG_FILE
+        "$PROVISIONER_HOOK" 2>&1 | tee -a "$LOG_FILE"
+        HOOK_RC=${PIPESTATUS[0]}
+        if [ "$HOOK_RC" -ne 0 ]; then
+            log "ERROR: Provisioner hook failed (exit $HOOK_RC)"
+            exit 1
+        fi
+    else
+        log "ERROR: No provisioner hook found at manifest path"
+        log "Expected manifest at: $MANIFEST"
+        exit 1
+    fi
+
+    touch "$STEP_PROVISIONER_HOOK"
+    log "Step 3 complete - Provisioner hook finished!"
+else
+    log "Step 3: Provisioner hook already completed, skipping."
+fi
+
+#
+# Step 3b: Install Foundry (for contract deployment)
 #
 STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
 if [ ! -f "$STEP_FOUNDRY" ]; then
-    log "Step 2c: Installing Foundry..."
+    log "Step 3b: Installing Foundry..."
 
     if ! command -v cast &> /dev/null; then
         log "Downloading Foundry binaries..."
@@ -244,20 +239,16 @@ if [ ! -f "$STEP_FOUNDRY" ]; then
     fi
 
     touch "$STEP_FOUNDRY"
-    log "Step 2c complete - Foundry installed!"
+    log "Step 3b complete - Foundry installed!"
 else
-    log "Step 2c: Foundry already installed, skipping."
+    log "Step 3b: Foundry already installed, skipping."
 fi
 
-# Note: Terraform and libguestfs-tools installation is now handled by the
-# provisioner's first-boot hook (Step 2 above). The provisioner hook
-# manages all hypervisor-specific software installation.
-
 #
-# Step 3: Verify Network
+# Step 4: Verify Network
 #
 if [ ! -f "$STEP_NETWORK" ]; then
-    log "Step 3: Verifying network..."
+    log "Step 4: Verifying network..."
 
     CURRENT_IP=$(ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
 
@@ -279,16 +270,16 @@ if [ ! -f "$STEP_NETWORK" ]; then
     log "Network OK: $CURRENT_IP"
     touch "$STEP_NETWORK"
 else
-    log "Step 3: Network already verified, skipping."
+    log "Step 4: Network already verified, skipping."
 fi
 
 #
-# Step 4: Generate OTP
+# Step 5: Generate OTP
 #
 CURRENT_IP=$(ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
 
 if [ ! -f "$STEP_OTP" ] || [ ! -f "$RUN_DIR/otp.json" ]; then
-    log "Step 4: Generating OTP..."
+    log "Step 5: Generating OTP..."
 
     OTP_CODE=$(python3 -c "
 import sys
@@ -322,9 +313,9 @@ else:
 fi
 
 #
-# Step 5: Start Web Installer (in background)
+# Step 6: Start Web Installer (in background)
 #
-log "Step 5: Starting web installer..."
+log "Step 6: Starting web installer..."
 
 # Determine HTTP or HTTPS
 if echo "$CURRENT_IP" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)'; then
@@ -372,7 +363,7 @@ cat > /etc/issue << EOF
   ║                   BlockHost Installer                        ║
   ╚══════════════════════════════════════════════════════════════╝
 
-  Proxmox VE has been installed!
+  Setup complete — ready for configuration.
 
   ┌────────────────────────────────────────────────────────────┐
   │  Web Installer:  $URL

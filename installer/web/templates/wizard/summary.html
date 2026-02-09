@@ -235,6 +235,15 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('bridge')">Retry</button>
         </li>
+        <li id="step-template" data-step="template">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Build VM template</span>
+                <span class="step-status"></span>
+                <span class="step-hint">(this may take several minutes)</span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('template')">Retry</button>
+        </li>
         <li id="step-ipv6" data-step="ipv6">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -297,15 +306,6 @@
                 </div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('mint_nft')">Retry</button>
-        </li>
-        <li id="step-template" data-step="template">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Build VM template</span>
-                <span class="step-status"></span>
-                <span class="step-hint">(this may take several minutes)</span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('template')">Retry</button>
         </li>
         <li id="step-finalize" data-step="finalize">
             <span class="step-icon">&#9675;</span>

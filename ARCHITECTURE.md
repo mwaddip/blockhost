@@ -109,18 +109,19 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
   Log: /var/log/blockhost-firstboot.log
   Completion marker: /var/lib/blockhost/.setup-complete
 
-  Step 1 (.step-hostname):           Wait for network
-  Step 2 (.step-provisioner-hook):   Run provisioner first-boot hook (from manifest or ISO)
+  Step 1 (.step-network-wait):        Wait for network
+  Step 2 (.step-packages):            Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
+  Step 2b: Verify blockhost user exists (created by blockhost-common .deb)
+  Step 2c: Verify root agent running (installed + enabled by blockhost-common .deb), wait for socket
+  Step 3 (.step-provisioner-hook):    Run provisioner first-boot hook (from installed manifest)
     → Hook path: manifest.setup.first_boot_hook (e.g. provisioner-hooks/first-boot.sh)
     → Proxmox hook: hostname fix, install proxmox-ve, terraform, libguestfs-tools
     → Receives STATE_DIR, LOG_FILE as env vars; uses own step markers
-  Step 2b (.step-packages):  Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
-  Step 2b1: Verify blockhost user exists (created by blockhost-common .deb)
-  Step 2b2: Verify root agent running (installed + enabled by blockhost-common .deb), wait for socket
-  Step 2c (.step-foundry):   Install Foundry (cast, forge, anvil) → /usr/local/bin/
-  Step 3 (.step-network):   Verify network connectivity (DHCP fallback)
-  Step 4 (.step-otp):       Generate OTP → /run/blockhost/otp.json, display on /etc/issue
-  Step 5:                    Start Flask wizard on :80 (private) or :443 (public)
+    → Requires packages installed first (manifest + hook script are in blockhost-provisioner.deb)
+  Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/
+  Step 4 (.step-network):             Verify network connectivity (DHCP fallback)
+  Step 5 (.step-otp):                 Generate OTP → /run/blockhost/otp.json, display on /etc/issue
+  Step 6:                              Start Flask wizard on :80 (private) or :443 (public)
 ```
 
 ### Phase 4: Web Wizard (browser interaction)
@@ -774,7 +775,7 @@ Internet
 | root | system | Runs root-agent daemon only |
 | blockhost | system (nologin) | Runs all other runtime services |
 
-Created by first-boot Step 2b1. Group `blockhost` grants read access to config files in `/etc/blockhost/`.
+Created by first-boot Step 2b. Group `blockhost` grants read access to config files in `/etc/blockhost/`.
 
 ### Root Agent Daemon
 
