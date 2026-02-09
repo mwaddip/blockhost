@@ -13,3 +13,6 @@
 [submodule "blockhost-provisioner-proxmox"]
 	path = blockhost-provisioner-proxmox
 	url = https://github.com/mwaddip/blockhost-provisioner-proxmox
+[submodule "blockhost-provisioner-libvirt"]
+	path = blockhost-provisioner-libvirt
+	url = git@github.com:mwaddip/blockhost-provisioner-libvirt.git

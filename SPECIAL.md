@@ -101,6 +101,25 @@ scripts/build-template.sh S7  P6  E8  C4  I5  A5  L6
   Runs once. Must be idempotent. Not much can go subtly wrong.
 ```
 
+### blockhost-provisioner-libvirt
+
+```
+default (submodule)       S9  P7  E9  C6  I7  A7  L7
+  VM lifecycle is unforgiving. No Terraform middleman — more direct, less abstraction tax.
+
+scripts/vm-gc.py          S8  P6  E9  C4  I6  A5  L8
+  Destroys things. Better be sure. Edge cases in cleanup are data loss.
+
+scripts/mint_nft.py       S7  P8  E7  C4  I6  A6  L7
+  Writes to chain permanently. Key handling matters.
+
+scripts/build-template.sh S7  P6  E8  C4  I5  A5  L6
+  Runs once. Must be idempotent. Not much can go subtly wrong.
+
+root-agent-actions/       S8  P9  E7  C4  I8  A6  L7
+  Privilege boundary. virsh commands run as root. Validate everything.
+```
+
 ### blockhost-common
 
 ```

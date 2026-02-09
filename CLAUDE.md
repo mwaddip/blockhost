@@ -23,6 +23,7 @@
 - `libpam-web3/`
 - `blockhost-common/`
 - `blockhost-provisioner-proxmox/`
+- `blockhost-provisioner-libvirt/`
 - `blockhost-engine/`
 - `blockhost-broker/`
 
@@ -73,8 +74,9 @@ Packages built from submodules during first-boot:
 | libpam-web3 | `packaging/build-deb-tools.sh` | libpam-web3-tools | Proxmox host |
 | libpam-web3 | `packaging/build-deb.sh` | libpam-web3 | VM template dir |
 | blockhost-common | `build.sh` | blockhost-common | Proxmox host |
-| blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Proxmox host |
-| blockhost-engine | `packaging/build.sh` | blockhost-engine | Proxmox host |
+| blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Host (Proxmox) |
+| blockhost-provisioner-libvirt | `build-deb.sh` | blockhost-provisioner-libvirt | Host (libvirt) |
+| blockhost-engine | `packaging/build.sh` | blockhost-engine | Host |
 | blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Proxmox host |
 
 **Note**: `libpam-web3` (the PAM module, not tools) is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the Proxmox host.
