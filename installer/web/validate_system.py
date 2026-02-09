@@ -560,14 +560,33 @@ def run_full_validation() -> ValidationReport:
         except:
             pass
 
-    # ========== TERRAFORM FILES ==========
+    # ========== PROVISIONER MANIFEST ==========
 
-    tf_dir = Path('/var/lib/blockhost/terraform')
+    provisioner_manifest = Path('/usr/share/blockhost/provisioner.json')
+    manifest_result = _check_json_syntax(provisioner_manifest, "Provisioner", "provisioner.json")
+    manifest_result.critical = False  # Not critical during transition
+    report.add(manifest_result)
 
-    report.add(_check_json_syntax(tf_dir / 'provider.tf.json', "Terraform", "provider.tf.json"))
-    report.add(_check_json_syntax(tf_dir / 'variables.tf.json', "Terraform", "variables.tf.json"))
-    report.add(_check_file_exists(tf_dir / 'terraform.tfvars', "Terraform", "terraform.tfvars"))
-    report.add(_check_terraform_initialized())
+    # Determine provisioner type for conditional checks
+    provisioner_name = None
+    if provisioner_manifest.exists():
+        try:
+            provisioner_name = json.loads(provisioner_manifest.read_text()).get('name')
+            report.add(ValidationResult("Provisioner", "Manifest loaded", True,
+                                       f"Provisioner: {provisioner_name}"))
+        except:
+            pass
+
+    # ========== TERRAFORM FILES (Proxmox provisioner only) ==========
+
+    # Only check Terraform files if using Proxmox provisioner or no manifest yet (transition)
+    if provisioner_name in (None, 'proxmox'):
+        tf_dir = Path('/var/lib/blockhost/terraform')
+
+        report.add(_check_json_syntax(tf_dir / 'provider.tf.json', "Terraform", "provider.tf.json"))
+        report.add(_check_json_syntax(tf_dir / 'variables.tf.json', "Terraform", "variables.tf.json"))
+        report.add(_check_file_exists(tf_dir / 'terraform.tfvars', "Terraform", "terraform.tfvars"))
+        report.add(_check_terraform_initialized())
 
     # ========== MARKER FILES ==========
 

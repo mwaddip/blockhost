@@ -13,6 +13,7 @@ Provides web-based installation wizard with:
 """
 
 import grp
+import importlib
 import os
 import ssl
 import json
@@ -49,16 +50,94 @@ CHAIN_NAMES = {
     '80001': 'Polygon Mumbai',
 }
 
-# Wizard step definitions (single source of truth for step bar rendering)
-WIZARD_STEPS = [
+# Provisioner manifest path (installed by provisioner .deb package)
+PROVISIONER_MANIFEST_PATH = Path('/usr/share/blockhost/provisioner.json')
+
+
+def _discover_provisioner() -> Optional[dict]:
+    """Discover the active provisioner from its manifest.
+
+    Returns a dict with 'manifest', 'module', and 'blueprint' keys,
+    or None if no provisioner is installed.
+    """
+    if not PROVISIONER_MANIFEST_PATH.is_file():
+        return None
+
+    try:
+        manifest = json.loads(PROVISIONER_MANIFEST_PATH.read_text())
+        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
+        if not wizard_module_name:
+            return {'manifest': manifest, 'module': None, 'blueprint': None}
+
+        module = importlib.import_module(wizard_module_name)
+        blueprint = getattr(module, 'blueprint', None)
+        return {'manifest': manifest, 'module': module, 'blueprint': blueprint}
+    except (json.JSONDecodeError, ImportError, Exception) as e:
+        print(f"Warning: Failed to load provisioner: {e}")
+        return None
+
+
+# Discover active provisioner (if installed)
+_provisioner = _discover_provisioner()
+
+# Core wizard steps (always present)
+_CORE_STEPS = [
     {'id': 'network',        'label': 'Network',    'endpoint': 'wizard_network'},
     {'id': 'storage',        'label': 'Storage',    'endpoint': 'wizard_storage'},
     {'id': 'blockchain',     'label': 'Blockchain', 'endpoint': 'wizard_blockchain'},
-    {'id': 'proxmox',        'label': 'Proxmox',    'endpoint': 'wizard_proxmox'},
+]
+
+# Provisioner wizard step (inserted dynamically from manifest)
+_PROVISIONER_STEP = None
+if _provisioner and _provisioner.get('manifest'):
+    _prov_name = _provisioner['manifest'].get('name', 'provisioner')
+    _prov_display = _provisioner['manifest'].get('display_name', _prov_name.title())
+    _PROVISIONER_STEP = {
+        'id': _prov_name,
+        'label': _prov_display.split()[0],  # First word as short label
+        'endpoint': f'provisioner_{_prov_name}.wizard_{_prov_name}',
+    }
+
+# Post-provisioner steps (always present)
+_POST_STEPS = [
     {'id': 'ipv6',           'label': 'IPv6',       'endpoint': 'wizard_ipv6'},
     {'id': 'admin_commands', 'label': 'Admin',      'endpoint': 'wizard_admin_commands'},
     {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
 ]
+
+# Build WIZARD_STEPS: core + provisioner (if present) + post
+WIZARD_STEPS = list(_CORE_STEPS)
+if _PROVISIONER_STEP:
+    WIZARD_STEPS.append(_PROVISIONER_STEP)
+else:
+    # Fallback: hardcoded Proxmox step when no manifest exists (transition period)
+    WIZARD_STEPS.append(
+        {'id': 'proxmox', 'label': 'Proxmox', 'endpoint': 'wizard_proxmox'}
+    )
+WIZARD_STEPS.extend(_POST_STEPS)
+
+def _get_finalization_step_ids() -> list[str]:
+    """Get finalization step IDs without requiring function references.
+
+    Used by SetupState at module load time to know what steps exist.
+    """
+    core_ids = ['keypair', 'wallet', 'contracts', 'config']
+
+    provisioner_ids = []
+    if _provisioner and _provisioner.get('module'):
+        prov_mod = _provisioner['module']
+        if hasattr(prov_mod, 'get_finalization_steps'):
+            provisioner_ids = [s[0] for s in prov_mod.get_finalization_steps()]
+    elif _provisioner and _provisioner.get('manifest'):
+        provisioner_ids = _provisioner['manifest'].get('setup', {}).get('finalization_steps', [])
+    else:
+        # Fallback: hardcoded Proxmox steps for transition period
+        provisioner_ids = ['token', 'terraform', 'bridge']
+
+    post_ids = ['ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate']
+
+    return core_ids + provisioner_ids + post_ids
+
 
 # Global job storage for async operations
 _jobs = {}
@@ -89,28 +168,21 @@ class SetupState:
         return self._default_state()
 
     def _default_state(self) -> dict:
-        """Return default state structure."""
+        """Return default state structure.
+
+        Step IDs are built dynamically from the finalization step list
+        so that provisioner-provided steps are included automatically.
+        """
+        # Build step IDs from the finalization pipeline (core + provisioner + post)
+        step_ids = _get_finalization_step_ids()
+        steps = {sid: {'status': 'pending', 'error': None, 'completed_at': None}
+                 for sid in step_ids}
         return {
             'status': 'pending',  # pending, running, completed, failed
             'started_at': None,
             'completed_at': None,
             'current_step': None,
-            'steps': {
-                'keypair': {'status': 'pending', 'error': None, 'completed_at': None},
-                'wallet': {'status': 'pending', 'error': None, 'completed_at': None},
-                'contracts': {'status': 'pending', 'error': None, 'completed_at': None},
-                'config': {'status': 'pending', 'error': None, 'completed_at': None},
-                'token': {'status': 'pending', 'error': None, 'completed_at': None},
-                'terraform': {'status': 'pending', 'error': None, 'completed_at': None},
-                'bridge': {'status': 'pending', 'error': None, 'completed_at': None},
-                'ipv6': {'status': 'pending', 'error': None, 'completed_at': None},
-                'https': {'status': 'pending', 'error': None, 'completed_at': None},
-                'signup': {'status': 'pending', 'error': None, 'completed_at': None},
-                'mint_nft': {'status': 'pending', 'error': None, 'completed_at': None},
-                'template': {'status': 'pending', 'error': None, 'completed_at': None},
-                'finalize': {'status': 'pending', 'error': None, 'completed_at': None},
-                'validate': {'status': 'pending', 'error': None, 'completed_at': None},
-            },
+            'steps': steps,
             'config': {},  # Stored configuration
         }
 
@@ -238,6 +310,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
     # Store in app context
     app.otp_manager = otp_manager
     app.net_manager = net_manager
+    app.provisioner = _provisioner
+
+    # Register provisioner Blueprint (if available)
+    if _provisioner and _provisioner.get('blueprint'):
+        app.register_blueprint(_provisioner['blueprint'])
 
     # Inject wizard steps into all templates
     @app.context_processor
@@ -562,16 +639,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'revenue_share_dev': blockchain.get('revenue_share_dev', False),
                 'revenue_share_broker': blockchain.get('revenue_share_broker', False),
             },
-            'proxmox': {
-                'node': proxmox.get('node'),
-                'storage': proxmox.get('storage'),
-                'bridge': proxmox.get('bridge'),
-                'vmid_start': proxmox.get('vmid_start'),
-                'vmid_end': proxmox.get('vmid_end'),
-                'ip_start': proxmox.get('ip_start'),
-                'ip_end': proxmox.get('ip_end'),
-                'gc_grace_days': proxmox.get('gc_grace_days', 7),
-            },
             'ipv6': {
                 'mode': ipv6.get('mode'),
                 'prefix': ipv6.get('prefix'),
@@ -586,6 +653,28 @@ def create_app(config: Optional[dict] = None) -> Flask:
             },
         }
 
+        # Get provisioner summary data (if provisioner plugin provides it)
+        provisioner_summary = None
+        provisioner_summary_template = None
+        if _provisioner and _provisioner.get('module'):
+            prov_mod = _provisioner['module']
+            if hasattr(prov_mod, 'get_summary_data'):
+                provisioner_summary = prov_mod.get_summary_data(dict(session))
+            if hasattr(prov_mod, 'get_summary_template'):
+                provisioner_summary_template = prov_mod.get_summary_template()
+        elif not _provisioner:
+            # Fallback: hardcoded Proxmox summary for transition period
+            provisioner_summary = {
+                'node': proxmox.get('node'),
+                'storage': proxmox.get('storage'),
+                'bridge': proxmox.get('bridge'),
+                'vmid_start': proxmox.get('vmid_start'),
+                'vmid_end': proxmox.get('vmid_end'),
+                'ip_start': proxmox.get('ip_start'),
+                'ip_end': proxmox.get('ip_end'),
+                'gc_grace_days': proxmox.get('gc_grace_days', 7),
+            }
+
         if request.method == 'POST':
             if request.form.get('confirm') == 'yes':
                 return redirect(url_for('wizard_install'))
@@ -593,8 +682,14 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 flash('Installation cancelled', 'info')
                 return redirect(url_for('wizard_network'))
 
+        # Build finalization step metadata for the progress UI
+        finalization_step_ids = _get_finalization_step_ids()
+
         return render_template('wizard/summary.html',
-                             summary=summary)
+                             summary=summary,
+                             provisioner_summary=provisioner_summary,
+                             provisioner_summary_template=provisioner_summary_template,
+                             finalization_step_ids=finalization_step_ids)
 
     @app.route('/wizard/install')
     @require_auth
@@ -1598,16 +1693,36 @@ def _build_vm_template(job_id: str):
         _jobs[job_id]['error'] = str(e)
 
 
-def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
-    """Run the full finalization process with persistent state tracking."""
-    steps = [
+def _get_finalization_steps() -> list[tuple]:
+    """Build the finalization step list, injecting provisioner steps dynamically.
+
+    Step order:
+    1. Core steps (keypair, wallet, contracts, config)
+    2. Provisioner steps (from manifest plugin, e.g. token, terraform, bridge)
+    3. Post steps (ipv6, https, signup, mint_nft, template, finalize, validate)
+    """
+    core_steps = [
         ('keypair', 'Generating server keypair', _finalize_keypair),
         ('wallet', 'Configuring deployer wallet', _finalize_wallet),
         ('contracts', 'Handling contracts', _finalize_contracts),
         ('config', 'Writing configuration files', _finalize_config),
-        ('token', 'Creating Proxmox API token', _finalize_token),
-        ('terraform', 'Configuring Terraform provider', _finalize_terraform),
-        ('bridge', 'Configuring network bridge', _finalize_bridge),
+    ]
+
+    # Get provisioner finalization steps (if plugin provides them)
+    provisioner_steps = []
+    if _provisioner and _provisioner.get('module'):
+        prov_mod = _provisioner['module']
+        if hasattr(prov_mod, 'get_finalization_steps'):
+            provisioner_steps = prov_mod.get_finalization_steps()
+    else:
+        # Fallback: hardcoded Proxmox steps for transition period
+        provisioner_steps = [
+            ('token', 'Creating Proxmox API token', _finalize_token),
+            ('terraform', 'Configuring Terraform provider', _finalize_terraform),
+            ('bridge', 'Configuring network bridge', _finalize_bridge),
+        ]
+
+    post_steps = [
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
         ('https', 'Configuring HTTPS for signup page', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
@@ -1616,6 +1731,13 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
         ('finalize', 'Finalizing setup', _finalize_complete),
         ('validate', 'Validating system (testing only)', _finalize_validate),
     ]
+
+    return core_steps + provisioner_steps + post_steps
+
+
+def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
+    """Run the full finalization process with persistent state tracking."""
+    steps = _get_finalization_steps()
 
     try:
         for step_id, step_name, step_func in steps:

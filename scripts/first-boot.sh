@@ -20,7 +20,6 @@ CONSOLE="/dev/tty1"
 
 # Step markers
 STEP_HOSTNAME="${STATE_DIR}/.step-hostname"
-STEP_PROXMOX="${STATE_DIR}/.step-proxmox"
 STEP_NETWORK="${STATE_DIR}/.step-network"
 STEP_OTP="${STATE_DIR}/.step-otp"
 
@@ -62,16 +61,11 @@ log "=========================================="
 export PYTHONPATH="${BLOCKHOST_DIR}:${PYTHONPATH}"
 
 #
-# Step 1: Configure hostname for Proxmox
-#
-# CRITICAL: Proxmox requires the hostname to resolve to the real IP address,
-# NOT to 127.0.1.1 (which Debian preseed creates by default).
-# If /etc/hosts has "127.0.1.1 hostname", pve-cluster service will fail.
+# Step 1: Wait for network
 #
 if [ ! -f "$STEP_HOSTNAME" ]; then
-    log "Step 1: Configuring hostname for Proxmox..."
+    log "Step 1: Waiting for network..."
 
-    # Wait for network with retry
     for i in {1..30}; do
         CURRENT_IP=$(ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
         [ -n "$CURRENT_IP" ] && break
@@ -84,73 +78,57 @@ if [ ! -f "$STEP_HOSTNAME" ]; then
         exit 1
     fi
 
-    HOSTNAME=$(hostname)
-    FQDN="${HOSTNAME}.local"
-
-    # Fix /etc/hosts for Proxmox:
-    # 1. Remove any 127.0.1.1 line (Debian default that breaks Proxmox)
-    # 2. Ensure hostname resolves to real IP (required by pve-cluster)
-    log "Fixing /etc/hosts for Proxmox (IP: $CURRENT_IP)..."
-
-    # Remove the 127.0.1.1 line that Debian creates
-    sed -i '/^127\.0\.1\.1/d' /etc/hosts
-
-    # Remove any existing line for our hostname (in case of re-run with different IP)
-    sed -i "/[[:space:]]${HOSTNAME}$/d" /etc/hosts
-    sed -i "/[[:space:]]${HOSTNAME}[[:space:]]/d" /etc/hosts
-
-    # Add correct entry with real IP (must be before localhost for Proxmox)
-    # Insert after the 127.0.0.1 localhost line
-    sed -i "/^127\.0\.0\.1/a ${CURRENT_IP}\t${FQDN}\t${HOSTNAME}" /etc/hosts
-
-    log "Updated /etc/hosts:"
-    cat /etc/hosts | tee -a "$LOG_FILE"
-
+    log "Network up: $CURRENT_IP"
     touch "$STEP_HOSTNAME"
-    log "Step 1 complete."
-else
-    log "Step 1: Hostname already configured, skipping."
 fi
 
 #
-# Step 2: Install Proxmox VE
+# Step 2: Run provisioner first-boot hook
 #
-if [ ! -f "$STEP_PROXMOX" ]; then
-    log "Step 2: Installing Proxmox VE..."
+# The provisioner hook handles installing hypervisor-specific software
+# (e.g. Proxmox VE, Terraform). It's discovered from the provisioner manifest
+# or from the ISO submodule path during initial boot.
+#
+STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
+if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then
+    log "Step 2: Running provisioner first-boot hook..."
 
-    # Configure apt proxy if available (for faster installs during testing)
-    APT_PROXY="http://192.168.122.1:3142"
-    if curl -s --connect-timeout 2 "$APT_PROXY" >/dev/null 2>&1; then
-        log "Using apt proxy: $APT_PROXY"
-        echo "Acquire::http::Proxy \"$APT_PROXY\";" > /etc/apt/apt.conf.d/00proxy
+    # Find the hook script: check manifest first, then ISO submodule path
+    PROVISIONER_HOOK=""
+    MANIFEST="/usr/share/blockhost/provisioner.json"
+    MANIFEST_ISO="${BLOCKHOST_DIR}/blockhost-provisioner/provisioner.json"
+
+    if [ -f "$MANIFEST" ]; then
+        PROVISIONER_HOOK=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
+    elif [ -f "$MANIFEST_ISO" ]; then
+        PROVISIONER_HOOK=$(python3 -c "import json; print(json.load(open('$MANIFEST_ISO')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
     fi
 
-    # Add Proxmox repository
-    if [ ! -f /etc/apt/sources.list.d/pve-install-repo.list ]; then
-        log "Adding Proxmox VE repository..."
-        echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
+    # If no manifest hook, check the ISO submodule for a hook script directly
+    if [ -z "$PROVISIONER_HOOK" ] || [ ! -x "$PROVISIONER_HOOK" ]; then
+        PROVISIONER_HOOK_ISO="${BLOCKHOST_DIR}/blockhost-provisioner/provisioner-hooks/first-boot.sh"
+        if [ -x "$PROVISIONER_HOOK_ISO" ]; then
+            PROVISIONER_HOOK="$PROVISIONER_HOOK_ISO"
+        fi
     fi
 
-    # Add Proxmox GPG key
-    if [ ! -f /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg ]; then
-        log "Adding Proxmox GPG key..."
-        wget -q https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
+    if [ -n "$PROVISIONER_HOOK" ] && [ -x "$PROVISIONER_HOOK" ]; then
+        log "Running provisioner hook: $PROVISIONER_HOOK"
+        export STATE_DIR LOG_FILE
+        "$PROVISIONER_HOOK" 2>&1 | tee -a "$LOG_FILE"
+        HOOK_RC=${PIPESTATUS[0]}
+        if [ "$HOOK_RC" -ne 0 ]; then
+            log "ERROR: Provisioner hook failed (exit $HOOK_RC)"
+            exit 1
+        fi
+    else
+        log "WARNING: No provisioner hook found, skipping provisioner setup"
     fi
 
-    # Update and install
-    log "Updating package lists..."
-    apt-get update
-
-    log "Installing Proxmox VE packages (this will take a while)..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony python3-ecdsa jq
-
-    # Update grub
-    update-grub
-
-    touch "$STEP_PROXMOX"
-    log "Step 2 complete - Proxmox VE installed!"
+    touch "$STEP_PROVISIONER_HOOK"
+    log "Step 2 complete - Provisioner hook finished!"
 else
-    log "Step 2: Proxmox VE already installed, skipping."
+    log "Step 2: Provisioner hook already completed, skipping."
 fi
 
 #
@@ -271,43 +249,9 @@ else
     log "Step 2c: Foundry already installed, skipping."
 fi
 
-#
-# Step 2d: Install Terraform and libguestfs-tools
-#
-STEP_TERRAFORM="${STATE_DIR}/.step-terraform"
-if [ ! -f "$STEP_TERRAFORM" ]; then
-    log "Step 2d: Installing Terraform and libguestfs-tools..."
-
-    # Add HashiCorp GPG key and repository
-    if [ ! -f /usr/share/keyrings/hashicorp-archive-keyring.gpg ]; then
-        log "Adding HashiCorp repository..."
-        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list
-        apt-get update
-    fi
-
-    # Install Terraform and libguestfs-tools
-    log "Installing Terraform and libguestfs-tools..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y terraform libguestfs-tools
-
-    # Verify installation
-    if command -v terraform &> /dev/null; then
-        log "Terraform installed: $(terraform --version | head -1)"
-    else
-        log "WARNING: Terraform installation may have failed"
-    fi
-
-    if command -v virt-customize &> /dev/null; then
-        log "libguestfs-tools installed: virt-customize available"
-    else
-        log "WARNING: libguestfs-tools installation may have failed"
-    fi
-
-    touch "$STEP_TERRAFORM"
-    log "Step 2d complete - Terraform and libguestfs-tools installed!"
-else
-    log "Step 2d: Terraform already installed, skipping."
-fi
+# Note: Terraform and libguestfs-tools installation is now handled by the
+# provisioner's first-boot hook (Step 2 above). The provisioner hook
+# manages all hypervisor-specific software installation.
 
 #
 # Step 3: Verify Network

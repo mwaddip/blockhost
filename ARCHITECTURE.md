@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-07
+> Last updated: 2026-02-09
 
 ## FILE MAP
 
@@ -110,13 +110,15 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
   Log: /var/log/blockhost-firstboot.log
   Completion marker: /var/lib/blockhost/.setup-complete
 
-  Step 1 (.step-hostname):  Fix /etc/hosts for Proxmox (IP → hostname)
-  Step 2 (.step-proxmox):   Install proxmox-ve, postfix, chrony
+  Step 1 (.step-hostname):           Wait for network
+  Step 2 (.step-provisioner-hook):   Run provisioner first-boot hook (from manifest or ISO)
+    → Hook path: manifest.setup.first_boot_hook (e.g. provisioner-hooks/first-boot.sh)
+    → Proxmox hook: hostname fix, install proxmox-ve, terraform, libguestfs-tools
+    → Receives STATE_DIR, LOG_FILE as env vars; uses own step markers
   Step 2b (.step-packages):  Install host .debs + copy template .debs to /var/lib/blockhost/template-packages/
   Step 2b1: Verify blockhost user exists (created by blockhost-common .deb)
   Step 2b2: Verify root agent running (installed + enabled by blockhost-common .deb), wait for socket
   Step 2c (.step-foundry):   Install Foundry (cast, forge, anvil) → /usr/local/bin/
-  Step 2d (.step-terraform): Install Terraform + libguestfs (virt-customize, virt-sysprep)
   Step 3 (.step-network):   Verify network connectivity (DHCP fallback)
   Step 4 (.step-otp):       Generate OTP → /run/blockhost/otp.json, display on /etc/issue
   Step 5:                    Start Flask wizard on :80 (private) or :443 (public)
@@ -131,11 +133,14 @@ Pre-wizard:
   /login                  → OTP verification (6 chars, A-Z2-9, 4hr timeout, 10 attempts)
   /wizard/wallet          → Admin MetaMask wallet connect + signature
 
-Wizard steps (WIZARD_STEPS in app.py:52-60):
+Wizard steps (WIZARD_STEPS in app.py, dynamically built):
+  Core:
   1. /wizard/network        → DHCP or static IP
   2. /wizard/storage         → Disk selection for LVM
   3. /wizard/blockchain      → chain_id, rpc_url, wallet (generate/import), contracts (deploy/existing), plan_name, plan_price_cents, revenue_share_*
+  Provisioner (from manifest.setup.wizard_module → Flask Blueprint):
   4. /wizard/proxmox         → node, storage, bridge, vmid_range, ip_pool, gc_grace_days
+  Post:
   5. /wizard/ipv6            → broker allocation or manual prefix
   6. /wizard/admin_commands  → port knocking config
   7. /wizard/summary         → review → POST confirm=yes → /wizard/install
@@ -152,22 +157,24 @@ POST /api/finalize → _run_finalization_with_state() in thread
   Retry: POST /api/finalize/retry {step_id?}
   Reset: POST /api/finalize/reset
 
-Step dispatch (app.py:1600-1616):
-  #   step_id     function                    line
-  1   keypair     _finalize_keypair           1696   → server.key, server.pubkey
-  2   wallet      _finalize_wallet            1725   → deployer.key
-  3   contracts   _finalize_contracts         1745   → deploy via cast or verify existing
-  4   config      _finalize_config            1906   → db.yaml, web3-defaults.yaml, blockhost.yaml
-  5   token       _finalize_token             2070   → Proxmox API token via pveum
-  6   terraform   _finalize_terraform         2118   → provider.tf.json, variables.tf.json, terraform init
-  7   bridge      _finalize_bridge            2260   → vmbr0 via pvesh
-  8   ipv6        _finalize_ipv6              2443   → broker-client or manual prefix, WireGuard
-  9   https       _finalize_https             2611   → sslip.io hostname, Let's Encrypt cert
-  10  signup      _finalize_signup            2739   → generate-signup-page.py → /var/www/blockhost/signup.html
-  11  mint_nft    _finalize_mint_nft          2847   → Mint NFT #0 to admin wallet
-  12  template    _finalize_template          2928   → Build Debian VM template with libpam-web3
-  13  finalize    _finalize_complete          3082   → .setup-complete marker, enable services, create plan
-  14  validate    _finalize_validate          3158   → System validation (testing mode only)
+Step dispatch (_get_finalization_steps() in app.py, dynamically built):
+  Core steps:
+    1   keypair     _finalize_keypair           → server.key, server.pubkey
+    2   wallet      _finalize_wallet            → deployer.key
+    3   contracts   _finalize_contracts         → deploy via cast or verify existing
+    4   config      _finalize_config            → db.yaml, web3-defaults.yaml, blockhost.yaml
+  Provisioner steps (from manifest.setup.wizard_module.get_finalization_steps()):
+    5   token       finalize_token              → Proxmox API token via pveum
+    6   terraform   finalize_terraform          → provider.tf.json, variables.tf.json, terraform init
+    7   bridge      finalize_bridge             → vmbr0 via pvesh
+  Post steps:
+    8   ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
+    9   https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
+    10  signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
+    11  mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
+    12  template    _finalize_template          → Build Debian VM template with libpam-web3
+    13  finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
+    14  validate    _finalize_validate          → System validation (testing mode only)
 
 Each step: skip if completed, mark running → completed|failed, supports retry.
 ```
@@ -222,6 +229,63 @@ Admin commands flow:
     → blockhost-engine src/admin/ processes command
     → e.g. port knocking: temporarily open ports on VM
 ```
+
+## PROVISIONER CONTRACT
+
+One active provisioner per host. Package installs manifest at well-known path.
+
+### Manifest (`/usr/share/blockhost/provisioner.json`)
+
+```json
+{
+  "name": "proxmox",
+  "version": "0.1.0",
+  "display_name": "Proxmox VE + Terraform",
+  "commands": {
+    "create": "blockhost-vm-create",    "destroy": "blockhost-vm-destroy",
+    "start": "blockhost-vm-start",      "stop": "blockhost-vm-stop",
+    "kill": "blockhost-vm-kill",        "status": "blockhost-vm-status",
+    "list": "blockhost-vm-list",        "metrics": "blockhost-vm-metrics",
+    "throttle": "blockhost-vm-throttle","build-template": "blockhost-build-template",
+    "gc": "blockhost-vm-gc",            "resume": "blockhost-vm-resume"
+  },
+  "setup": {
+    "first_boot_hook": "/usr/share/blockhost/provisioner-hooks/first-boot.sh",
+    "detect": "blockhost-provisioner-detect",
+    "wizard_module": "blockhost.provisioner_proxmox.wizard",
+    "finalization_steps": ["token", "terraform", "bridge", "template"]
+  },
+  "root_agent_actions": "/usr/share/blockhost/root-agent-actions/qm.py",
+  "config_keys": {
+    "session_key": "proxmox",
+    "provisioner_config": ["terraform_dir", "vmid_range"]
+  }
+}
+```
+
+### Dispatcher (`blockhost.provisioner.ProvisionerDispatcher` in blockhost-common)
+
+Loads manifest, dispatches CLI commands by verb → binary name. Falls back to legacy
+hardcoded paths when no manifest exists (transition period).
+
+### Plugin Points
+
+| Extension | Mechanism | Provider |
+|-----------|-----------|----------|
+| Wizard step | Flask Blueprint via `wizard_module` | Provisioner .deb |
+| Finalization | `get_finalization_steps()` from wizard module | Provisioner .deb |
+| Summary section | `get_summary_data()` + `get_summary_template()` | Provisioner .deb |
+| First-boot hook | `setup.first_boot_hook` script | Provisioner .deb |
+| Root agent actions | `.py` modules in `/usr/share/blockhost/root-agent-actions/` | Provisioner .deb |
+| CLI commands | Binaries named in `commands` dict | Provisioner .deb |
+
+### CLI Command Contract
+
+All provisioner commands use `vm_name` (string) as the VM identifier:
+- `create <name> --owner-wallet <0x> [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
+- `destroy <name>`, `start <name>`, `stop <name>`, `kill <name>`
+- `status <name>` → stdout: `running`, `stopped`, `unknown`
+- `list [--format json]` → stdout: list of VMs
 
 ## SESSION SCHEMA
 

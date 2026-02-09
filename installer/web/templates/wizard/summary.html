@@ -76,34 +76,20 @@
         </div>
     </div>
 
-    <!-- Proxmox Summary -->
+    <!-- Provisioner Summary (dynamic — loaded from provisioner plugin or fallback) -->
+    {% if provisioner_summary_template %}
+        {% include provisioner_summary_template %}
+    {% elif provisioner_summary %}
     <div class="summary-section">
-        <h3>Proxmox</h3>
+        <h3>Provisioner</h3>
+        {% for key, value in provisioner_summary.items() %}
         <div class="summary-item">
-            <span class="summary-label">Node</span>
-            <span class="summary-value">{{ summary.proxmox.node }}</span>
+            <span class="summary-label">{{ key | replace('_', ' ') | title }}</span>
+            <span class="summary-value">{{ value }}</span>
         </div>
-        <div class="summary-item">
-            <span class="summary-label">Storage</span>
-            <span class="summary-value">{{ summary.proxmox.storage }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Network Bridge</span>
-            <span class="summary-value">{{ summary.proxmox.bridge }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">VMID Range</span>
-            <span class="summary-value">{{ summary.proxmox.vmid_start }} - {{ summary.proxmox.vmid_end }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">IP Pool</span>
-            <span class="summary-value">{{ summary.proxmox.ip_start }} - {{ summary.proxmox.ip_end }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Expiry Grace Period</span>
-            <span class="summary-value">{{ summary.proxmox.gc_grace_days }} days</span>
-        </div>
+        {% endfor %}
     </div>
+    {% endif %}
 
     <!-- IPv6 Summary -->
     <div class="summary-section">
@@ -550,23 +536,19 @@
 {% block extra_js %}
 <script>
 let pollInterval;
-// Note: 'terraform' step runs in backend but is hidden from UI (internal plumbing)
-const stepOrder = ['keypair', 'wallet', 'contracts', 'config', 'token', 'bridge', 'ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate'];
-const stepNames = {
-    'keypair': 'Generate server keypair',
-    'wallet': 'Configure deployer wallet',
-    'contracts': 'Deploy smart contracts',
-    'config': 'Write configuration files',
-    'token': 'Create Proxmox API token',
-    'bridge': 'Configure network bridge',
-    'ipv6': 'Configure IPv6',
-    'https': 'Configure HTTPS for signup',
-    'signup': 'Generate signup page',
-    'mint_nft': 'Mint admin NFT',
-    'template': 'Build VM template',
-    'finalize': 'Finalize setup',
-    'validate': 'Validate system'
-};
+// Step order is rendered from the backend finalization step list (dynamic — includes provisioner steps)
+const stepOrder = {{ finalization_step_ids | tojson }};
+// Step names are resolved from the DOM (step-name spans), with fallback for unknown steps
+const stepNames = {};
+stepOrder.forEach(id => {
+    const li = document.getElementById('step-' + id);
+    if (li) {
+        const nameEl = li.querySelector('.step-name');
+        stepNames[id] = nameEl ? nameEl.textContent.trim() : id;
+    } else {
+        stepNames[id] = id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+});
 
 // Check for existing state on page load
 document.addEventListener('DOMContentLoaded', function() {
