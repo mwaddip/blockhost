@@ -109,12 +109,12 @@ _POST_STEPS = [
 WIZARD_STEPS = list(_CORE_STEPS)
 if _PROVISIONER_STEP:
     WIZARD_STEPS.append(_PROVISIONER_STEP)
-else:
-    # Fallback: hardcoded Proxmox step when no manifest exists (transition period)
-    WIZARD_STEPS.append(
-        {'id': 'proxmox', 'label': 'Proxmox', 'endpoint': 'wizard_proxmox'}
-    )
 WIZARD_STEPS.extend(_POST_STEPS)
+
+# Pre-compute next-step endpoints for wizard navigation
+_NEXT_STEP = {}
+for _i in range(len(WIZARD_STEPS) - 1):
+    _NEXT_STEP[WIZARD_STEPS[_i]['id']] = WIZARD_STEPS[_i + 1]['endpoint']
 
 def _get_finalization_step_ids() -> list[str]:
     """Get finalization step IDs without requiring function references.
@@ -130,11 +130,7 @@ def _get_finalization_step_ids() -> list[str]:
             provisioner_ids = [s[0] for s in prov_mod.get_finalization_steps()]
     elif _provisioner and _provisioner.get('manifest'):
         provisioner_ids = _provisioner['manifest'].get('setup', {}).get('finalization_steps', [])
-    else:
-        # Fallback: hardcoded Proxmox steps for transition period
-        provisioner_ids = ['token', 'terraform', 'bridge']
-
-    post_ids = ['ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate']
+    post_ids = ['ipv6', 'https', 'signup', 'mint_nft', 'finalize', 'validate']
 
     return core_ids + provisioner_ids + post_ids
 
@@ -505,37 +501,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'revenue_share_dev': request.form.get('revenue_share_dev') == 'on',
                 'revenue_share_broker': request.form.get('revenue_share_broker') == 'on',
             }
-            return redirect(url_for('wizard_proxmox'))
+            return redirect(url_for(_NEXT_STEP.get('blockchain', 'wizard_ipv6')))
 
         return render_template('wizard/blockchain.html')
-
-    @app.route('/wizard/proxmox', methods=['GET', 'POST'])
-    @require_auth
-    def wizard_proxmox():
-        """Proxmox configuration step."""
-        detected = _detect_proxmox_resources()
-
-        if request.method == 'POST':
-            # Store Proxmox configuration in session
-            session['proxmox'] = {
-                'api_url': request.form.get('pve_api_url'),
-                'node': request.form.get('pve_node'),
-                'storage': request.form.get('pve_storage'),
-                'bridge': request.form.get('pve_bridge'),
-                'user': request.form.get('pve_user'),
-                'template_vmid': int(request.form.get('template_vmid', 9001)),
-                'vmid_start': int(request.form.get('vmid_start', 100)),
-                'vmid_end': int(request.form.get('vmid_end', 999)),
-                'ip_network': request.form.get('ip_network'),
-                'ip_start': request.form.get('ip_start'),
-                'ip_end': request.form.get('ip_end'),
-                'gateway': request.form.get('gateway'),
-                'gc_grace_days': int(request.form.get('gc_grace_days', 7)),
-            }
-            return redirect(url_for('wizard_ipv6'))
-
-        return render_template('wizard/proxmox.html',
-                             detected=detected)
 
     @app.route('/wizard/ipv6', methods=['GET', 'POST'])
     @require_auth
@@ -1698,8 +1666,8 @@ def _get_finalization_steps() -> list[tuple]:
 
     Step order:
     1. Core steps (keypair, wallet, contracts, config)
-    2. Provisioner steps (from manifest plugin, e.g. token, terraform, bridge)
-    3. Post steps (ipv6, https, signup, mint_nft, template, finalize, validate)
+    2. Provisioner steps (from plugin: token, terraform, bridge, template)
+    3. Post steps (ipv6, https, signup, mint_nft, finalize, validate)
     """
     core_steps = [
         ('keypair', 'Generating server keypair', _finalize_keypair),
@@ -1708,26 +1676,18 @@ def _get_finalization_steps() -> list[tuple]:
         ('config', 'Writing configuration files', _finalize_config),
     ]
 
-    # Get provisioner finalization steps (if plugin provides them)
+    # Get provisioner finalization steps from plugin
     provisioner_steps = []
     if _provisioner and _provisioner.get('module'):
         prov_mod = _provisioner['module']
         if hasattr(prov_mod, 'get_finalization_steps'):
             provisioner_steps = prov_mod.get_finalization_steps()
-    else:
-        # Fallback: hardcoded Proxmox steps for transition period
-        provisioner_steps = [
-            ('token', 'Creating Proxmox API token', _finalize_token),
-            ('terraform', 'Configuring Terraform provider', _finalize_terraform),
-            ('bridge', 'Configuring network bridge', _finalize_bridge),
-        ]
 
     post_steps = [
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
         ('https', 'Configuring HTTPS for signup page', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
         ('mint_nft', 'Minting admin NFT', _finalize_mint_nft),
-        ('template', 'Building VM template', _finalize_template),
         ('finalize', 'Finalizing setup', _finalize_complete),
         ('validate', 'Validating system (testing only)', _finalize_validate),
     ]
