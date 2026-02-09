@@ -41,7 +41,6 @@ blockhost/
 │               ├── network.html
 │               ├── storage.html
 │               ├── blockchain.html   # Chain, RPC, wallet, contracts, plan
-│               ├── proxmox.html
 │               ├── ipv6.html
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
@@ -167,12 +166,12 @@ Step dispatch (_get_finalization_steps() in app.py, dynamically built):
     5   token       finalize_token              → Proxmox API token via pveum
     6   terraform   finalize_terraform          → provider.tf.json, variables.tf.json, terraform init
     7   bridge      finalize_bridge             → vmbr0 via pvesh
+    8   template    finalize_template           → Build Debian VM template with libpam-web3
   Post steps:
-    8   ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
-    9   https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
-    10  signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
-    11  mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
-    12  template    _finalize_template          → Build Debian VM template with libpam-web3
+    9   ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
+    10  https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
+    11  signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
+    12  mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
     13  finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
     14  validate    _finalize_validate          → System validation (testing mode only)
 
@@ -182,7 +181,7 @@ Each step: skip if completed, mark running → completed|failed, supports retry.
 ### Phase 6: Runtime (post-setup)
 
 ```
-Services enabled by finalization step 13 (all run as User=blockhost except root-agent):
+Services enabled by finalization step 13/finalize (all run as User=blockhost except root-agent):
   blockhost-root-agent.service → Privileged ops daemon (root, installed + enabled by blockhost-common .deb)
   blockhost-monitor.service    → TypeScript event watcher (blockhost-engine)
   blockhost-signup.service     → Serve signup page (HTTPS)
