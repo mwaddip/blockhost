@@ -219,7 +219,14 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('token')">Retry</button>
         </li>
-        <!-- terraform step runs in backend but hidden from UI - internal plumbing -->
+        <li id="step-terraform" data-step="terraform">
+            <span class="step-icon">&#9675;</span>
+            <div class="step-content">
+                <span class="step-name">Configure Terraform provider</span>
+                <span class="step-status"></span>
+            </div>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('terraform')">Retry</button>
+        </li>
         <li id="step-bridge" data-step="bridge">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -777,6 +784,7 @@ function updateProgress(data) {
 
     stepOrder.forEach(stepId => {
         const li = document.getElementById('step-' + stepId);
+        if (!li) return;  // Step has no UI element (hidden/internal)
         const icon = li.querySelector('.step-icon');
         const status = li.querySelector('.step-status');
         const retryBtn = li.querySelector('.btn-retry');
@@ -784,7 +792,7 @@ function updateProgress(data) {
 
         // Reset classes
         li.classList.remove('completed', 'in-progress', 'failed');
-        retryBtn.classList.add('hidden');
+        if (retryBtn) retryBtn.classList.add('hidden');
 
         if (stepData.status === 'completed' || completedSteps.includes(stepId)) {
             li.classList.add('completed');

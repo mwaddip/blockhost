@@ -111,10 +111,12 @@ if _PROVISIONER_STEP:
     WIZARD_STEPS.append(_PROVISIONER_STEP)
 WIZARD_STEPS.extend(_POST_STEPS)
 
-# Pre-compute next-step endpoints for wizard navigation
+# Pre-compute step navigation maps for wizard prev/next links
 _NEXT_STEP = {}
+_PREV_STEP = {}
 for _i in range(len(WIZARD_STEPS) - 1):
     _NEXT_STEP[WIZARD_STEPS[_i]['id']] = WIZARD_STEPS[_i + 1]['endpoint']
+    _PREV_STEP[WIZARD_STEPS[_i + 1]['id']] = WIZARD_STEPS[_i]['endpoint']
 
 def _get_finalization_step_ids() -> list[str]:
     """Get finalization step IDs without requiring function references.
@@ -535,7 +537,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return redirect(url_for('wizard_admin_commands'))
 
         return render_template('wizard/ipv6.html',
-                             broker_registry=broker_registry)
+                             broker_registry=broker_registry,
+                             prev_step_url=url_for(_PREV_STEP.get('ipv6', 'wizard_blockchain')))
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
