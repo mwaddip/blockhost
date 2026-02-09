@@ -232,6 +232,8 @@ Admin commands flow:
 
 ## PROVISIONER CONTRACT
 
+Full interface specification: `docs/PROVISIONER_INTERFACE.md`
+
 One active provisioner per host. Package installs manifest at well-known path.
 
 ### Manifest (`/usr/share/blockhost/provisioner.json`)
