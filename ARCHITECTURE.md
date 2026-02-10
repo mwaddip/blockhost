@@ -521,7 +521,6 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 |--------|---------|----------|
 | `vm-generator.py` | Create VM + mint NFT | `<name> --owner-wallet <0x> [--user-signature <0x> --public-secret <str>] [--apply] [--cpu N --memory N --disk N]` |
 | `vm-gc.py` | Garbage collect expired VMs | `[--execute] [--suspend-only] [--grace-days N]` |
-| `mint_nft.py` | Mint access NFT | `--owner-wallet <0x> --machine-id <name> [--user-encrypted <0x> --public-secret <str>] [--dry-run]` |
 | `build-template.sh` | Build Debian 12 VM template | `[PROXMOX_HOST=root@ix TEMPLATE_VMID=9001]` |
 
 **vm-generator.py workflow**:
@@ -561,6 +560,7 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 | `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`) |
 | `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`) |
 | `scripts/generate-signup-page.py` | Python | Generates signup.html from template |
+| `scripts/mint_nft.py` | Python | Mint access credential NFT via Foundry cast |
 | `scripts/init-server.sh` | Bash | Generate server keys + config |
 
 **Smart contract — BlockhostSubscriptions.sol**:
@@ -736,7 +736,7 @@ All on-chain calls from this repo use Foundry `cast` CLI:
 | Deploy Subscription | cast send --create | BlockhostSubscriptions | constructor(nftContract) | _finalize_contracts |
 | Create plan | cast send | BlockhostSubscriptions | createPlan(string,uint256) | _create_default_plan |
 | Set stablecoin | cast send | BlockhostSubscriptions | setPrimaryStablecoin(address) | _create_default_plan |
-| Mint NFT | cast send | AccessCredentialNFT | mint(address,bytes,string,string,string,string,uint256) | provisioner mint_nft.py |
+| Mint NFT | cast send | AccessCredentialNFT | mint(address,bytes,string,string,string,string,uint256) | engine mint_nft.py |
 | Check balance | JSON-RPC | — | eth_getBalance | _get_wallet_balance |
 | Broker allocation | broker-client | BrokerRequests | submitRequest(address,bytes) | _finalize_ipv6 |
 

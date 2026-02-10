@@ -1,4 +1,8 @@
-# BlockHost - Custom Proxmox VE Image Project
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# BlockHost - Pluggable VM Hosting Platform
 
 ## SETTINGS.md (HIGHEST PRIORITY)
 
@@ -94,9 +98,25 @@ Packages built from submodules during first-boot:
 
 **Note**: `libpam-web3` (the PAM module, not tools) is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the Proxmox host.
 
-## ISO Build & Test Cycle
+## Build Commands
 
-When rebuilding the ISO:
+All build scripts require `--backend <name>` (e.g., `proxmox`, `libvirt`). The backend name maps to the submodule `blockhost-provisioner-<name>`.
 
-1. **Rebuild .deb packages** whenever a submodule has changed: `./scripts/build-packages.sh` — the ISO build copies pre-built .debs from `packages/host/` and `packages/template/`, it does NOT rebuild them automatically.
+```bash
+# Build all .deb packages for a backend
+./scripts/build-packages.sh --backend proxmox
+
+# Verify packages were built correctly
+./scripts/ci-verify-packages.sh --backend proxmox
+
+# Build the ISO (requires sudo, requires packages already built)
+sudo ./scripts/build-iso.sh --backend proxmox [--testing]
+
+# Check build dependencies
+./scripts/check-build-deps.sh
+```
+
+### ISO Build & Test Cycle
+
+1. **Rebuild .deb packages** whenever a submodule has changed: `./scripts/build-packages.sh --backend proxmox` — the ISO build copies pre-built .debs from `packages/host/` and `packages/template/`, it does NOT rebuild them automatically.
 2. **Remove the old ISO with `sudo`**: `sudo rm build/blockhost_0.1.0.iso` — the ISO is created by a root process and is owned by root.
