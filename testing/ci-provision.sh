@@ -149,8 +149,8 @@ jq -e '.otp' "$CONFIG_FILE" > /dev/null 2>&1 && \
 jq -e '.blockchain' "$CONFIG_FILE" > /dev/null 2>&1 || \
     fail "Config file must contain 'blockchain' section"
 
-# Secrets from environment — deployer key funds contract deployment + gas
-[ -n "${DEPLOYER_KEY:-}" ]          || fail "DEPLOYER_KEY env var required (deployer private key)"
+# Secrets from environment — admin key authenticates + funds the VM's fresh deployer wallet
+[ -n "${DEPLOYER_KEY:-}" ]          || fail "DEPLOYER_KEY env var required (admin private key)"
 
 # Derive admin wallet address from deployer key
 ADMIN_WALLET=$(cast wallet address --private-key "$DEPLOYER_KEY")
@@ -281,6 +281,41 @@ STABLE_IP="$VM_IP"
 info "Locking IP to $STABLE_IP for remaining phases"
 
 # =============================================================================
+# Phase 5.5 — Generate fresh deployer wallet for VM
+# =============================================================================
+info "Phase 5.5: Generating fresh deployer wallet"
+
+RPC_URL=$(jq -r '.blockchain.rpc_url' "$CONFIG_FILE")
+[ -n "$RPC_URL" ] || fail "blockchain.rpc_url missing from config"
+USDC_SEPOLIA="0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+
+# Fresh keypair — this becomes the VM's deployer.key (admin key never touches the VM)
+VM_WALLET_JSON=$(cast wallet new --json)
+VM_DEPLOYER_KEY=$(echo "$VM_WALLET_JSON" | jq -r '.[0].private_key')
+VM_DEPLOYER_ADDR=$(echo "$VM_WALLET_JSON" | jq -r '.[0].address')
+
+[ -n "$VM_DEPLOYER_KEY" ] || fail "Could not generate fresh deployer wallet"
+info "VM deployer: $VM_DEPLOYER_ADDR"
+
+# Fund with ETH for gas (contract deployment + integration test transactions)
+info "Sending 0.1 ETH to VM deployer..."
+cast send "$VM_DEPLOYER_ADDR" --value 0.1ether \
+    --private-key "$DEPLOYER_KEY" --rpc-url "$RPC_URL" \
+    --json > /dev/null \
+    || fail "Could not fund VM deployer with ETH"
+
+# Fund with USDC for integration test (buyer wallet needs stablecoin for subscription)
+info "Sending 10 USDC to VM deployer..."
+USDC_AMOUNT="10000000"  # 10 USDC (6 decimals)
+cast send "$USDC_SEPOLIA" "transfer(address,uint256)" \
+    "$VM_DEPLOYER_ADDR" "$USDC_AMOUNT" \
+    --private-key "$DEPLOYER_KEY" --rpc-url "$RPC_URL" \
+    --json > /dev/null \
+    || fail "Could not fund VM deployer with USDC"
+
+pass "VM deployer funded: 0.1 ETH + 10 USDC"
+
+# =============================================================================
 # Phase 6 — Submit wizard config via /api/setup-test
 # =============================================================================
 info "Phase 6: Submitting wizard config"
@@ -299,8 +334,7 @@ info "Broker registry: $BROKER_REGISTRY"
 
 # Look up the broker's requests contract from the on-chain registry (broker ID 1)
 # getBroker returns a struct; requestsContract is the second address field
-SEPOLIA_RPC="https://ethereum-sepolia-rpc.publicnode.com"
-RAW=$(cast call "$BROKER_REGISTRY" "getBroker(uint256)" 1 --rpc-url "$SEPOLIA_RPC") \
+RAW=$(cast call "$BROKER_REGISTRY" "getBroker(uint256)" 1 --rpc-url "$RPC_URL") \
     || fail "Could not call getBroker on registry $BROKER_REGISTRY"
 # Struct has offset pointer (32B), then operator (32B), then requestsContract (32B)
 # Address is last 20 bytes (40 hex chars) of its 32-byte slot
@@ -310,10 +344,11 @@ REQUESTS_CONTRACT="0x${RAW_HEX:152:40}"
     || fail "Requests contract is zero address — broker not registered?"
 info "Requests contract: $REQUESTS_CONTRACT"
 
-# Inject OTP + secrets + broker registry into config
+# Inject OTP + fresh deployer key + broker registry into config
+# Note: DEPLOYER_KEY (admin) authenticates; VM_DEPLOYER_KEY (fresh) goes to the VM
 SUBMIT_JSON=$(jq \
     --arg otp "$OTP_CODE" \
-    --arg deployer_key "$DEPLOYER_KEY" \
+    --arg deployer_key "$VM_DEPLOYER_KEY" \
     --arg admin_wallet "$ADMIN_WALLET" \
     --arg admin_sig "$ADMIN_SIGNATURE" \
     --arg broker_registry "$BROKER_REGISTRY" \
