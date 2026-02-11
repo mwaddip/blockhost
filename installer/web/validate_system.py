@@ -755,7 +755,7 @@ def run_full_validation() -> ValidationReport:
         # Check that RPC_URL is set
         try:
             env_content = env_path.read_text()
-            if 'RPC=' in env_content:
+            if 'RPC_URL=' in env_content:
                 report.add(ValidationResult("Environment", "RPC variable", True, "RPC endpoint configured"))
             else:
                 report.add(ValidationResult("Environment", "RPC variable", False, "No RPC variable found in .env"))
