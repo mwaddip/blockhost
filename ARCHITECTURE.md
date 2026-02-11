@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-09
+> Last updated: 2026-02-11
 
 ## FILE MAP
 
@@ -29,7 +29,7 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + finalization (~3146 lines)
+│       ├── app.py                    # Flask wizard + finalization (~3140 lines)
 │       ├── validate_system.py        # Post-install validation (778 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
@@ -56,14 +56,16 @@ blockhost/
 │   ├── iso-build.yml                  # Manual/tag: ISO build (self-hosted)
 │   └── integration.yml                # Manual: full integration test (self-hosted)
 ├── packages/
-│   ├── host/                         # .debs installed on Proxmox host
+│   ├── host/                         # .debs installed on host
 │   └── template/                     # .debs included in VM templates
 └── submodules (READ-ONLY, own repos):
     ├── libpam-web3/
     ├── blockhost-common/
     ├── blockhost-provisioner-proxmox/
+    ├── blockhost-provisioner-libvirt/
     ├── blockhost-engine/
-    └── blockhost-broker/
+    ├── blockhost-broker/
+    └── facts/
 ```
 
 ## EXECUTION PHASES
@@ -75,7 +77,7 @@ build-packages.sh
   → libpam-web3/packaging/build-deb-tools.sh  → packages/host/libpam-web3-tools_*.deb
   → libpam-web3/packaging/build-deb.sh        → packages/template/libpam-web3_*.deb
   → blockhost-common/build.sh                 → packages/host/blockhost-common_*.deb
-  → blockhost-provisioner-proxmox/build-deb.sh → packages/host/blockhost-provisioner-proxmox_*.deb
+  → blockhost-provisioner-<backend>/build-deb.sh → packages/host/blockhost-provisioner-<backend>_*.deb
   → blockhost-engine/packaging/build.sh       → packages/host/blockhost-engine_*.deb
   → blockhost-broker/scripts/build-deb.sh     → packages/host/blockhost-broker-client_*.deb
 
@@ -245,32 +247,31 @@ One active provisioner per host. Package installs manifest at well-known path.
 
 ### Manifest (`/usr/share/blockhost/provisioner.json`)
 
+Example (Proxmox). Commands section is identical across provisioners; setup, root_agent_actions,
+and config_keys vary. See `facts/PROVISIONER_INTERFACE.md` for the full schema.
+
 ```json
 {
   "name": "proxmox",
   "version": "0.1.0",
   "display_name": "Proxmox VE + Terraform",
-  "commands": {
-    "create": "blockhost-vm-create",    "destroy": "blockhost-vm-destroy",
-    "start": "blockhost-vm-start",      "stop": "blockhost-vm-stop",
-    "kill": "blockhost-vm-kill",        "status": "blockhost-vm-status",
-    "list": "blockhost-vm-list",        "metrics": "blockhost-vm-metrics",
-    "throttle": "blockhost-vm-throttle","build-template": "blockhost-build-template",
-    "gc": "blockhost-vm-gc",            "resume": "blockhost-vm-resume"
-  },
+  "commands": { "create": "blockhost-vm-create", "destroy": "blockhost-vm-destroy", "..." : "..." },
   "setup": {
     "first_boot_hook": "/usr/share/blockhost/provisioner-hooks/first-boot.sh",
     "detect": "blockhost-provisioner-detect",
-    "wizard_module": "blockhost.provisioner_proxmox.wizard",
-    "finalization_steps": ["token", "terraform", "bridge", "template"]
+    "wizard_module": "blockhost.provisioner_<name>.wizard",
+    "finalization_steps": ["..."]
   },
-  "root_agent_actions": "/usr/share/blockhost/root-agent-actions/qm.py",
-  "config_keys": {
-    "session_key": "proxmox",
-    "provisioner_config": ["terraform_dir", "vmid_range"]
-  }
+  "root_agent_actions": "/usr/share/blockhost/root-agent-actions/<name>.py",
+  "config_keys": { "session_key": "<name>", "provisioner_config": ["..."] }
 }
 ```
+
+| | Proxmox | libvirt |
+|---|---------|---------|
+| `finalization_steps` | `["token", "terraform", "bridge", "template"]` | `["storage", "network", "template"]` |
+| `root_agent_actions` | `qm.py` | `virsh.py` |
+| `config_keys.provisioner_config` | `["terraform_dir", "vmid_range"]` | `["storage_pool"]` |
 
 ### Dispatcher (`blockhost.provisioner.ProvisionerDispatcher` in blockhost-common)
 
@@ -294,7 +295,7 @@ hardcoded paths when no manifest exists (transition period).
 All provisioner commands use `vm_name` (string) as the VM identifier:
 - `create <name> --owner-wallet <0x> [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
 - `destroy <name>`, `start <name>`, `stop <name>`, `kill <name>`
-- `status <name>` → stdout: `running`, `stopped`, `unknown`
+- `status <name>` → stdout: `active`, `suspended`, `destroyed`, `unknown`
 - `list [--format json]` → stdout: list of VMs
 
 ## SESSION SCHEMA
@@ -463,7 +464,7 @@ Two packages for different targets:
 
 | Package | Build | Install target | Contents |
 |---------|-------|----------------|----------|
-| libpam-web3-tools | packaging/build-deb-tools.sh | Proxmox host | `pam_web3_tool` CLI, signing-page HTML, contract artifacts (AccessCredentialNFT.json, BlockhostSubscriptions.json) |
+| libpam-web3-tools | packaging/build-deb-tools.sh | Host | `pam_web3_tool` CLI, signing-page HTML, contract artifacts (AccessCredentialNFT.json, BlockhostSubscriptions.json) |
 | libpam-web3 | packaging/build-deb.sh | VM template-packages/ | PAM module (`pam_web3.so`), `web3-auth-svc` daemon |
 
 **PAM module** (Rust, installed in VMs):
@@ -492,12 +493,12 @@ Two packages for different targets:
 
 | Package | Build | Install target |
 |---------|-------|----------------|
-| blockhost-common | build.sh | Proxmox host |
+| blockhost-common | build.sh | Host |
 
 **Python module** (`blockhost.*`, installed to `/usr/lib/python3/dist-packages/`):
 
 ```python
-from blockhost.config import load_db_config, load_web3_config, get_terraform_dir
+from blockhost.config import load_db_config, load_web3_config, load_blockhost_config
 from blockhost.vm_db import VMDatabase, MockVMDatabase, get_database
 
 db = get_database()          # Returns VMDatabase (prod) or MockVMDatabase (--mock)
@@ -510,7 +511,7 @@ db.mark_nft_failed(token_id) # If VM creation fails (never reuse failed IDs)
 Reads: `/etc/blockhost/db.yaml`, `/etc/blockhost/web3-defaults.yaml`
 Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
-**Dependency**: Required by blockhost-provisioner-proxmox and blockhost-engine.
+**Dependency**: Required by all provisioner packages and blockhost-engine.
 
 ### blockhost-provisioner-proxmox
 
@@ -548,7 +549,7 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
 | Package | Build | Install target |
 |---------|-------|----------------|
-| blockhost-engine | packaging/build.sh | Proxmox host |
+| blockhost-engine | packaging/build.sh | Host |
 
 **Components** (TypeScript + Solidity):
 
@@ -612,7 +613,7 @@ Events (monitored by blockhost-monitor):
 
 | Package | Build | Install target |
 |---------|-------|----------------|
-| blockhost-broker-client | scripts/build-deb.sh | Proxmox host (client only) |
+| blockhost-broker-client | scripts/build-deb.sh | Host (client only) |
 
 **Client CLI** (`broker-client`, Python):
 
@@ -668,60 +669,60 @@ Events (monitored by blockhost-monitor):
 ### Routes
 | Line | Route | Method |
 |------|-------|--------|
-| 365 | / | GET → redirect |
-| 375 | /login | GET, POST |
-| 410 | /wizard/wallet | GET, POST |
-| 489 | /wizard/network | GET, POST |
-| 538 | /wizard/storage | GET, POST |
-| 552 | /wizard/blockchain | GET, POST |
+| 376 | / | GET → redirect |
+| 386 | /login | GET, POST |
+| 421 | /wizard/wallet | GET, POST |
+| 500 | /wizard/network | GET, POST |
+| 549 | /wizard/storage | GET, POST |
+| 563 | /wizard/blockchain | GET, POST |
 | — | /wizard/<provisioner> | GET, POST (from provisioner Blueprint) |
-| 584 | /wizard/ipv6 | GET, POST |
-| 617 | /wizard/admin-commands | GET, POST |
-| 651 | /wizard/summary | GET, POST |
-| 727 | /wizard/install | GET |
-| 978 | /api/setup-test | POST (testing only) |
-| 1052 | /api/finalize | POST |
-| 1097 | /api/finalize/status | GET |
-| 1149 | /api/finalize/retry | POST |
-| 1194 | /api/finalize/reset | POST |
-| 1254 | /api/validation-output | GET |
+| 595 | /wizard/ipv6 | GET, POST |
+| 628 | /wizard/admin-commands | GET, POST |
+| 662 | /wizard/summary | GET, POST |
+| 750 | /wizard/install | GET |
+| 1001 | /api/setup-test | POST (testing only) |
+| 1075 | /api/finalize | POST |
+| 1120 | /api/finalize/status | GET |
+| 1172 | /api/finalize/retry | POST |
+| 1217 | /api/finalize/reset | POST |
+| 1275 | /api/validation-output | GET |
 
 ### API endpoints (AJAX from wizard UI)
 | Line | Route | Purpose |
 |------|-------|---------|
-| 778 | /api/blockchain/generate-wallet | Generate new secp256k1 keypair |
-| 792 | /api/blockchain/validate-key | Validate imported private key |
-| 805 | /api/blockchain/balance | Check wallet balance via RPC |
+| 801 | /api/blockchain/generate-wallet | Generate new secp256k1 keypair |
+| 815 | /api/blockchain/validate-key | Validate imported private key |
+| 828 | /api/blockchain/balance | Check wallet balance via RPC |
 
 ### Finalization functions
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1692 | _run_finalization_with_state | Step dispatcher loop |
-| 1775 | _finalize_keypair | Generate server secp256k1 key |
-| 1804 | _finalize_wallet | Write deployer.key |
-| 1824 | _finalize_contracts | Deploy or verify contracts |
-| 1887 | _deploy_contract_with_forge | Deploy contract via cast send --create |
-| 1985 | _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
-| 2161 | _finalize_ipv6 | Broker allocation or manual prefix |
-| 2342 | _finalize_https | sslip.io hostname + Let's Encrypt |
-| 2470 | _finalize_signup | generate-signup-page.py |
-| 2578 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| 2827 | _finalize_complete | Enable services, create subscription plan |
-| 2903 | _finalize_validate | System validation (testing only) |
-| 2932 | _create_default_plan | Call createPlan() on subscription contract |
+| 1715 | _run_finalization_with_state | Step dispatcher loop |
+| 1799 | _finalize_keypair | Generate server secp256k1 key |
+| 1828 | _finalize_wallet | Write deployer.key |
+| 1848 | _finalize_contracts | Deploy or verify contracts |
+| 1911 | _deploy_contract_with_forge | Deploy contract via cast send --create |
+| 2009 | _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
+| 2181 | _finalize_ipv6 | Broker allocation or manual prefix |
+| 2362 | _finalize_https | sslip.io hostname + Let's Encrypt |
+| 2490 | _finalize_signup | generate-signup-page.py |
+| 2598 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
+| 2816 | _finalize_complete | Enable services, create subscription plan |
+| 2897 | _finalize_validate | System validation (testing only) |
+| 2926 | _create_default_plan | Call createPlan() on subscription contract |
 
 ### Helpers
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1280 | _detect_disks | List available disks (lsblk) |
-| 1308 | _generate_secp256k1_keypair | Generate wallet keypair |
-| 1395 | _get_address_from_key | Derive address from private key |
-| 1433 | _is_valid_address | Validate 0x + 40 hex |
-| 1464 | _get_broker_registry | Look up broker registry by chain_id |
-| 1475 | _get_wallet_balance | eth_getBalance via JSON-RPC |
-| 1512 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
-| 1547 | _request_broker_allocation | Call blockhost-broker-client CLI |
-| 3035 | _write_yaml | Write YAML file helper |
+| 1303 | _detect_disks | List available disks (lsblk) |
+| 1331 | _generate_secp256k1_keypair | Generate wallet keypair |
+| 1418 | _get_address_from_key | Derive address from private key |
+| 1456 | _is_valid_address | Validate 0x + 40 hex |
+| 1487 | _get_broker_registry | Look up broker registry by chain_id |
+| 1498 | _get_wallet_balance | eth_getBalance via JSON-RPC |
+| 1535 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
+| 1570 | _request_broker_allocation | Call blockhost-broker-client CLI |
+| 3029 | _write_yaml | Write YAML file helper |
 
 ## BLOCKCHAIN INTERACTIONS
 
@@ -787,6 +788,20 @@ Created by first-boot Step 2b. Group `blockhost` grants read access to config fi
 
 ### Root Agent Action Catalog
 
+Common actions (from blockhost-common):
+
+| Action | Params | Caller |
+|--------|--------|--------|
+| `ip6-route-add` | address:str(/128), dev:str | provisioner (vm-create) |
+| `ip6-route-del` | address:str(/128), dev:str | provisioner (vm-gc, vm-destroy) |
+| `iptables-open` | port:int, proto:str, comment:str | engine (admin knock) |
+| `iptables-close` | port:int, proto:str, comment:str | engine (admin knock) |
+| `virt-customize` | image_path:str, commands:list | provisioner (template build) |
+| `generate-wallet` | name:str | engine (fund-manager, ab CLI) |
+| `addressbook-save` | entries:dict | engine (fund-manager, ab CLI) |
+
+Proxmox provisioner actions (from `qm.py`):
+
 | Action | Params | Caller |
 |--------|--------|--------|
 | `qm-start` | vmid:int | provisioner (vm-resume), engine (cancellation) |
@@ -797,13 +812,17 @@ Created by first-boot Step 2b. Group `blockhost` grants read access to config fi
 | `qm-importdisk` | vmid:int, disk_path:str, storage:str | provisioner |
 | `qm-set` | vmid:int, options:dict | provisioner |
 | `qm-template` | vmid:int | provisioner |
-| `ip6-route-add` | address:str(/128), dev:str | provisioner (vm-generator) |
-| `ip6-route-del` | address:str(/128), dev:str | provisioner (vm-gc) |
-| `iptables-open` | port:int, proto:str, comment:str | engine (admin knock) |
-| `iptables-close` | port:int, proto:str, comment:str | engine (admin knock) |
-| `virt-customize` | image_path:str, commands:list | installer (template build) |
-| `generate-wallet` | name:str | engine (fund-manager, ab CLI) |
-| `addressbook-save` | entries:dict | engine (fund-manager, ab CLI) |
+
+libvirt provisioner actions (from `virsh.py`):
+
+| Action | Params | Caller |
+|--------|--------|--------|
+| `virsh-start` | name:str | provisioner (vm-resume) |
+| `virsh-shutdown` | name:str | provisioner (vm-gc) |
+| `virsh-destroy` | name:str | provisioner (vm-gc, vm-destroy) |
+| `virsh-reboot` | name:str | provisioner |
+| `virsh-define` | xml:str | provisioner (vm-create) |
+| `virsh-undefine` | name:str, flags:list | provisioner (vm-destroy) |
 
 ### What Runs Without Root
 
@@ -833,7 +852,7 @@ Created by first-boot Step 2b. Group `blockhost` grants read access to config fi
 |---------|------|-----------------------|
 | blockhost-root-agent | root | — |
 | blockhost-monitor | blockhost | Yes (iptables, wallet, addressbook) |
-| blockhost-gc | blockhost | Yes (qm, ip6-route) |
+| blockhost-gc | blockhost | Yes (provisioner actions, ip6-route) |
 | blockhost-signup | blockhost | No |
 
 ## ENCRYPTION MODEL
@@ -919,7 +938,8 @@ Output:  VM_NAME, VM_IP (to GITHUB_OUTPUT if in Actions)
 
 ### Self-Hosted Runner Labels
 
-Single runner on dev machine with three labels:
+Single runner on dev machine with four labels:
 - `blockhost-iso` — has xorriso, isolinux, build toolchains
 - `blockhost-proxmox` — has virsh, virt-install, sshpass, sudo
+- `blockhost-libvirt` — same runner, same tools (libvirt and proxmox CI both use virt-install)
 - `blockhost-phone` — has adb-connected Android phone with carrier IPv6
