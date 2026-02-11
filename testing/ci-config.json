@@ -8,7 +8,9 @@
     "plan_price_cents": 50
   },
   "proxmox": {
-    "auto_detect": true
+    "node": "blockhost",
+    "storage": "local",
+    "bridge": "vmbr0"
   },
   "ipv6": {
     "mode": "broker"
