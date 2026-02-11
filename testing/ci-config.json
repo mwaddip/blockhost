@@ -10,7 +10,15 @@
   "proxmox": {
     "node": "blockhost",
     "storage": "local",
-    "bridge": "vmbr0"
+    "bridge": "vmbr0",
+    "template_vmid": 9001,
+    "vmid_start": 100,
+    "vmid_end": 999,
+    "ip_network": "192.168.122.0/24",
+    "ip_start": "200",
+    "ip_end": "250",
+    "gateway": "192.168.122.1",
+    "gc_grace_days": 7
   },
   "ipv6": {
     "mode": "broker"
