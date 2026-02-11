@@ -61,7 +61,7 @@ config_files:
     contains: [server, deployer, proxmox]
   monitor_env:
     path: /opt/blockhost/.env
-    contains: [SEPOLIA_RPC, BLOCKHOST_CONTRACT, NFT_CONTRACT, DEPLOYER_KEY_FILE]
+    contains: [RPC_URL, BLOCKHOST_CONTRACT, NFT_CONTRACT, DEPLOYER_KEY_FILE]
 
 services:
   blockhost_monitor:

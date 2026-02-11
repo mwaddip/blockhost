@@ -2164,12 +2164,8 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         env_file = Path('/opt/blockhost/.env')
         env_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Map chain_id to RPC env var name
-        chain_id = int(blockchain.get('chain_id', 11155111))
-        rpc_var = 'SEPOLIA_RPC' if chain_id == 11155111 else f'CHAIN_{chain_id}_RPC'
-
         env_lines = [
-            f"{rpc_var}={blockchain.get('rpc_url', '')}",
+            f"RPC_URL={blockchain.get('rpc_url', '')}",
             f"BLOCKHOST_CONTRACT={contracts.get('subscription', '')}",
             f"NFT_CONTRACT={contracts.get('nft', '')}",
             f"DEPLOYER_KEY_FILE=/etc/blockhost/deployer.key",

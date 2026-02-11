@@ -748,11 +748,11 @@ def run_full_validation() -> ValidationReport:
     env_path = Path('/opt/blockhost/.env')
     report.add(_check_env_file(
         env_path,
-        required_vars=['NFT_CONTRACT', 'DEPLOYER_KEY_FILE', 'BLOCKHOST_CONTRACT']
+        required_vars=['RPC_URL', 'NFT_CONTRACT', 'DEPLOYER_KEY_FILE', 'BLOCKHOST_CONTRACT']
     ))
     if env_path.exists():
         report.add(_check_file_permissions(env_path, 0o640, "Permissions", ".env file"))
-        # Check that at least one RPC variable is set (SEPOLIA_RPC or CHAIN_*_RPC)
+        # Check that RPC_URL is set
         try:
             env_content = env_path.read_text()
             if 'RPC=' in env_content:
