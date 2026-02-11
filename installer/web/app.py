@@ -7,7 +7,7 @@ Provides web-based installation wizard with:
 - Network configuration
 - Storage detection
 - Blockchain configuration
-- Proxmox integration
+- Provisioner integration
 - IPv6 allocation
 - Package configuration
 """
@@ -79,6 +79,25 @@ def _discover_provisioner() -> Optional[dict]:
 
 # Discover active provisioner (if installed)
 _provisioner = _discover_provisioner()
+
+# Resolve provisioner session key from manifest (e.g. the value of config_keys.session_key)
+_prov_session_key = None
+if _provisioner and _provisioner.get('manifest'):
+    _prov_session_key = _provisioner['manifest'].get('config_keys', {}).get('session_key')
+
+
+def _gather_session_config() -> dict:
+    """Build config dict from session, using the provisioner's session key."""
+    return {
+        'blockchain': session.get('blockchain', {}),
+        'provisioner': session.get(_prov_session_key, {}) if _prov_session_key else {},
+        'ipv6': session.get('ipv6', {}),
+        'admin_wallet': session.get('admin_wallet', ''),
+        'admin_signature': session.get('admin_signature', ''),
+        'admin_public_secret': session.get('admin_public_secret', ''),
+        'admin_commands': session.get('admin_commands', {}),
+    }
+
 
 # Core wizard steps (always present)
 _CORE_STEPS = [
@@ -211,9 +230,10 @@ class SetupState:
 
     def get_next_step(self) -> Optional[str]:
         """Return the next step to run (first non-completed step)."""
-        step_order = ['keypair', 'wallet', 'contracts', 'config', 'token', 'terraform', 'bridge', 'ipv6', 'https', 'signup', 'mint_nft', 'template', 'finalize', 'validate']
+        step_order = _get_finalization_step_ids()
         for step_id in step_order:
-            if self.state['steps'][step_id]['status'] not in ('completed',):
+            step = self.state['steps'].get(step_id)
+            if step and step['status'] not in ('completed',):
                 return step_id
         return None
 
@@ -314,10 +334,21 @@ def create_app(config: Optional[dict] = None) -> Flask:
     if _provisioner and _provisioner.get('blueprint'):
         app.register_blueprint(_provisioner['blueprint'])
 
-    # Inject wizard steps into all templates
+    # Inject wizard steps and provisioner UI params into all templates
     @app.context_processor
-    def inject_wizard_steps():
-        return {'wizard_steps': WIZARD_STEPS}
+    def inject_wizard_context():
+        prov_ui = {}
+        if _provisioner and _provisioner.get('module'):
+            prov_mod = _provisioner['module']
+            if hasattr(prov_mod, 'get_ui_params'):
+                try:
+                    prov_ui = prov_mod.get_ui_params(dict(session))
+                except Exception:
+                    pass
+        return {
+            'wizard_steps': WIZARD_STEPS,
+            'prov_ui': prov_ui,
+        }
 
     @app.template_global()
     def wizard_nav(current_step_id):
@@ -444,10 +475,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return jsonify({'error': 'Decrypted content is not valid config'}), 400
 
             # Restore session data from config
-            for key in ('blockchain', 'proxmox', 'ipv6', 'admin_commands',
+            for key in ('blockchain', 'ipv6', 'admin_commands',
                         'admin_wallet', 'admin_public_secret'):
                 if key in config:
                     session[key] = config[key]
+
+            # Restore provisioner data: new format uses 'provisioner',
+            # old Proxmox backups use 'proxmox' — map to the active session key
+            prov_data = config.get('provisioner') or config.get('proxmox', {})
+            if prov_data and _prov_session_key:
+                session[_prov_session_key] = prov_data
 
             # Signature comes from the current session (just signed), not the file
             session['admin_signature'] = admin_signature
@@ -601,7 +638,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
             if admin_enabled:
                 # Parse ports
-                ports_str = request.form.get('knock_ports', '22, 8006')
+                ports_str = request.form.get('knock_ports', '22')
                 ports = [int(p.strip()) for p in ports_str.split(',') if p.strip().isdigit()]
 
                 admin_commands.update({
@@ -627,7 +664,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
     def wizard_summary():
         """Summary and confirmation step."""
         blockchain = session.get('blockchain', {})
-        proxmox = session.get('proxmox', {})
         ipv6 = session.get('ipv6', {})
         admin_commands = session.get('admin_commands', {})
 
@@ -692,11 +728,24 @@ def create_app(config: Optional[dict] = None) -> Flask:
         # Build finalization step metadata for the progress UI
         finalization_step_ids = _get_finalization_step_ids()
 
+        # Build provisioner step metadata for dynamic rendering in progress list
+        provisioner_steps_meta = []
+        if _provisioner and _provisioner.get('module'):
+            prov_mod = _provisioner['module']
+            if hasattr(prov_mod, 'get_finalization_steps'):
+                for step in prov_mod.get_finalization_steps():
+                    meta = {'id': step[0], 'label': step[1]}
+                    if len(step) > 3:
+                        meta['hint'] = step[3]
+                    provisioner_steps_meta.append(meta)
+
         return render_template('wizard/summary.html',
                              summary=summary,
+                             provisioner=provisioner_summary,
                              provisioner_summary=provisioner_summary,
                              provisioner_summary_template=provisioner_summary_template,
-                             finalization_step_ids=finalization_step_ids)
+                             finalization_step_ids=finalization_step_ids,
+                             provisioner_steps=provisioner_steps_meta)
 
     @app.route('/wizard/install')
     @require_auth
@@ -858,13 +907,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return jsonify({'success': True})
 
-    # Proxmox API endpoints
-    @app.route('/api/proxmox/detect')
-    @require_auth
-    def api_proxmox_detect():
-        """Auto-detect Proxmox resources."""
-        return jsonify(_detect_proxmox_resources())
-
     # IPv6 API endpoints
     @app.route('/api/ipv6/broker-request', methods=['POST'])
     @require_auth
@@ -990,28 +1032,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
         # Blockchain config
         session['blockchain'] = data.get('blockchain', {})
 
-        # Proxmox — auto-detect, then merge any explicit overrides
-        detected = _detect_proxmox_resources()
-        proxmox_defaults = {
-            'api_url': detected.get('api_url', 'https://127.0.0.1:8006'),
-            'node': detected.get('node_name', socket.gethostname()),
-            'storage': detected['storages'][0]['name'] if detected.get('storages') else 'local-lvm',
-            'bridge': detected['bridges'][0] if detected.get('bridges') else 'vmbr0',
-            'user': 'root@pam',
-            'template_vmid': 9001,
-            'vmid_start': 100,
-            'vmid_end': 999,
-            'ip_network': '192.168.122.0/24',
-            'ip_start': '200',
-            'ip_end': '250',
-            'gateway': '192.168.122.1',
-            'gc_grace_days': 7,
-        }
-        proxmox_overrides = data.get('proxmox', {})
-        # Remove the auto_detect flag — it's a signal, not config
-        proxmox_overrides.pop('auto_detect', None)
-        proxmox_defaults.update(proxmox_overrides)
-        session['proxmox'] = proxmox_defaults
+        # Provisioner config — CI sends data under the provisioner's session key
+        if _prov_session_key:
+            prov_data = data.get(_prov_session_key, {})
+            prov_data.pop('auto_detect', None)
+            session[_prov_session_key] = prov_data
 
         # IPv6 config
         session['ipv6'] = data.get('ipv6', {})
@@ -1020,15 +1045,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         session['admin_commands'] = data.get('admin_commands', {'enabled': False})
 
         # Build config dict identical to what /api/finalize uses
-        config = {
-            'blockchain': session.get('blockchain', {}),
-            'proxmox': session.get('proxmox', {}),
-            'ipv6': session.get('ipv6', {}),
-            'admin_wallet': session.get('admin_wallet', ''),
-            'admin_signature': session.get('admin_signature', ''),
-            'admin_public_secret': session.get('admin_public_secret', ''),
-            'admin_commands': session.get('admin_commands', {}),
-        }
+        config = _gather_session_config()
 
         # Start finalization (same as /api/finalize)
         setup_state = SetupState()
@@ -1076,15 +1093,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if resume and setup_state.state.get('config'):
             config = setup_state.state['config']
         else:
-            config = {
-                'blockchain': session.get('blockchain', {}),
-                'proxmox': session.get('proxmox', {}),
-                'ipv6': session.get('ipv6', {}),
-                'admin_wallet': session.get('admin_wallet', ''),
-                'admin_signature': session.get('admin_signature', ''),
-                'admin_public_secret': session.get('admin_public_secret', ''),
-                'admin_commands': session.get('admin_commands', {}),
-            }
+            config = _gather_session_config()
 
         # If retrying a specific step, reset it to pending
         if retry_step and retry_step in setup_state.state['steps']:
@@ -1191,15 +1200,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         # Get stored config
         config = setup_state.state.get('config', {})
         if not config:
-            config = {
-                'blockchain': session.get('blockchain', {}),
-                'proxmox': session.get('proxmox', {}),
-                'ipv6': session.get('ipv6', {}),
-                'admin_wallet': session.get('admin_wallet', ''),
-                'admin_signature': session.get('admin_signature', ''),
-                'admin_public_secret': session.get('admin_public_secret', ''),
-                'admin_commands': session.get('admin_commands', {}),
-            }
+            config = _gather_session_config()
 
         # Run in background thread
         thread = threading.Thread(
@@ -1225,7 +1226,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_install_start():
         """Start installation process."""
-        # Proxmox is already installed, just mark setup complete
+        # Hypervisor already installed, just mark setup complete
         marker_dir = Path('/var/lib/blockhost')
         marker_file = marker_dir / '.setup-complete'
         try:
@@ -1239,7 +1240,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_install_status(job_id):
         """Get installation status."""
-        # Proxmox is already installed, return completed
+        # Already complete, return immediately
         return jsonify({
             'job_id': job_id,
             'status': 'completed',
@@ -1325,80 +1326,6 @@ def _detect_disks() -> list[dict]:
     except Exception:
         pass
     return disks
-
-
-def _detect_proxmox_resources() -> dict:
-    """Detect Proxmox VE resources (storage, bridges, node name)."""
-    detected = {
-        'api_url': 'https://127.0.0.1:8006',
-        'node_name': socket.gethostname(),
-        'storages': [],
-        'bridges': [],
-        'token_exists': False,
-    }
-
-    # Get storage pools
-    # pvesm status output format:
-    # Name             Type     Status           Total            Used       Available        %
-    # local             dir     active       102297016        8654608        88423628    8.46%
-    # Values are in KB (kibibytes)
-    try:
-        result = subprocess.run(
-            ['pvesm', 'status', '-content', 'images'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            if lines:
-                # Parse header to find column positions
-                header = lines[0].lower()
-                # Default column indices (Name, Type, Status, Total, Used, Available, %)
-                avail_col = 5  # 0-indexed, 'Available' is typically column 5
-
-                for line in lines[1:]:  # Skip header
-                    parts = line.split()
-                    if len(parts) >= 6:
-                        # Available is in KB, convert to bytes then to GB
-                        try:
-                            avail_kb = int(parts[avail_col])
-                            avail_bytes = avail_kb * 1024  # KB to bytes
-                            avail_gb = avail_bytes / (1024**3)
-                        except (ValueError, IndexError):
-                            avail_bytes = 0
-                            avail_gb = 0.0
-
-                        detected['storages'].append({
-                            'name': parts[0],
-                            'type': parts[1],
-                            'status': parts[2],
-                            'avail': avail_bytes,
-                            'avail_human': f"{avail_gb:.1f} GB",
-                        })
-    except Exception:
-        # Fallback
-        detected['storages'] = [{'name': 'local-lvm', 'type': 'lvmthin', 'avail_human': 'Unknown'}]
-
-    # Get network bridges
-    try:
-        result = subprocess.run(
-            ['ip', '-j', 'link', 'show', 'type', 'bridge'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            bridges = json.loads(result.stdout)
-            detected['bridges'] = [b['ifname'] for b in bridges]
-    except Exception:
-        detected['bridges'] = ['vmbr0']
-
-    # Check if API token exists
-    token_file = Path('/etc/blockhost/pve-token')
-    detected['token_exists'] = token_file.exists()
-
-    return detected
 
 
 def _generate_secp256k1_keypair() -> tuple[str, str]:
@@ -1790,7 +1717,8 @@ def _run_finalization_with_state(setup_state: 'SetupState', config: dict):
     steps = _get_finalization_steps()
 
     try:
-        for step_id, step_name, step_func in steps:
+        for step in steps:
+            step_id, step_name, step_func = step[0], step[1], step[2]
             step_state = setup_state.state['steps'][step_id]
 
             # Skip already completed steps
@@ -2085,42 +2013,59 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         config_dir.mkdir(parents=True, exist_ok=True)
 
         blockchain = config.get('blockchain', {})
-        proxmox = config.get('proxmox', {})
+        provisioner = config.get('provisioner', {})
         ipv6 = config.get('ipv6', {})
         contracts = config.get('contracts', {})
         admin_commands = config.get('admin_commands', {})
         admin_wallet = config.get('admin_wallet', '')
 
-        # Parse IP pool - extract last octet if full IP strings provided
-        ip_start = proxmox.get('ip_start', '200')
-        ip_end = proxmox.get('ip_end', '250')
-        # Convert full IP strings to integers (last octet)
-        if isinstance(ip_start, str) and '.' in ip_start:
-            ip_start = int(ip_start.split('.')[-1])
-        if isinstance(ip_end, str) and '.' in ip_end:
-            ip_end = int(ip_end.split('.')[-1])
-
-        # Write db.yaml (vmid_range is canonical, integers for ip_pool)
+        # Write db.yaml — shared keys always, provisioner-specific keys conditionally
         db_config = {
             'db_file': '/var/lib/blockhost/vms.json',
-            'terraform_dir': '/var/lib/blockhost/terraform',
-            'vmid_range': {
-                'start': proxmox.get('vmid_start', 100),
-                'end': proxmox.get('vmid_end', 999),
-            },
-            'ip_pool': {
-                'network': proxmox.get('ip_network', '192.168.122.0/24'),
-                'start': ip_start,
-                'end': ip_end,
-                'gateway': proxmox.get('gateway', '192.168.122.1'),
-            },
             'ipv6_pool': {
                 'start': 2,  # Skip ::0 (network) and ::1 (host)
                 'end': 254,
             },
             'default_expiry_days': 30,
-            'gc_grace_days': proxmox.get('gc_grace_days', 7),
+            'gc_grace_days': provisioner.get('gc_grace_days', 7),
         }
+
+        # IP pool (both provisioners provide these, possibly auto-detected)
+        ip_network = provisioner.get('ip_network')
+        if ip_network:
+            ip_start = provisioner.get('ip_start', '200')
+            ip_end = provisioner.get('ip_end', '250')
+            # Convert full IP strings to last-octet integers
+            if isinstance(ip_start, str) and '.' in ip_start:
+                ip_start = int(ip_start.split('.')[-1])
+            if isinstance(ip_end, str) and '.' in ip_end:
+                ip_end = int(ip_end.split('.')[-1])
+            db_config['ip_pool'] = {
+                'network': ip_network,
+                'start': ip_start,
+                'end': ip_end,
+                'gateway': provisioner.get('gateway', ''),
+            }
+
+        # Provisioner-specific keys (only written if present in session data)
+        if provisioner.get('vmid_start'):
+            db_config['vmid_range'] = {
+                'start': provisioner.get('vmid_start', 100),
+                'end': provisioner.get('vmid_end', 999),
+            }
+        if provisioner.get('terraform_dir'):
+            db_config['terraform_dir'] = provisioner['terraform_dir']
+
+        # Bridge name — discovered from first-boot or system scan
+        bridge_file = Path('/run/blockhost/bridge')
+        if bridge_file.exists():
+            db_config['bridge'] = bridge_file.read_text().strip()
+        else:
+            # Fallback: find any bridge with an IP
+            for p in Path('/sys/class/net').iterdir():
+                if (p / 'bridge').is_dir():
+                    db_config['bridge'] = p.name
+                    break
         _write_yaml(config_dir / 'db.yaml', db_config)
         _set_blockhost_ownership(config_dir / 'db.yaml', 0o640)
 
@@ -2169,11 +2114,6 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
             'deployer': {
                 'key_file': '/etc/blockhost/deployer.key',
             },
-            'proxmox': {
-                'node': proxmox.get('node'),
-                'storage': proxmox.get('storage'),
-                'bridge': proxmox.get('bridge'),
-            },
             # Top-level fields for generate-signup-page.py
             'server_public_key': config.get('server_public_key', ''),
             'public_secret': config.get('admin_public_secret', 'blockhost-access'),
@@ -2200,9 +2140,9 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
                 'commands': {
                     admin_commands['knock_command']: {
                         'action': 'knock',
-                        'description': 'Open SSH and Proxmox ports temporarily',
+                        'description': 'Open configured ports temporarily',
                         'params': {
-                            'allowed_ports': admin_commands.get('knock_ports', [22, 8006]),
+                            'allowed_ports': admin_commands.get('knock_ports', [22]),
                             'max_duration': admin_commands.get('knock_max_duration', 600),
                             'default_duration': admin_commands.get('knock_timeout', 300),
                         }
@@ -2238,379 +2178,6 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         _set_blockhost_ownership(env_file, 0o640)
 
         return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _finalize_token(config: dict) -> tuple[bool, Optional[str]]:
-    """Create Proxmox API token."""
-    try:
-        proxmox = config.get('proxmox', {})
-        user = proxmox.get('user', 'root@pam')
-
-        # Create API token using pveum
-        token_name = 'blockhost'
-        result = subprocess.run(
-            ['pveum', 'user', 'token', 'add', user, token_name,
-             '--privsep', '0', '--output-format', 'json'],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode == 0:
-            # Parse token from JSON output
-            import json as _json
-            token_data = _json.loads(result.stdout)
-            token_value = token_data.get('value', '')
-            if token_value:
-                token_id = f"{user}!{token_name}"
-
-                # Write terraform.tfvars
-                terraform_dir = Path('/var/lib/blockhost/terraform')
-                terraform_dir.mkdir(parents=True, exist_ok=True)
-
-                tfvars = {
-                    'proxmox_api_token': f"{token_id}={token_value}",
-                    'proxmox_node': proxmox.get('node'),
-                    'proxmox_storage': proxmox.get('storage'),
-                    'proxmox_bridge': proxmox.get('bridge'),
-                }
-                _write_tfvars(terraform_dir / 'terraform.tfvars', tfvars)
-
-                # Save token to /etc/blockhost/pve-token
-                token_file = Path('/etc/blockhost/pve-token')
-                token_file.write_text(f"{token_id}={token_value}")
-                _set_blockhost_ownership(token_file, 0o640)
-
-                return True, None
-
-        return False, 'Failed to create API token'
-    except Exception as e:
-        return False, str(e)
-
-
-def _finalize_terraform(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure Terraform with bpg/proxmox provider for VM provisioning."""
-    try:
-        terraform_dir = Path('/var/lib/blockhost/terraform')
-        terraform_dir.mkdir(parents=True, exist_ok=True)
-
-        config_dir = Path('/etc/blockhost')
-        config_dir.mkdir(parents=True, exist_ok=True)
-
-        proxmox = config.get('proxmox', {})
-        node_name = proxmox.get('node', socket.gethostname())
-
-        # Generate SSH keypair for Terraform to use
-        ssh_key_file = config_dir / 'terraform_ssh_key'
-        ssh_pub_file = config_dir / 'terraform_ssh_key.pub'
-
-        if not ssh_key_file.exists():
-            result = subprocess.run(
-                ['ssh-keygen', '-t', 'ed25519', '-f', str(ssh_key_file), '-N', '', '-C', 'terraform@blockhost'],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode != 0:
-                return False, f'SSH keygen failed: {result.stderr}'
-
-            # Set correct permissions
-            _set_blockhost_ownership(ssh_key_file, 0o640)
-            ssh_pub_file.chmod(0o644)
-
-        # Add public key to root's authorized_keys
-        authorized_keys = Path('/root/.ssh/authorized_keys')
-        authorized_keys.parent.mkdir(parents=True, exist_ok=True)
-
-        pub_key = ssh_pub_file.read_text().strip()
-
-        # Check if key already exists
-        existing_keys = ''
-        if authorized_keys.exists():
-            existing_keys = authorized_keys.read_text()
-
-        if pub_key not in existing_keys:
-            with open(authorized_keys, 'a') as f:
-                f.write(f'\n{pub_key}\n')
-            authorized_keys.chmod(0o600)
-
-        # Write provider.tf.json with bpg/proxmox provider
-        provider_config = {
-            "terraform": {
-                "required_providers": {
-                    "proxmox": {
-                        "source": "bpg/proxmox",
-                        "version": "~> 0.93.0"
-                    }
-                }
-            },
-            "provider": {
-                "proxmox": {
-                    "endpoint": "https://127.0.0.1:8006",
-                    "api_token": "${var.proxmox_api_token}",
-                    "insecure": True,
-                    "ssh": {
-                        "agent": False,
-                        "username": "root",
-                        "private_key": "${file(\"/etc/blockhost/terraform_ssh_key\")}",
-                        "node": [
-                            {
-                                "name": node_name,
-                                "address": "127.0.0.1"
-                            }
-                        ]
-                    }
-                }
-            }
-        }
-
-        provider_file = terraform_dir / 'provider.tf.json'
-        provider_file.write_text(json.dumps(provider_config, indent=2))
-
-        # Write variables.tf.json with wizard values
-        variables_config = {
-            "variable": {
-                "proxmox_api_token": {
-                    "type": "string",
-                    "description": "Proxmox API token in format user@realm!tokenid=secret",
-                    "sensitive": True
-                },
-                "proxmox_node": {
-                    "type": "string",
-                    "description": "Proxmox node name",
-                    "default": node_name
-                },
-                "proxmox_storage": {
-                    "type": "string",
-                    "description": "Storage pool for VM disks",
-                    "default": proxmox.get('storage', 'local-lvm')
-                },
-                "proxmox_bridge": {
-                    "type": "string",
-                    "description": "Network bridge for VMs",
-                    "default": proxmox.get('bridge', 'vmbr0')
-                },
-                "template_vmid": {
-                    "type": "number",
-                    "description": "VMID of the base VM template",
-                    "default": proxmox.get('template_vmid', 9001)
-                },
-                "vmid_start": {
-                    "type": "number",
-                    "description": "Start of VMID range for provisioned VMs",
-                    "default": proxmox.get('vmid_start', 100)
-                },
-                "vmid_end": {
-                    "type": "number",
-                    "description": "End of VMID range for provisioned VMs",
-                    "default": proxmox.get('vmid_end', 999)
-                }
-            }
-        }
-
-        variables_file = terraform_dir / 'variables.tf.json'
-        variables_file.write_text(json.dumps(variables_config, indent=2))
-
-        # Run terraform init
-        result = subprocess.run(
-            ['terraform', 'init'],
-            cwd=terraform_dir,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        if result.returncode != 0:
-            return False, f'Terraform init failed: {result.stderr}'
-
-        return True, None
-    except subprocess.TimeoutExpired:
-        return False, 'Terraform init timed out'
-    except Exception as e:
-        return False, str(e)
-
-
-def _finalize_bridge(config: dict) -> tuple[bool, Optional[str]]:
-    """Ensure network bridge exists for VM networking.
-
-    Uses the PVE API (pvesh) to create the bridge so that Proxmox manages
-    /etc/network/interfaces itself. This ensures the bridge survives reboot.
-
-    On bare metal Proxmox installs, vmbr0 is created by the installer.
-    On nested/VM installs or custom setups, it may not exist.
-    """
-    try:
-        proxmox = config.get('proxmox', {})
-        bridge_name = proxmox.get('bridge', 'vmbr0')
-        node_name = proxmox.get('node', socket.gethostname())
-
-        # Check if bridge already exists
-        bridge_path = Path(f'/sys/class/net/{bridge_name}')
-        if bridge_path.exists():
-            return True, None
-
-        # Find the primary network interface (the one with a default route)
-        result = subprocess.run(
-            ['ip', 'route', 'show', 'default'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-
-        if result.returncode != 0 or not result.stdout.strip():
-            return False, 'Could not determine default network interface'
-
-        # Parse: "default via 192.168.122.1 dev ens3 proto dhcp src 192.168.122.195 metric 100"
-        parts = result.stdout.strip().split()
-        try:
-            dev_idx = parts.index('dev')
-            primary_iface = parts[dev_idx + 1]
-        except (ValueError, IndexError):
-            return False, f'Could not parse default route: {result.stdout}'
-
-        # Get current IP configuration from the primary interface
-        result = subprocess.run(
-            ['ip', '-j', 'addr', 'show', primary_iface],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-
-        if result.returncode != 0:
-            return False, f'Could not get IP config for {primary_iface}'
-
-        import json as json_mod
-        iface_info = json_mod.loads(result.stdout)
-
-        # Find IPv4 address
-        ipv4_addr = None
-        ipv4_prefix = None
-
-        for info in iface_info:
-            for addr_info in info.get('addr_info', []):
-                if addr_info.get('family') == 'inet':
-                    ipv4_addr = addr_info.get('local')
-                    ipv4_prefix = addr_info.get('prefixlen')
-                    break
-
-        if not ipv4_addr or not ipv4_prefix:
-            return False, f'Could not find IPv4 address on {primary_iface}'
-
-        # Get gateway from default route
-        result = subprocess.run(
-            ['ip', 'route', 'show', 'default'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        parts = result.stdout.strip().split()
-        try:
-            via_idx = parts.index('via')
-            gateway = parts[via_idx + 1]
-        except (ValueError, IndexError):
-            return False, 'Could not determine gateway'
-
-        # Step 1: Create bridge via PVE API
-        result = subprocess.run(
-            [
-                'pvesh', 'create', f'/nodes/{node_name}/network',
-                '--iface', bridge_name,
-                '--type', 'bridge',
-                '--bridge_ports', primary_iface,
-                '--autostart', '1',
-                '--cidr', f'{ipv4_addr}/{ipv4_prefix}',
-                '--gateway', gateway,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode != 0 and 'already exists' not in (result.stderr or ''):
-            return False, f'PVE bridge creation failed: {result.stderr or result.stdout}'
-
-        # Step 2: Set primary interface to manual (bridge port)
-        result = subprocess.run(
-            [
-                'pvesh', 'set', f'/nodes/{node_name}/network/{primary_iface}',
-                '--type', 'eth',
-                '--autostart', '1',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        # Non-fatal if this fails — PVE may handle it automatically
-
-        # Step 3: Apply the staged network config
-        # This rewrites /etc/network/interfaces and reloads networking
-        result = subprocess.run(
-            ['pvesh', 'set', f'/nodes/{node_name}/network'],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
-        if result.returncode != 0:
-            # Apply failed — try ifreload as fallback
-            subprocess.run(
-                ['ifreload', '-a'],
-                capture_output=True,
-                timeout=30
-            )
-
-        # Step 4: Ephemeral fallback — bring bridge up with ip commands
-        # if pvesh apply didn't fully activate it during this session
-        if not Path(f'/sys/class/net/{bridge_name}').exists():
-            subprocess.run(
-                ['ip', 'link', 'add', 'name', bridge_name, 'type', 'bridge'],
-                capture_output=True,
-                timeout=10
-            )
-
-        # Ensure bridge is up and has IP
-        subprocess.run(['ip', 'link', 'set', bridge_name, 'up'], capture_output=True, timeout=10)
-
-        if not Path(f'/sys/class/net/{bridge_name}').exists():
-            return False, f'Failed to create bridge {bridge_name}'
-
-        # Add primary interface to bridge if not already
-        subprocess.run(
-            ['ip', 'link', 'set', primary_iface, 'master', bridge_name],
-            capture_output=True,
-            timeout=10
-        )
-
-        # Ensure IP is on the bridge (move from primary if needed)
-        ip_check = subprocess.run(
-            ['ip', 'addr', 'show', bridge_name],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if ipv4_addr not in (ip_check.stdout or ''):
-            subprocess.run(
-                ['ip', 'addr', 'del', f'{ipv4_addr}/{ipv4_prefix}', 'dev', primary_iface],
-                capture_output=True,
-                timeout=10
-            )
-            subprocess.run(
-                ['ip', 'addr', 'add', f'{ipv4_addr}/{ipv4_prefix}', 'dev', bridge_name],
-                capture_output=True,
-                timeout=10
-            )
-            subprocess.run(
-                ['ip', 'route', 'add', 'default', 'via', gateway, 'dev', bridge_name],
-                capture_output=True,
-                timeout=10
-            )
-
-        return True, None
-
-    except subprocess.TimeoutExpired:
-        return False, 'Network configuration timed out'
     except Exception as e:
         return False, str(e)
 
@@ -2747,34 +2314,47 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
             _set_blockhost_ownership(allocation_file, 0o640)
             config['ipv6']['prefix'] = ipv6.get('prefix', '')
 
-        # Step 4: Add gateway address to vmbr0 for VM connectivity
+        # Step 4: Add gateway address to bridge for VM connectivity
         # VMs use the first host address in the prefix as their IPv6 gateway.
-        # This address must exist on vmbr0 (the bridge VMs are connected to).
+        # This address must exist on the bridge VMs are connected to.
         prefix = config.get('ipv6', {}).get('prefix', '')
         if prefix:
             import ipaddress
             try:
-                network = ipaddress.IPv6Network(prefix, strict=False)
-                gw_addr = str(network.network_address + 1)
+                # Discover bridge name from first-boot or system scan
+                bridge_dev = None
+                bridge_file = Path('/run/blockhost/bridge')
+                if bridge_file.exists():
+                    bridge_dev = bridge_file.read_text().strip()
+                if not bridge_dev:
+                    for p in Path('/sys/class/net').iterdir():
+                        if (p / 'bridge').is_dir():
+                            bridge_dev = p.name
+                            break
+                if not bridge_dev:
+                    print("Warning: No bridge found for IPv6 gateway — skipping")
+                else:
+                    network = ipaddress.IPv6Network(prefix, strict=False)
+                    gw_addr = str(network.network_address + 1)
 
-                # Add to vmbr0 as /128 to avoid conflicting with the /120 on wg-broker
-                subprocess.run(
-                    ['ip', '-6', 'addr', 'add', f'{gw_addr}/128', 'dev', 'vmbr0'],
-                    capture_output=True,
-                    timeout=10
-                )
+                    # Add to bridge as /128 to avoid conflicting with the /120 on wg-broker
+                    subprocess.run(
+                        ['ip', '-6', 'addr', 'add', f'{gw_addr}/128', 'dev', bridge_dev],
+                        capture_output=True,
+                        timeout=10
+                    )
 
-                # Persist: add to /etc/network/interfaces.d/blockhost-ipv6
-                iface_dir = Path('/etc/network/interfaces.d')
-                iface_dir.mkdir(parents=True, exist_ok=True)
-                (iface_dir / 'blockhost-ipv6').write_text(
-                    f'# BlockHost IPv6 gateway address on bridge for VM connectivity\n'
-                    f'auto vmbr0\n'
-                    f'iface vmbr0 inet6 static\n'
-                    f'    address {gw_addr}/128\n'
-                )
+                    # Persist: append inet6 stanza to /etc/network/interfaces
+                    # Must be in the same file as the bridge's inet stanza —
+                    # a separate interfaces.d/ file confuses ifupdown on boot.
+                    with open('/etc/network/interfaces', 'a') as f:
+                        f.write(
+                            f'\n# BlockHost IPv6 gateway address on bridge for VM connectivity\n'
+                            f'iface {bridge_dev} inet6 static\n'
+                            f'    address {gw_addr}/128\n'
+                        )
             except (ValueError, subprocess.TimeoutExpired) as e:
-                print(f"Warning: Could not add IPv6 gateway to vmbr0: {e}")
+                print(f"Warning: Could not add IPv6 gateway to bridge: {e}")
 
         return True, None
     except subprocess.TimeoutExpired:
@@ -3073,7 +2653,7 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
         # Step 2: Mint or update NFT
         try:
             sys.path.insert(0, '/usr/lib/python3/dist-packages')
-            from blockhost.mint_nft import mint_nft, load_signing_page
+            from blockhost.mint_nft import mint_nft
             from blockhost.config import load_web3_config
         except ImportError as e:
             return False, f'Cannot import minting module: {e}'
@@ -3110,27 +2690,7 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
 
             deployer_key = Path('/etc/blockhost/deployer.key').read_text().strip()
 
-            # Read existing publicSecret (immutable after mint, must reuse)
-            ps_cmd = ['cast', 'call', nft_contract,
-                      'getAccessData(uint256)(bytes,string)',
-                      token_id, '--rpc-url', rpc_url]
-            ps_result = subprocess.run(ps_cmd, capture_output=True,
-                                       text=True, timeout=30)
-            existing_public_secret = ''
-            if ps_result.returncode == 0:
-                # cast decodes as two lines: bytes hex, then the string
-                lines = [l.strip() for l in ps_result.stdout.strip().split('\n') if l.strip()]
-                if len(lines) >= 2:
-                    existing_public_secret = lines[1]
-
-            # Regenerate signing page with existing publicSecret + new ciphertext
-            signing_page_base64 = load_signing_page(
-                web3_config,
-                user_encrypted=ciphertext_hex,
-                public_secret=existing_public_secret or admin_public_secret,
-            )
-
-            # Update userEncrypted
+            # Update userEncrypted on-chain
             update_cmd = ['cast', 'send', nft_contract,
                           'updateUserEncrypted(uint256,bytes)',
                           token_id, ciphertext_hex,
@@ -3140,17 +2700,6 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
                                            text=True, timeout=120)
             if update_result.returncode != 0:
                 return False, f'updateUserEncrypted failed: {update_result.stderr}'
-
-            # Update signing page (animationUrl)
-            anim_cmd = ['cast', 'send', nft_contract,
-                        'updateAnimationUrl(uint256,string)',
-                        token_id, signing_page_base64,
-                        '--private-key', deployer_key,
-                        '--rpc-url', rpc_url, '--json']
-            anim_result = subprocess.run(anim_cmd, capture_output=True,
-                                         text=True, timeout=120)
-            if anim_result.returncode != 0:
-                return False, f'updateAnimationUrl failed: {anim_result.stderr}'
 
             print(f"Updated existing NFT #{token_id} instead of minting")
 
@@ -3177,70 +2726,6 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
         return True, None
     except Exception as e:
         return False, str(e)
-
-
-def _finalize_template(config: dict) -> tuple[bool, Optional[str]]:
-    """Build VM template with libpam-web3."""
-    try:
-        proxmox = config.get('proxmox', {})
-        template_vmid = proxmox.get('template_vmid', 9001)
-        storage = proxmox.get('storage', 'local-lvm')
-
-        # Check if template already exists
-        template_check = subprocess.run(
-            ['qm', 'status', str(template_vmid)],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-
-        if template_check.returncode == 0:
-            # Template VM already exists, skip building
-            return True, None
-
-        # Find libpam-web3 .deb in template-packages directory
-        template_pkg_dir = Path('/var/lib/blockhost/template-packages')
-        libpam_deb = None
-
-        if template_pkg_dir.exists():
-            debs = list(template_pkg_dir.glob('libpam-web3_*.deb'))
-            if debs:
-                # Use the most recent one if multiple exist
-                libpam_deb = str(sorted(debs, key=lambda p: p.stat().st_mtime, reverse=True)[0])
-
-        # Build template via provisioner manifest command
-        build_cmd = _provisioner['manifest']['commands']['build-template'] if _provisioner else None
-        build_script = Path(f'/usr/bin/{build_cmd}') if build_cmd else None
-        if build_script and build_script.exists():
-            # Set up environment for build script
-            env = os.environ.copy()
-            env['TEMPLATE_VMID'] = str(template_vmid)
-            env['STORAGE'] = storage
-            env['PROXMOX_HOST'] = 'localhost'
-
-            if libpam_deb:
-                env['LIBPAM_WEB3_DEB'] = libpam_deb
-
-            result = subprocess.run(
-                [str(build_script)],
-                capture_output=True,
-                text=True,
-                timeout=1800,  # 30 minutes
-                env=env
-            )
-
-            if result.returncode != 0:
-                return False, result.stderr or 'Template build failed'
-        else:
-            # Template build script not found - skip for now
-            return True, None
-
-        return True, None
-    except subprocess.TimeoutExpired:
-        return False, 'Template build timed out'
-    except Exception as e:
-        return False, str(e)
-
 
 
 def _write_revenue_share_config(config: dict):
@@ -3375,6 +2860,11 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
         # Ensure state dir is owned by blockhost user
         subprocess.run(
             ['chown', '-R', 'blockhost:blockhost', '/var/lib/blockhost'],
+            capture_output=True, timeout=30
+        )
+        # libvirt-qemu needs to traverse to access VM disk images and cloud-init ISOs
+        subprocess.run(
+            ['chmod', '755', '/var/lib/blockhost'],
             capture_output=True, timeout=30
         )
 
@@ -3571,20 +3061,6 @@ def _dict_to_yaml(data: dict, lines: list, indent: int):
             lines.append(f"{prefix}{key}: {value}")
         else:
             lines.append(f"{prefix}{key}: \"{value}\"")
-
-
-def _write_tfvars(path: Path, data: dict):
-    """Write Terraform tfvars file."""
-    lines = []
-    for key, value in data.items():
-        if isinstance(value, bool):
-            lines.append(f'{key} = {str(value).lower()}')
-        elif isinstance(value, (int, float)):
-            lines.append(f'{key} = {value}')
-        else:
-            lines.append(f'{key} = "{value}"')
-
-    path.write_text('\n'.join(lines) + '\n')
 
 
 def generate_self_signed_cert(cert_path: str, key_path: str) -> bool:

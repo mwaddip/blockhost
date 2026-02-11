@@ -22,12 +22,14 @@
         <div class="alert alert-success">
             Installation completed successfully!
         </div>
-        <p class="mb-2">The system will now reboot. You can access Proxmox VE at:</p>
+        <p class="mb-2">The system will reboot and begin monitoring for blockchain subscriptions.</p>
+        {% if prov_ui.management_url %}
         <p style="font-size: 1.25rem;">
-            <a href="https://{{ request.host.split(':')[0] }}:8006" style="color: var(--primary);">
-                https://{{ request.host.split(':')[0] }}:8006
+            <a href="{{ prov_ui.management_url }}" style="color: var(--primary);">
+                {{ prov_ui.management_url }}
             </a>
         </p>
+        {% endif %}
         <button onclick="reboot()" class="btn btn-primary mt-2">Reboot Now</button>
     </div>
 

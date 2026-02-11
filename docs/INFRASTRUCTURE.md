@@ -8,7 +8,7 @@ For build instructions, see [BUILD_GUIDE.md](BUILD_GUIDE.md). For coding convent
 
 ## System Overview
 
-BlockHost runs on a Proxmox VE host. After installation, the system has two user contexts:
+BlockHost runs on a dedicated host with a pluggable provisioner backend (e.g., Proxmox, libvirt). After installation, the system has two user contexts:
 
 | User | Runs | Purpose |
 |------|------|---------|
@@ -163,8 +163,8 @@ server: {public_key: '0x04...'}
 ```yaml
 server: {address: '0x...', key_file: '/etc/blockhost/server.key'}
 deployer: {key_file: '/etc/blockhost/deployer.key'}
-proxmox: {node: 'proxmox', storage: 'local-lvm', bridge: 'vmbr0'}
 admin: {wallet_address: '0x...', destination_mode: 'self'}
+# Proxmox provisioner adds: proxmox: {node, storage, bridge}
 ```
 
 **addressbook.json:**
@@ -203,18 +203,19 @@ Three distinct encryption contexts are used:
 ```
 Internet
   |
-  +-- eth0 (physical NIC, host IP)
+  +-- eth0/ens* (physical NIC, bridge port after first-boot)
   |
-  +-- vmbr0 (Linux bridge)
-  |     +-- Host bridge IP (same subnet as VMs)
+  +-- br0 (Linux bridge, created by first-boot Step 3a)
+  |     Proxmox: may be vmbr0 (pre-existing or created by PVE installer)
+  |     +-- Host bridge IP (migrated from NIC; same subnet as VMs)
   |     +-- VM NICs (tap devices, IPv4 from ip_pool)
   |
   +-- wg-broker (WireGuard, if broker mode)
         +-- IPv6 prefix from broker allocation
-        +-- VMs get /128 host routes via vmbr0
+        +-- VMs get /128 host routes via bridge
 ```
 
-Each VM gets an IPv4 address from the configured pool and optionally an IPv6 `/128` from the broker-allocated prefix. IPv6 host routes (`ip -6 route replace <addr>/128 dev vmbr0`) are added by the provisioner via the root agent when a VM is created, and removed by GC when a VM is destroyed.
+Each VM gets an IPv4 address from the configured pool and optionally an IPv6 `/128` from the broker-allocated prefix. IPv6 host routes (`ip -6 route replace <addr>/128 dev <bridge>`) are added by the provisioner via the root agent when a VM is created, and removed by GC when a VM is destroyed. The bridge name is stored in `db.yaml` under the `bridge` key.
 
 ---
 
@@ -226,16 +227,16 @@ Runs once after Debian auto-install. Each step writes a marker file so it can re
 
 | Step | Marker | Action |
 |------|--------|--------|
-| 1 | `.step-hostname` | Fix `/etc/hosts` for Proxmox (real IP, not 127.0.1.1) |
-| 2 | `.step-proxmox` | Install `proxmox-ve`, `postfix`, `chrony` |
-| 2b | `.step-packages` | Install host `.deb` packages, copy template `.deb`s |
-| 2b1 | `.step-user` | Create `blockhost` system user and group, set directory ownership |
-| 2b2 | `.step-root-agent` | Install and start the root agent daemon |
-| 2c | `.step-foundry` | Install Foundry (`cast`, `forge`, `anvil`) |
-| 2d | `.step-terraform` | Install Terraform and libguestfs-tools |
-| 3 | `.step-network` | Verify network connectivity (DHCP fallback) |
-| 4 | `.step-otp` | Generate OTP code, display on console |
-| 5 | — | Start Flask web wizard on port 80/443 |
+| 1 | `.step-network-wait` | Wait for network (DHCP) |
+| 2 | `.step-packages` | Install host `.deb` packages, copy template `.deb`s |
+| 2b | — | Verify `blockhost` user exists (from blockhost-common .deb) |
+| 2c | — | Verify root agent running, wait for socket |
+| 3 | `.step-provisioner-hook` | Run provisioner first-boot hook (hypervisor install, etc.) |
+| 3a | `.step-bridge` | Create Linux bridge (br0), migrate IP, verify connectivity |
+| 3b | `.step-foundry` | Install Foundry (`cast`, `forge`, `anvil`) |
+| 4 | `.step-network` | Verify network connectivity (DHCP fallback) |
+| 5 | `.step-otp` | Generate OTP code, display on console |
+| 6 | — | Start Flask web wizard on port 80/443 |
 
 ### Phase 2: Web wizard (`installer/web/app.py`)
 
@@ -261,17 +262,14 @@ After confirmation, `POST /api/finalize` starts a background thread that runs 14
 | 1 | `keypair` | `_finalize_keypair` | Generate server secp256k1 keypair |
 | 2 | `wallet` | `_finalize_wallet` | Write deployer private key |
 | 3 | `contracts` | `_finalize_contracts` | Deploy contracts or verify existing |
-| 4 | `config` | `_finalize_config` | Write YAML configs, admin commands, `.env` |
-| 5 | `token` | `_finalize_token` | Create Proxmox API token |
-| 6 | `terraform` | `_finalize_terraform` | Generate `.tf.json`, SSH key, `terraform init` |
-| 7 | `bridge` | `_finalize_bridge` | Configure vmbr0 via `pvesh` |
-| 8 | `ipv6` | `_finalize_ipv6` | Broker allocation or manual prefix, WireGuard |
-| 9 | `https` | `_finalize_https` | sslip.io hostname, Let's Encrypt or self-signed |
-| 10 | `signup` | `_finalize_signup` | Generate signup page, create systemd service |
-| 11 | `mint_nft` | `_finalize_mint_nft` | Mint NFT #0 to admin wallet |
-| 12 | `template` | `_finalize_template` | Build Debian VM template with libpam-web3 |
-| 13 | `finalize` | `_finalize_complete` | Enable services, create subscription plan, set ownership, mark complete |
-| 14 | `validate` | `_finalize_validate` | System validation (testing mode only) |
+| 4 | `config` | `_finalize_config` | Write YAML configs (incl. bridge), admin commands, `.env` |
+| 5+ | *(provisioner)* | from `get_finalization_steps()` | Provisioner-specific (e.g. Proxmox: token, terraform, template) |
+| — | `ipv6` | `_finalize_ipv6` | Broker allocation or manual prefix, WireGuard |
+| — | `https` | `_finalize_https` | sslip.io hostname, Let's Encrypt or self-signed |
+| — | `signup` | `_finalize_signup` | Generate signup page, create systemd service |
+| — | `mint_nft` | `_finalize_mint_nft` | Mint NFT #0 to admin wallet |
+| — | `finalize` | `_finalize_complete` | Enable services, create subscription plan, set ownership, mark complete |
+| — | `validate` | `_finalize_validate` | System validation (testing mode only) |
 
 Each step: checks if already completed, marks running, executes, marks completed or failed. Failed steps can be retried via `POST /api/finalize/retry`.
 

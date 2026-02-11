@@ -211,39 +211,19 @@
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('config')">Retry</button>
         </li>
-        <li id="step-token" data-step="token">
+        {% for step in provisioner_steps %}
+        <li id="step-{{ step.id }}" data-step="{{ step.id }}">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
-                <span class="step-name">Create Proxmox API token</span>
+                <span class="step-name">{{ step.label }}</span>
                 <span class="step-status"></span>
+                {% if step.hint %}
+                <span class="step-hint">{{ step.hint }}</span>
+                {% endif %}
             </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('token')">Retry</button>
+            <button class="btn btn-small btn-retry hidden" onclick="retryStep('{{ step.id }}')">Retry</button>
         </li>
-        <li id="step-terraform" data-step="terraform">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Configure Terraform provider</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('terraform')">Retry</button>
-        </li>
-        <li id="step-bridge" data-step="bridge">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Configure network bridge</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('bridge')">Retry</button>
-        </li>
-        <li id="step-template" data-step="template">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Build VM template</span>
-                <span class="step-status"></span>
-                <span class="step-hint">(this may take several minutes)</span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('template')">Retry</button>
-        </li>
+        {% endfor %}
         <li id="step-ipv6" data-step="ipv6">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -374,7 +354,9 @@
     <div class="summary-section" style="text-align: left;">
         <h3>What's Next?</h3>
         <ul style="list-style: disc; padding-left: 1.5rem; color: var(--text-muted);">
-            <li>Access Proxmox VE at <a href="https://{{ request.host.split(':')[0] }}:8006" style="color: var(--primary);">https://{{ request.host.split(':')[0] }}:8006</a></li>
+            {% if prov_ui.management_url %}
+            <li>Access management at <a href="{{ prov_ui.management_url }}">{{ prov_ui.management_url }}</a></li>
+            {% endif %}
             <li>The blockhost-engine is monitoring the blockchain for subscription events</li>
             <li>VMs will be created automatically when subscriptions are purchased</li>
             <li>Users connect to their VMs using NFT-based authentication</li>
@@ -383,9 +365,11 @@
 
     <div style="margin-top: 2rem;">
         <button onclick="reboot()" class="btn btn-primary">Reboot System</button>
-        <a href="https://{{ request.host.split(':')[0] }}:8006" class="btn btn-secondary" style="margin-left: 0.5rem;">
-            Open Proxmox
+        {% if prov_ui.management_url %}
+        <a href="{{ prov_ui.management_url }}" class="btn btn-secondary" style="margin-left: 0.5rem;">
+            {{ prov_ui.management_label | default('Open Management') }}
         </a>
+        {% endif %}
     </div>
 </div>
 {% endblock %}
@@ -546,6 +530,13 @@ stepOrder.forEach(id => {
         stepNames[id] = nameEl ? nameEl.textContent.trim() : id;
     } else {
         stepNames[id] = id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+});
+
+// Hide progress-list steps that aren't in stepOrder (provisioner-specific steps)
+document.querySelectorAll('#progress-steps li[data-step]').forEach(li => {
+    if (!stepOrder.includes(li.dataset.step)) {
+        li.style.display = 'none';
     }
 });
 

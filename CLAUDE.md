@@ -32,6 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |----------|--------|----------------------|
 | `facts/PROVISIONER_INTERFACE.md` | Manifest, CLI commands, wizard plugin, root agent actions, first-boot hook | Provisioner integration, wizard, engine dispatch, first-boot |
 | `facts/COMMON_INTERFACE.md` | Config API, VM database, root agent protocol, cloud-init, dispatcher | Any import from `blockhost.*`, config files, root agent |
+| `facts/WIZARD_UI.md` | HTML patterns, CSS classes, components, anti-patterns for wizard templates | Any wizard template (provisioner pages, summary sections) |
 
 ## Submodule Separation (CRITICAL RULE)
 

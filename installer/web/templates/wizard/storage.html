@@ -8,7 +8,7 @@
 
 <div class="card">
     <h2>Storage Configuration</h2>
-    <p class="text-muted mb-2">Review detected storage devices. Proxmox VE is already installed on your system disk.</p>
+    <p class="text-muted mb-2">{{ prov_ui.storage_hint | default('Review detected storage devices. The system disk is already in use.') }}</p>
 
     <form method="POST" action="{{ url_for('wizard_storage') }}">
         {% if disks %}
@@ -33,7 +33,7 @@
             {% endfor %}
         </div>
         <p class="text-muted" style="font-size: 0.9rem; margin-top: 1rem;">
-            Additional disks can be configured for VM storage in Proxmox after setup completes.
+            {{ prov_ui.storage_extra_hint | default('Additional disks can be configured for VM storage after setup completes.') }}
         </p>
         {% else %}
         <div class="alert alert-error">

@@ -207,6 +207,132 @@ else
 fi
 
 #
+# Step 3a: Create network bridge
+#
+# Creates a Linux bridge before the wizard starts. The provisioner will discover
+# the existing bridge and use it — no provisioner-specific bridge code needed.
+# Brief network disruption during IP migration is safe here (all packages installed,
+# no wizard running yet).
+#
+STEP_BRIDGE="${STATE_DIR}/.step-bridge"
+if [ ! -f "$STEP_BRIDGE" ]; then
+    log "Step 3a: Creating network bridge..."
+
+    # If the provisioner manages its own bridge, skip creation.
+    # Provisioner hooks write /etc/blockhost/bridge-managed to signal this.
+    if [ -f /etc/blockhost/bridge-managed ]; then
+        log "Provisioner manages bridge (/etc/blockhost/bridge-managed exists) — skipping"
+        touch "$STEP_BRIDGE"
+        log "Step 3a complete!"
+    else
+
+    # Skip if a bridge with a global IPv4 address already exists
+    EXISTING_BRIDGE=""
+    for brdir in /sys/class/net/*/bridge; do
+        [ -d "$brdir" ] || continue
+        BR_DEV=$(basename "$(dirname "$brdir")")
+        if ip -4 addr show "$BR_DEV" scope global 2>/dev/null | grep -q 'inet '; then
+            EXISTING_BRIDGE="$BR_DEV"
+            break
+        fi
+    done
+
+    if [ -n "$EXISTING_BRIDGE" ]; then
+        log "Bridge already exists: $EXISTING_BRIDGE — skipping creation"
+        echo "$EXISTING_BRIDGE" > "$RUN_DIR/bridge"
+    else
+        # Detect primary NIC from default route
+        PRIMARY_NIC=$(ip -j route show default 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['dev'])" 2>/dev/null)
+
+        if [ -z "$PRIMARY_NIC" ]; then
+            log "WARNING: No default route — cannot create bridge, continuing without"
+        elif [ -d "/sys/class/net/${PRIMARY_NIC}/wireless" ]; then
+            log "WARNING: Primary NIC $PRIMARY_NIC is wireless — cannot bridge, continuing without"
+        else
+            # Capture current IP config
+            BRIDGE_IP=$(ip -j addr show "$PRIMARY_NIC" 2>/dev/null | python3 -c "
+import sys, json
+for iface in json.load(sys.stdin):
+    for a in iface.get('addr_info', []):
+        if a.get('family') == 'inet' and a.get('scope') == 'global':
+            print(f\"{a['local']}/{a['prefixlen']}\")
+            sys.exit(0)
+" 2>/dev/null)
+            BRIDGE_GW=$(ip -j route show default 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('gateway',''))" 2>/dev/null)
+
+            if [ -z "$BRIDGE_IP" ] || [ -z "$BRIDGE_GW" ]; then
+                log "WARNING: Cannot determine IP ($BRIDGE_IP) or gateway ($BRIDGE_GW) — skipping bridge"
+            else
+                log "Creating br0: IP=$BRIDGE_IP GW=$BRIDGE_GW NIC=$PRIMARY_NIC"
+
+                # Create bridge and migrate IP
+                brctl addbr br0
+                brctl addif br0 "$PRIMARY_NIC"
+                brctl stp br0 off
+                brctl setfd br0 0
+                ip link set br0 up
+                ip addr del "$BRIDGE_IP" dev "$PRIMARY_NIC" 2>/dev/null
+                ip addr add "$BRIDGE_IP" dev br0
+                ip route add default via "$BRIDGE_GW" dev br0 2>/dev/null
+
+                # Verify connectivity
+                if ping -c 1 -W 5 "$BRIDGE_GW" >/dev/null 2>&1; then
+                    log "Bridge br0 operational — connectivity verified"
+                    echo "br0" > "$RUN_DIR/bridge"
+
+                    # Persist to /etc/network/interfaces
+                    if [ -f /etc/network/interfaces ]; then
+                        # Comment out ALL existing NIC stanzas (auto, allow-hotplug, iface)
+                        sed -i "s/^auto ${PRIMARY_NIC}$/# auto ${PRIMARY_NIC}  # moved to br0/" /etc/network/interfaces
+                        sed -i "s/^allow-hotplug ${PRIMARY_NIC}$/# allow-hotplug ${PRIMARY_NIC}  # moved to br0/" /etc/network/interfaces
+                        sed -i "s/^iface ${PRIMARY_NIC} inet/# iface ${PRIMARY_NIC} inet/" /etc/network/interfaces
+                    fi
+                    cat >> /etc/network/interfaces << BREOF
+
+# Bridge created by BlockHost first-boot
+iface ${PRIMARY_NIC} inet manual
+
+auto br0
+iface br0 inet dhcp
+    bridge_ports ${PRIMARY_NIC}
+    bridge_stp off
+    bridge_fd 0
+BREOF
+
+                    log "Bridge persisted to /etc/network/interfaces"
+                else
+                    # Rollback — restore IP to NIC, destroy bridge
+                    log "WARNING: Bridge connectivity check failed — rolling back"
+                    ip link set br0 down 2>/dev/null
+                    brctl delif br0 "$PRIMARY_NIC" 2>/dev/null
+                    brctl delbr br0 2>/dev/null
+                    ip addr add "$BRIDGE_IP" dev "$PRIMARY_NIC" 2>/dev/null
+                    ip route add default via "$BRIDGE_GW" dev "$PRIMARY_NIC" 2>/dev/null
+                    log "WARNING: Continuing without bridge"
+                fi
+            fi
+        fi
+    fi
+
+    touch "$STEP_BRIDGE"
+    log "Step 3a complete!"
+    fi  # end bridge-managed else
+else
+    log "Step 3a: Bridge already configured, skipping."
+    # Ensure /run/blockhost/bridge is populated on resume
+    if [ ! -f "$RUN_DIR/bridge" ]; then
+        for brdir in /sys/class/net/*/bridge; do
+            [ -d "$brdir" ] || continue
+            BR_DEV=$(basename "$(dirname "$brdir")")
+            if ip -4 addr show "$BR_DEV" scope global 2>/dev/null | grep -q 'inet '; then
+                echo "$BR_DEV" > "$RUN_DIR/bridge"
+                break
+            fi
+        done
+    fi
+fi
+
+#
 # Step 3b: Install Foundry (for contract deployment)
 #
 STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
@@ -339,7 +465,6 @@ else
 fi
 
 URL="${SCHEME}://${CURRENT_IP}/"
-PVE_URL="https://${CURRENT_IP}:8006/"
 
 # Kill any existing Flask process
 pkill -f "installer.web.app" 2>/dev/null || true
@@ -379,7 +504,6 @@ cat > /etc/issue << EOF
 
   ┌────────────────────────────────────────────────────────────┐
   │  Web Installer:  $URL
-  │  Proxmox Web UI: $PVE_URL
   └────────────────────────────────────────────────────────────┘
 
   ┌────────────────────────────────────────────────────────────┐

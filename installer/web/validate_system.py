@@ -296,7 +296,7 @@ def _check_service_state(service: str, expected_enabled: bool, expected_active: 
     return ValidationResult(category, name, True, f"{service}: {state_desc}")
 
 
-def _check_bridge_exists(bridge_name: str = 'vmbr0') -> ValidationResult:
+def _check_bridge_exists(bridge_name: str) -> ValidationResult:
     """Check if network bridge exists."""
     bridge_path = Path(f'/sys/class/net/{bridge_name}')
     if bridge_path.exists():
@@ -304,7 +304,7 @@ def _check_bridge_exists(bridge_name: str = 'vmbr0') -> ValidationResult:
     return ValidationResult("Network", f"Bridge {bridge_name}", False, f"Bridge {bridge_name} not found")
 
 
-def _check_bridge_has_ip(bridge_name: str = 'vmbr0') -> ValidationResult:
+def _check_bridge_has_ip(bridge_name: str) -> ValidationResult:
     """Check if bridge has an IP address configured."""
     try:
         result = subprocess.run(
@@ -418,6 +418,15 @@ def run_full_validation() -> ValidationReport:
     """Run complete system validation."""
     report = ValidationReport()
 
+    # Determine provisioner type early — many checks are conditional on this
+    provisioner_name = None
+    provisioner_manifest = Path('/usr/share/blockhost/provisioner.json')
+    if provisioner_manifest.exists():
+        try:
+            provisioner_name = json.loads(provisioner_manifest.read_text()).get('name')
+        except (json.JSONDecodeError, IOError):
+            pass
+
     # ========== FILE EXISTENCE AND PERMISSIONS ==========
 
     # /etc/blockhost/ directory
@@ -427,10 +436,15 @@ def run_full_validation() -> ValidationReport:
     private_keys = [
         (etc_blockhost / 'server.key', 'Server private key'),
         (etc_blockhost / 'deployer.key', 'Deployer private key'),
-        (etc_blockhost / 'terraform_ssh_key', 'Terraform SSH key'),
         (etc_blockhost / 'ssl' / 'key.pem', 'SSL private key'),
-        (etc_blockhost / 'pve-token', 'Proxmox API token'),
     ]
+
+    # Proxmox-specific private keys
+    if provisioner_name in (None, 'proxmox'):
+        private_keys.extend([
+            (etc_blockhost / 'terraform_ssh_key', 'Terraform SSH key'),
+            (etc_blockhost / 'pve-token', 'Proxmox API token'),
+        ])
 
     for path, name in private_keys:
         report.add(_check_file_exists(path, "Files", name))
@@ -440,8 +454,12 @@ def run_full_validation() -> ValidationReport:
     # Public keys (should be readable)
     public_keys = [
         (etc_blockhost / 'server.pubkey', 'Server public key'),
-        (etc_blockhost / 'terraform_ssh_key.pub', 'Terraform SSH public key'),
     ]
+
+    if provisioner_name in (None, 'proxmox'):
+        public_keys.append(
+            (etc_blockhost / 'terraform_ssh_key.pub', 'Terraform SSH public key'),
+        )
 
     for path, name in public_keys:
         report.add(_check_file_exists(path, "Files", name))
@@ -451,11 +469,14 @@ def run_full_validation() -> ValidationReport:
 
     # ========== YAML CONFIG FILES ==========
 
-    # db.yaml
+    # db.yaml — shared keys always required, provisioner-specific keys conditional
+    db_yaml_keys = ['db_file', 'gc_grace_days']
+    if provisioner_name in (None, 'proxmox'):
+        db_yaml_keys.extend(['vmid_range.start', 'vmid_range.end', 'ip_pool.network'])
     report.add(_check_yaml_syntax(
         etc_blockhost / 'db.yaml',
         "Config", "db.yaml",
-        required_keys=['vmid_range.start', 'vmid_range.end', 'ip_pool.network', 'db_file', 'terraform_dir']
+        required_keys=db_yaml_keys
     ))
 
     # web3-defaults.yaml
@@ -467,11 +488,12 @@ def run_full_validation() -> ValidationReport:
     ))
 
     # blockhost.yaml
+    blockhost_yaml_keys = ['server.key_file', 'deployer.key_file',
+                           'admin.wallet_address', 'public_secret', 'server_public_key']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'blockhost.yaml',
         "Config", "blockhost.yaml",
-        required_keys=['server.key_file', 'deployer.key_file', 'proxmox.node', 'proxmox.storage', 'proxmox.bridge',
-                       'admin.wallet_address', 'public_secret', 'server_public_key']
+        required_keys=blockhost_yaml_keys
     ))
 
     # ========== JSON CONFIG FILES ==========
@@ -562,20 +584,13 @@ def run_full_validation() -> ValidationReport:
 
     # ========== PROVISIONER MANIFEST ==========
 
-    provisioner_manifest = Path('/usr/share/blockhost/provisioner.json')
     manifest_result = _check_json_syntax(provisioner_manifest, "Provisioner", "provisioner.json")
     manifest_result.critical = False  # Not critical during transition
     report.add(manifest_result)
 
-    # Determine provisioner type for conditional checks
-    provisioner_name = None
-    if provisioner_manifest.exists():
-        try:
-            provisioner_name = json.loads(provisioner_manifest.read_text()).get('name')
-            report.add(ValidationResult("Provisioner", "Manifest loaded", True,
-                                       f"Provisioner: {provisioner_name}"))
-        except:
-            pass
+    if provisioner_name:
+        report.add(ValidationResult("Provisioner", "Manifest loaded", True,
+                                    f"Provisioner: {provisioner_name}"))
 
     # ========== TERRAFORM FILES (Proxmox provisioner only) ==========
 
@@ -825,9 +840,9 @@ def run_full_validation() -> ValidationReport:
         except Exception as e:
             report.add(ValidationResult("Privilege Separation", "/etc/blockhost permissions", False, f"Error: {e}"))
 
-    # /var/lib/blockhost/terraform ownership
+    # /var/lib/blockhost/terraform ownership (Proxmox only)
     tf_state_dir = Path('/var/lib/blockhost/terraform')
-    if tf_state_dir.exists():
+    if tf_state_dir.exists() and provisioner_name in (None, 'proxmox'):
         try:
             import pwd
             tf_stat = tf_state_dir.stat()
@@ -867,19 +882,32 @@ def run_full_validation() -> ValidationReport:
 
     # ========== NETWORK ==========
 
-    # Read bridge name from config if possible
-    bridge_name = 'vmbr0'
-    blockhost_yaml = etc_blockhost / 'blockhost.yaml'
-    if blockhost_yaml.exists():
+    # Network bridge check — provisioner-agnostic
+    # Bridge name from db.yaml (written by finalization from first-boot discovery)
+    bridge_name = None
+    db_yaml_path = etc_blockhost / 'db.yaml'
+    if db_yaml_path.exists():
         try:
             import yaml
-            data = yaml.safe_load(blockhost_yaml.read_text())
-            bridge_name = data.get('proxmox', {}).get('bridge', 'vmbr0')
+            db_data = yaml.safe_load(db_yaml_path.read_text())
+            bridge_name = db_data.get('bridge') if db_data else None
         except:
             pass
 
-    report.add(_check_bridge_exists(bridge_name))
-    report.add(_check_bridge_has_ip(bridge_name))
+    if not bridge_name:
+        # Fallback: find any bridge device in /sys/class/net/*/bridge
+        for p in Path('/sys/class/net').iterdir():
+            if (p / 'bridge').is_dir():
+                bridge_name = p.name
+                break
+
+    if bridge_name:
+        report.add(_check_bridge_exists(bridge_name))
+        report.add(_check_bridge_has_ip(bridge_name))
+    else:
+        report.add(ValidationResult("Network", "Bridge", False,
+                                    "No bridge found in db.yaml or /sys/class/net/*/bridge",
+                                    critical=False))
 
     # IPv6 forwarding sysctl
     sysctl_file = Path('/etc/sysctl.d/99-blockhost-ipv6.conf')
@@ -909,7 +937,8 @@ def run_full_validation() -> ValidationReport:
 
     # ========== SSH ==========
 
-    report.add(_check_ssh_key_in_authorized(etc_blockhost / 'terraform_ssh_key.pub'))
+    if provisioner_name in (None, 'proxmox'):
+        report.add(_check_ssh_key_in_authorized(etc_blockhost / 'terraform_ssh_key.pub'))
 
     # ========== WEB CONTENT ==========
 

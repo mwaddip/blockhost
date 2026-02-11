@@ -17,7 +17,7 @@ blockhost/
 ├── scripts/
 │   ├── build-iso.sh                   # ISO builder (419 lines)
 │   ├── build-packages.sh             # Build all submodule .debs (213 lines)
-│   ├── first-boot.sh                 # Post-install orchestrator (430 lines)
+│   ├── first-boot.sh                 # Post-install orchestrator (~519 lines)
 │   ├── check-build-deps.sh           # Verify build toolchain
 │   └── ci-verify-packages.sh         # CI: verify all 6 .debs exist
 ├── installer/
@@ -29,7 +29,7 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + finalization (3389 lines)
+│       ├── app.py                    # Flask wizard + finalization (~3146 lines)
 │       ├── validate_system.py        # Post-install validation (778 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
@@ -118,6 +118,13 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
     → Proxmox hook: hostname fix, install proxmox-ve, terraform, libguestfs-tools
     → Receives STATE_DIR, LOG_FILE as env vars; uses own step markers
     → Requires packages installed first (manifest + hook script are in blockhost-provisioner-proxmox.deb)
+  Step 3a (.step-bridge):             Create Linux bridge (provisioner-agnostic)
+    → Skip if bridge with global IPv4 already exists (handles Proxmox vmbr0, pre-configured systems)
+    → Detect primary NIC from default route, skip wireless NICs
+    → Create br0, migrate IP from NIC to bridge, verify gateway ping
+    → Rollback on connectivity failure (restore IP to NIC, delete bridge)
+    → Persist to /etc/network/interfaces (Proxmox will overwrite via pvesh — expected)
+    → Store bridge name in /run/blockhost/bridge
   Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/
   Step 4 (.step-network):             Verify network connectivity (DHCP fallback)
   Step 5 (.step-otp):                 Generate OTP → /run/blockhost/otp.json, display on /etc/issue
@@ -139,7 +146,7 @@ Wizard steps (WIZARD_STEPS in app.py, dynamically built):
   2. /wizard/storage         → Disk selection for LVM
   3. /wizard/blockchain      → chain_id, rpc_url, wallet (generate/import), contracts (deploy/existing), plan_name, plan_price_cents, revenue_share_*
   Provisioner (from manifest.setup.wizard_module → Flask Blueprint):
-  4. /wizard/proxmox         → node, storage, bridge, vmid_range, ip_pool, gc_grace_days
+  4. /wizard/<provisioner>   → provisioner-specific config (ip_pool, gc_grace_days, ...)
   Post:
   5. /wizard/ipv6            → broker allocation or manual prefix
   6. /wizard/admin_commands  → port knocking config
@@ -162,19 +169,16 @@ Step dispatch (_get_finalization_steps() in app.py, dynamically built):
     1   keypair     _finalize_keypair           → server.key, server.pubkey
     2   wallet      _finalize_wallet            → deployer.key
     3   contracts   _finalize_contracts         → deploy via cast or verify existing
-    4   config      _finalize_config            → db.yaml, web3-defaults.yaml, blockhost.yaml
+    4   config      _finalize_config            → db.yaml (incl. bridge), web3-defaults.yaml, blockhost.yaml
   Provisioner steps (from manifest.setup.wizard_module.get_finalization_steps()):
-    5   token       finalize_token              → Proxmox API token via pveum
-    6   terraform   finalize_terraform          → provider.tf.json, variables.tf.json, terraform init
-    7   bridge      finalize_bridge             → vmbr0 via pvesh
-    8   template    finalize_template           → Build Debian VM template with libpam-web3
+    (varies by provisioner — e.g. Proxmox: token, terraform, template)
   Post steps:
-    9   ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
-    10  https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
-    11  signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
-    12  mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
-    13  finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
-    14  validate    _finalize_validate          → System validation (testing mode only)
+    5+  ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
+        https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
+        signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
+        mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
+        finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
+        validate    _finalize_validate          → System validation (testing mode only)
 
 Each step: skip if completed, mark running → completed|failed, supports retry.
 ```
@@ -197,7 +201,7 @@ Subscription purchase flow:
      - Reserves NFT token ID (sequential, tracked in vms.json)
      - Allocates VMID + IPv4 from pool + IPv6 /128 from prefix
      - Generates .tf.json with cloud-init (nft-auth template, GECOS: nft=TOKEN_ID)
-     - Runs terraform apply → VM created on Proxmox
+     - Runs provisioner create command → VM created
      - Encrypts connection details: pam_web3_tool encrypt-symmetric
        Key derivation: keccak256(user_signature_bytes) → AES-256-GCM key
      - Mints NFT via cast send → mint(to, userEncrypted, publicSecret, description, imageUri, animationUrlBase64, expiresAt)
@@ -275,8 +279,9 @@ hardcoded paths when no manifest exists (transition period).
 | Extension | Mechanism | Provider |
 |-----------|-----------|----------|
 | Wizard step | Flask Blueprint via `wizard_module` | Provisioner .deb |
-| Finalization | `get_finalization_steps()` from wizard module | Provisioner .deb |
+| Finalization | `get_finalization_steps()` from wizard module (3- or 4-tuples) | Provisioner .deb |
 | Summary section | `get_summary_data()` + `get_summary_template()` | Provisioner .deb |
+| UI parameters | `get_ui_params(session)` → `prov_ui` context variable (optional) | Provisioner .deb |
 | First-boot hook | `setup.first_boot_hook` script | Provisioner .deb |
 | Root agent actions | `.py` modules in `/usr/share/blockhost/root-agent-actions/` | Provisioner .deb |
 | CLI commands | Binaries named in `commands` dict | Provisioner .deb |
@@ -317,20 +322,13 @@ session = {
         'revenue_share_broker': bool,
     },
 
-    'proxmox': {                        # from /wizard/proxmox
-        'api_url': 'https://127.0.0.1:8006',
-        'node': 'proxmox',
-        'storage': 'local-lvm',
-        'bridge': 'vmbr0',
-        'user': 'root@pam',
-        'template_vmid': 9001,
-        'vmid_start': 100,
-        'vmid_end': 999,
+    '<session_key>': {                  # from /wizard/<provisioner> (key from manifest config_keys.session_key)
         'ip_network': '192.168.122.0/24',
         'ip_start': '200',
         'ip_end': '250',
         'gateway': '192.168.122.1',
         'gc_grace_days': 7,
+        # ... plus provisioner-specific keys (vmid_range, storage, etc.)
     },
 
     'ipv6': {                           # from /wizard/ipv6
@@ -346,7 +344,7 @@ session = {
         'enabled': bool,
         'destination_mode': 'self'|'external',
         'knock_command': 'blockhost',
-        'knock_ports': [22, 8006],
+        'knock_ports': [22],
         'knock_timeout': 300,
         'knock_max_duration': 600,
     },
@@ -379,8 +377,9 @@ Directory: `/etc/blockhost/`
 ### db.yaml structure
 ```yaml
 db_file: /var/lib/blockhost/vms.json
-terraform_dir: /var/lib/blockhost/terraform
-vmid_range: {start: 100, end: 999}
+bridge: br0                                        # from first-boot bridge discovery
+terraform_dir: /var/lib/blockhost/terraform         # Proxmox only
+vmid_range: {start: 100, end: 999}                  # Proxmox only
 ip_pool: {network: '192.168.122.0/24', start: 200, end: 250, gateway: '192.168.122.1'}
 ipv6_pool: {start: 2, end: 254}
 default_expiry_days: 30
@@ -449,6 +448,7 @@ Directory: `/var/lib/blockhost/`
 | fund-manager-state.json | JSON | Fund manager last-run timestamps (auto-created by engine) |
 
 OTP state: `/run/blockhost/otp.json` (tmpfs, cleared on reboot)
+Bridge name: `/run/blockhost/bridge` (tmpfs, written by first-boot Step 3a, re-populated on resume)
 
 ## SUBMODULE INTERFACES
 
@@ -657,74 +657,68 @@ Events (monitored by blockhost-monitor):
 ### Constants & Setup
 | Line | Symbol |
 |------|--------|
-| 44 | CHAIN_NAMES dict |
-| 52 | WIZARD_STEPS list |
-| 66 | SETUP_STATE_FILE path |
-| 69 | class SetupState |
+| 46 | CHAIN_NAMES dict |
+| 128 | WIZARD_STEPS list |
+| 163 | SETUP_STATE_FILE path |
+| 166 | class SetupState |
 
 ### Routes
 | Line | Route | Method |
 |------|-------|--------|
-| 269 | / | GET → redirect |
-| 279 | /login | GET, POST |
-| 314 | /wizard/wallet | GET, POST |
-| 339 | /wizard/network | GET, POST |
-| 388 | /wizard/storage | GET, POST |
-| 404 | /wizard/blockchain | GET, POST |
-| 430 | /wizard/proxmox | GET, POST |
-| 458 | /wizard/ipv6 | GET, POST |
-| 490 | /wizard/admin-commands | GET, POST |
-| 524 | /wizard/summary | GET, POST |
-| 586 | /wizard/install | GET |
-| 856 | /api/setup-test | POST (testing only) |
-| 956 | /api/finalize | POST |
-| 1009 | /api/finalize/status | GET |
-| 1016 | /api/finalize/retry | POST |
-| 1069 | /api/finalize/reset | POST |
-| 1127 | /api/validation-output | GET |
+| 365 | / | GET → redirect |
+| 375 | /login | GET, POST |
+| 410 | /wizard/wallet | GET, POST |
+| 489 | /wizard/network | GET, POST |
+| 538 | /wizard/storage | GET, POST |
+| 552 | /wizard/blockchain | GET, POST |
+| — | /wizard/<provisioner> | GET, POST (from provisioner Blueprint) |
+| 584 | /wizard/ipv6 | GET, POST |
+| 617 | /wizard/admin-commands | GET, POST |
+| 651 | /wizard/summary | GET, POST |
+| 727 | /wizard/install | GET |
+| 978 | /api/setup-test | POST (testing only) |
+| 1052 | /api/finalize | POST |
+| 1097 | /api/finalize/status | GET |
+| 1149 | /api/finalize/retry | POST |
+| 1194 | /api/finalize/reset | POST |
+| 1254 | /api/validation-output | GET |
 
 ### API endpoints (AJAX from wizard UI)
 | Line | Route | Purpose |
 |------|-------|---------|
-| 604+ | /api/blockchain/generate-wallet | Generate new secp256k1 keypair |
-| ~650 | /api/blockchain/validate-key | Validate imported private key |
-| ~700 | /api/blockchain/balance | Check wallet balance via RPC |
-| ~750 | /api/blockchain/deploy-contracts | Deploy contracts (unused, finalization does this) |
+| 778 | /api/blockchain/generate-wallet | Generate new secp256k1 keypair |
+| 792 | /api/blockchain/validate-key | Validate imported private key |
+| 805 | /api/blockchain/balance | Check wallet balance via RPC |
 
 ### Finalization functions
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1598 | _run_finalization_with_state | Step dispatcher loop |
-| 1696 | _finalize_keypair | Generate server secp256k1 key |
-| 1725 | _finalize_wallet | Write deployer.key |
-| 1745 | _finalize_contracts | Deploy or verify contracts |
-| 1808 | _deploy_contract_with_forge | Deploy contract via cast send --create |
-| 1906 | _finalize_config | Write YAML config files |
-| 2070 | _finalize_token | Create Proxmox API token (pveum) |
-| 2118 | _finalize_terraform | Generate .tf.json, terraform init |
-| 2260 | _finalize_bridge | Configure vmbr0 (pvesh) |
-| 2443 | _finalize_ipv6 | Broker allocation or manual prefix |
-| 2611 | _finalize_https | sslip.io hostname + Let's Encrypt |
-| 2739 | _finalize_signup | generate-signup-page.py |
-| 2847 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| 2928 | _finalize_template | Build Debian VM template |
-| 3082 | _finalize_complete | Enable services, create subscription plan |
-| 3158 | _finalize_validate | System validation (testing only) |
-| 3187 | _create_default_plan | Call createPlan() on subscription contract |
+| 1692 | _run_finalization_with_state | Step dispatcher loop |
+| 1775 | _finalize_keypair | Generate server secp256k1 key |
+| 1804 | _finalize_wallet | Write deployer.key |
+| 1824 | _finalize_contracts | Deploy or verify contracts |
+| 1887 | _deploy_contract_with_forge | Deploy contract via cast send --create |
+| 1985 | _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
+| 2161 | _finalize_ipv6 | Broker allocation or manual prefix |
+| 2342 | _finalize_https | sslip.io hostname + Let's Encrypt |
+| 2470 | _finalize_signup | generate-signup-page.py |
+| 2578 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
+| 2827 | _finalize_complete | Enable services, create subscription plan |
+| 2903 | _finalize_validate | System validation (testing only) |
+| 2932 | _create_default_plan | Call createPlan() on subscription contract |
 
 ### Helpers
 | Line | Function | Purpose |
 |------|----------|---------|
-| 1155 | _detect_disks | List available disks (lsblk) |
-| 1183 | _detect_proxmox_resources | Query PVE for storage, bridges |
-| 1257 | _generate_secp256k1_keypair | Generate wallet keypair |
-| 1344 | _get_address_from_key | Derive address from private key |
-| 1382 | _is_valid_address | Validate 0x + 40 hex |
-| 1413 | _get_broker_registry | Look up broker registry by chain_id |
-| 1424 | _get_wallet_balance | eth_getBalance via JSON-RPC |
-| 1461 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
-| 1493 | _request_broker_allocation | Call blockhost-broker-client CLI |
-| 3264 | _write_yaml | Write YAML file helper |
+| 1280 | _detect_disks | List available disks (lsblk) |
+| 1308 | _generate_secp256k1_keypair | Generate wallet keypair |
+| 1395 | _get_address_from_key | Derive address from private key |
+| 1433 | _is_valid_address | Validate 0x + 40 hex |
+| 1464 | _get_broker_registry | Look up broker registry by chain_id |
+| 1475 | _get_wallet_balance | eth_getBalance via JSON-RPC |
+| 1512 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
+| 1547 | _request_broker_allocation | Call blockhost-broker-client CLI |
+| 3035 | _write_yaml | Write YAML file helper |
 
 ## BLOCKCHAIN INTERACTIONS
 
@@ -754,11 +748,11 @@ Runtime on-chain interactions (by submodule services, not this repo):
 ```
 Internet
   │
-  ├─ eth0/ens* (physical NIC)
-  │   └─ Host IP (DHCP or static, configured in wizard step 1)
+  ├─ eth0/ens* (physical NIC, bridge port after first-boot Step 3a)
   │
-  ├─ vmbr0 (Linux bridge, created by finalization step 7)
-  │   ├─ Host bridge IP (same subnet as VMs)
+  ├─ br0 (Linux bridge, created by first-boot Step 3a)
+  │   │   Proxmox: may be vmbr0 (pre-existing or created by PVE installer)
+  │   ├─ Host bridge IP (migrated from NIC; same subnet as VMs)
   │   └─ VM NICs (tap devices)
   │       ├─ VMs get IPv4 from ip_pool range
   │       └─ Each VM serves signing page on port 8080
@@ -858,14 +852,24 @@ Three distinct encryption contexts:
 ```python
 summary.network.{ip, gateway}
 summary.blockchain.{chain_id, network_name, rpc_url, deployer_address, deploy_contracts, nft_contract, subscription_contract, plan_name, plan_price_cents, revenue_share_enabled, revenue_share_percent, revenue_share_dev, revenue_share_broker}
-summary.proxmox.{node, storage, bridge, vmid_start, vmid_end, ip_start, ip_end, gc_grace_days}
+provisioner_summary — dict from provisioner module's get_summary_data(session), or None
+provisioner_summary_template — template path from provisioner module's get_summary_template(), or None
 summary.ipv6.{mode, prefix, broker_node, broker_registry}
 summary.admin.{wallet, enabled, destination_mode, command_count}
 ```
 
-### All templates receive (via context_processor, app.py:243):
+### All templates receive (via context_processor):
 ```python
 wizard_steps  # WIZARD_STEPS list for step bar rendering
+prov_ui       # dict from provisioner module's get_ui_params(session), or {} if no provisioner
+              # Keys: management_url, management_label, knock_ports_default, knock_description,
+              #        storage_hint, storage_extra_hint (all optional, templates use | default())
+```
+
+### Summary template also receives:
+```python
+provisioner_steps  # list[dict] from get_finalization_steps() metadata: {id, label, hint?}
+                   # Rendered as dynamic <li> elements in progress list (replaces hardcoded provisioner steps)
 ```
 
 ## CI/CD

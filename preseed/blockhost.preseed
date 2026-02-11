@@ -67,7 +67,8 @@ d-i pkgsel/include string \
     wget \
     gnupg \
     openssh-server \
-    sudo
+    sudo \
+    bridge-utils
 
 d-i pkgsel/upgrade select full-upgrade
 popularity-contest popularity-contest/participate boolean false

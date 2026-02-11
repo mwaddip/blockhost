@@ -96,7 +96,7 @@
             <div class="form-section">
                 <h3>Port Knock Command</h3>
                 <p class="text-muted mb-2" style="font-size: 0.875rem;">
-                    Define a secret command name that opens SSH and Proxmox ports temporarily.
+                    {{ prov_ui.knock_description | default('Define a secret command name that opens configured ports temporarily.') }}
                     After you log in, ports close to everyone except your IP.
                 </p>
 
@@ -121,8 +121,8 @@
                     <div class="form-group">
                         <label for="knock_ports">Ports to Open</label>
                         <input type="text" id="knock_ports" name="knock_ports"
-                               value="22, 8006"
-                               placeholder="22, 8006">
+                               value="{{ prov_ui.knock_ports_default | default('22') }}"
+                               placeholder="{{ prov_ui.knock_ports_default | default('22') }}">
                         <p class="text-muted mt-1" style="font-size: 0.75rem;">
                             Comma-separated port numbers
                         </p>

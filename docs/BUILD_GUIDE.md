@@ -228,17 +228,14 @@ Triggered from the summary page. 14 steps with persistent state in `/var/lib/blo
 | 1 | `keypair` | Generate server secp256k1 keypair |
 | 2 | `wallet` | Save deployer private key |
 | 3 | `contracts` | Deploy contracts via `cast` or verify existing addresses |
-| 4 | `config` | Write config files (see below) |
-| 5 | `token` | Create Proxmox API token via `pveum` |
-| 6 | `terraform` | Generate provider/variables `.tf.json`, run `terraform init` |
-| 7 | `bridge` | Create `vmbr0` bridge via PVE API (`pvesh`) |
-| 8 | `ipv6` | Request broker allocation + install WireGuard tunnel, or configure manual prefix |
-| 9 | `https` | Generate sslip.io hostname from IPv6, get Let's Encrypt cert |
-| 10 | `signup` | Generate signup page via `blockhost-generate-signup` |
-| 11 | `mint_nft` | Mint NFT #0 to admin wallet with encrypted connection details |
-| 12 | `template` | Build Debian VM template with libpam-web3 |
-| 13 | `finalize` | Create `.setup-complete` marker, enable services, disable first-boot |
-| 14 | `validate` | System validation (testing mode only) |
+| 4 | `config` | Write config files incl. bridge name (see below) |
+| 5+ | *(provisioner)* | Provisioner-specific steps (e.g. Proxmox: token, terraform, template) |
+| — | `ipv6` | Request broker allocation + install WireGuard tunnel, or configure manual prefix |
+| — | `https` | Generate sslip.io hostname from IPv6, get Let's Encrypt cert |
+| — | `signup` | Generate signup page via `blockhost-generate-signup` |
+| — | `mint_nft` | Mint NFT #0 to admin wallet with encrypted connection details |
+| — | `finalize` | Create `.setup-complete` marker, enable services, disable first-boot |
+| — | `validate` | System validation (testing mode only) |
 
 ---
 
@@ -292,15 +289,16 @@ User → Blockchain (purchase subscription)
 ### IPv6 Routing
 
 ```
-Outside → Broker (NDP proxy) → WireGuard → Proxmox host
-  → kernel: /128 host route via vmbr0 (more specific than /120 on wg-broker)
-  → vmbr0 bridge → VM tap → VM eth0
-  → VM replies via gateway on vmbr0 → Proxmox forwards → outside
+Outside → Broker (NDP proxy) → WireGuard → BlockHost host
+  → kernel: /128 host route via bridge (more specific than /120 on wg-broker)
+  → bridge (br0/vmbr0) → VM tap → VM eth0
+  → VM replies via gateway on bridge → host forwards → outside
 ```
 
-- Gateway address (e.g., `::101`) lives as `/128` on `vmbr0` — VMs use it as their default gateway
+- Gateway address (e.g., `::101`) lives as `/128` on the bridge — VMs use it as their default gateway
 - WireGuard tunnel has the `/120` prefix on `wg-broker` interface
-- Per-VM `/128` host routes via `vmbr0` prevent routing loops
+- Per-VM `/128` host routes via bridge prevent routing loops
+- Bridge name is discovered from `db.yaml` (`bridge` key, set during first-boot)
 
 ### Smart Contracts
 
@@ -496,15 +494,16 @@ wg show
 ip -6 route show | grep -v fe80
 # Check forwarding
 sysctl net.ipv6.conf.all.forwarding
-# Check gateway address on bridge
-ip -6 addr show dev vmbr0
+# Check gateway address on bridge (br0, vmbr0, etc.)
+ip -6 addr show dev br0
 ```
 
 ### VM not reachable via IPv6
-Check that the VM has a `/128` host route via `vmbr0`:
+Check that the VM has a `/128` host route via the bridge:
 ```bash
 ip -6 route show | grep <vm-ipv6>
-# Should show: <vm-ipv6> dev vmbr0
+# Should show: <vm-ipv6> dev br0 (or vmbr0 on Proxmox)
+# Bridge name is in /etc/blockhost/db.yaml under 'bridge' key
 ```
 
 ---
