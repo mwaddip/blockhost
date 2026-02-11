@@ -111,10 +111,11 @@ jobs:
         id: test
         env:
           VM_IP: ${{ steps.vm.outputs.vm_ip }}
+          CLEANUP_FLAG: ${{ inputs.run_ipv6_test == true && '' || '--cleanup' }}
         run: |
           SSH_CMD="sshpass -p blockhost ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
           OUTPUT=$($SSH_CMD "root@${VM_IP}" \
-            "chmod +x /tmp/integration-test.sh && sudo -u blockhost /tmp/integration-test.sh --cleanup") || {
+            "chmod +x /tmp/integration-test.sh && sudo -u blockhost /tmp/integration-test.sh $CLEANUP_FLAG") || {
             EXIT_CODE=$?
             echo "$OUTPUT"
             echo "--- Integration test failed (exit $EXIT_CODE), fetching monitor logs ---"
