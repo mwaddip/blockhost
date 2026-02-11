@@ -297,20 +297,21 @@ VM_DEPLOYER_ADDR=$(echo "$VM_WALLET_JSON" | jq -r '.[0].address')
 [ -n "$VM_DEPLOYER_KEY" ] || fail "Could not generate fresh deployer wallet"
 info "VM deployer: $VM_DEPLOYER_ADDR"
 
-# Fund with ETH for gas (contract deployment + integration test transactions)
-info "Sending 0.1 ETH to VM deployer..."
+# Fund with ETH + USDC using explicit nonces to avoid race on public RPC
+NONCE=$(cast nonce "$ADMIN_WALLET" --rpc-url "$RPC_URL")
+
+info "Sending 0.1 ETH to VM deployer (nonce $NONCE)..."
 cast send "$VM_DEPLOYER_ADDR" --value 0.1ether \
     --private-key "$DEPLOYER_KEY" --rpc-url "$RPC_URL" \
-    --json > /dev/null \
+    --nonce "$NONCE" --json > /dev/null \
     || fail "Could not fund VM deployer with ETH"
 
-# Fund with USDC for integration test (buyer wallet needs stablecoin for subscription)
-info "Sending 10 USDC to VM deployer..."
+info "Sending 10 USDC to VM deployer (nonce $((NONCE + 1)))..."
 USDC_AMOUNT="10000000"  # 10 USDC (6 decimals)
 cast send "$USDC_SEPOLIA" "transfer(address,uint256)" \
     "$VM_DEPLOYER_ADDR" "$USDC_AMOUNT" \
     --private-key "$DEPLOYER_KEY" --rpc-url "$RPC_URL" \
-    --json > /dev/null \
+    --nonce "$((NONCE + 1))" --json > /dev/null \
     || fail "Could not fund VM deployer with USDC"
 
 pass "VM deployer funded: 0.1 ETH + 10 USDC"
