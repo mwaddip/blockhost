@@ -45,7 +45,10 @@ blockhost/
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
 ├── testing/
-│   ├── integration-test.sh            # E2E subscription + provisioning test
+│   ├── integration-test-proxmox.sh     # E2E test (Proxmox: PVE API + Terraform cleanup)
+│   ├── integration-test-libvirt.sh     # E2E test (libvirt: vm-status + vm-destroy cleanup)
+│   ├── ci-config-proxmox.json         # CI config for Proxmox backend
+│   ├── ci-config-libvirt.json         # CI config for libvirt backend
 │   ├── ipv6-login-test.sh             # IPv6 PAM web3 SSH login test
 │   └── ci-provision.sh                # CI: VM lifecycle (create, boot, wizard, finalize)
 ├── .github/workflows/
@@ -880,7 +883,7 @@ provisioner_steps  # list[dict] from get_finalization_steps() metadata: {id, lab
 |----------|---------|--------|------|
 | `ci.yml` | Push develop, PR master | ubuntu-latest | rust-tests, engine-tests, forge-tests, build-packages |
 | `iso-build.yml` | workflow_dispatch, tag v* | self-hosted (blockhost-iso) | Build ISO, upload artifact |
-| `integration.yml` | workflow_dispatch only | self-hosted (blockhost-proxmox, blockhost-phone) | provision → integration-test → ipv6-login-test → cleanup |
+| `integration.yml` | workflow_dispatch only | self-hosted (blockhost-{proxmox,libvirt}, blockhost-phone) | provision → integration-test → ipv6-login-test → cleanup |
 
 ### Test Setup API (`/api/setup-test`)
 

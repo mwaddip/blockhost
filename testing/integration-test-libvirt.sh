@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# BlockHost End-to-End Integration Test
+# BlockHost End-to-End Integration Test (libvirt backend)
 #
 # Exercises the full subscription → provisioning → NFT minting flow:
 #   1. Generate test wallet
@@ -9,7 +9,7 @@
 #   4. Wait for monitor to detect event + provision VM
 #   5. Verify VM running, NFT minted, connection details decryptable
 #
-# Run as: sudo -u blockhost ./testing/integration-test.sh [--cleanup]
+# Run as: sudo -u blockhost ./testing/integration-test-libvirt.sh [--cleanup]
 #
 # Prerequisites: finalized system with blockhost-monitor running
 # =============================================================================
@@ -297,30 +297,26 @@ fi
 pass "VM provisioned: $FOUND_NAME (VMID $FOUND_VMID, IP $FOUND_IP)"
 
 # =============================================================================
-# Phase 6 — Verify VM
+# Phase 6 — Verify VM (libvirt: use provisioner status command)
 # =============================================================================
 info "Phase 6: Verify VM"
 
-# Check VM status via Proxmox API (blockhost user can't use sudo qm)
-PVE_TOKEN=$(cat /etc/blockhost/pve-token 2>/dev/null || true)
-HOSTNAME_SHORT=$(hostname -s)
-if [ -n "$PVE_TOKEN" ]; then
-    VM_API=$(curl -s -k -H "Authorization: PVEAPIToken=${PVE_TOKEN}" \
-        "https://localhost:8006/api2/json/nodes/${HOSTNAME_SHORT}/qemu/${FOUND_VMID}/status/current" 2>/dev/null || true)
-    VM_STATUS=$(echo "$VM_API" | jq -r '.data.status // empty' 2>/dev/null || true)
-else
-    VM_STATUS=""
-fi
+# Use the provisioner's status command (blockhost-vm-status outputs one of:
+# active, suspended, destroyed, unknown)
+VM_STATUS=$(blockhost-vm-status "$FOUND_NAME" 2>/dev/null || echo "unknown")
 
-if [ "$VM_STATUS" = "running" ]; then
-    pass "VM running"
-elif [ -n "$VM_STATUS" ]; then
-    info "VM status: $VM_STATUS (may still be starting)"
+if [ "$VM_STATUS" = "active" ]; then
+    pass "VM running (status: active)"
+elif [ "$VM_STATUS" = "suspended" ]; then
+    info "VM status: suspended (may still be starting)"
     pass "VM exists (status: $VM_STATUS)"
-else
+elif [ "$VM_STATUS" = "unknown" ]; then
     # VM might still be starting — don't hard fail if vms.json entry exists
-    info "Could not query VM $FOUND_VMID via API (may still be provisioning)"
+    info "VM status unknown (may still be provisioning)"
     pass "VM registered in database (VMID $FOUND_VMID)"
+else
+    info "VM status: $VM_STATUS"
+    pass "VM exists (status: $VM_STATUS)"
 fi
 
 [ -n "$FOUND_IP" ] && [ "$FOUND_IP" != "null" ] || fail "VM has no IP address"
@@ -420,36 +416,17 @@ fi
 if [ "$CLEANUP" = true ]; then
     info "Phase 9: Cleanup"
 
-    # Destroy VM via terraform
-    TF_DIR="/var/lib/blockhost/terraform"
-    TF_FILE="$TF_DIR/$FOUND_NAME.tf.json"
+    # Sweep leftover testnet ETH from test wallet back to admin
+    ADMIN_ADDR="0xe35B5D114eFEA216E6BB5Ff15C261d25dB9E2cb9"
+    info "Sweeping leftover ETH from test wallet to admin..."
+    bw --debug --cleanup "$ADMIN_ADDR" || true
 
-    if [ -f "$TF_FILE" ]; then
-        info "Removing Terraform config and destroying VM..."
-        rm -f "$TF_FILE"
-        # Also remove cloud-init file if present
-        rm -f "$TF_DIR/$FOUND_NAME-cloud-config.yaml"
-
-        if terraform -chdir="$TF_DIR" apply -auto-approve > /dev/null 2>&1; then
-            pass "VM destroyed via Terraform"
-        else
-            info "Terraform destroy returned non-zero (VM may already be gone)"
-        fi
+    # Destroy VM via provisioner command
+    info "Destroying VM $FOUND_NAME..."
+    if blockhost-vm-destroy "$FOUND_NAME" 2>&1; then
+        pass "VM destroyed via blockhost-vm-destroy"
     else
-        info "No Terraform config found at $TF_FILE, skipping destroy"
-    fi
-
-    # Update vms.json — mark as destroyed
-    if [ -f "$VMS_JSON" ] && command -v python3 >/dev/null 2>&1; then
-        python3 -c "
-from blockhost.vm_db import get_database
-db = get_database()
-try:
-    db.mark_destroyed('$FOUND_NAME')
-    print('[PASS] VM entry marked as destroyed in database')
-except Exception as e:
-    print(f'[INFO] Could not update database: {e}')
-"
+        info "blockhost-vm-destroy returned non-zero (VM may already be gone)"
     fi
 
     # Withdraw stablecoin from subscription contract back to deployer

@@ -20,7 +20,7 @@ jobs:
   provision:
     name: Provision VM from ISO
     if: ${{ inputs.skip_provision == false }}
-    runs-on: [self-hosted, blockhost-proxmox]
+    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
     outputs:
       vm_name: ${{ steps.provision.outputs.vm_name }}
       vm_ip: ${{ steps.provision.outputs.vm_ip }}
@@ -59,7 +59,7 @@ jobs:
           mountpoint -q /mnt/ramdisk || sudo mount -t tmpfs -o size=16G tmpfs /mnt/ramdisk
           ./testing/ci-provision.sh \
             --iso build/blockhost_0.1.0.iso \
-            --config testing/ci-config.json \
+            --config testing/ci-config-${BACKEND}.json \
             --name "blockhost-ci-${{ github.run_number }}" \
             --disk-path /mnt/ramdisk
 
@@ -67,7 +67,9 @@ jobs:
     name: Integration Test
     needs: [provision]
     if: ${{ always() && (needs.provision.result == 'success' || inputs.skip_provision == true) }}
-    runs-on: [self-hosted, blockhost-proxmox]
+    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
+    env:
+      BACKEND: ${{ inputs.backend || 'proxmox' }}
     outputs:
       wallet_key: ${{ steps.test.outputs.wallet_key }}
       vm_ipv6: ${{ steps.test.outputs.vm_ipv6 }}
@@ -98,7 +100,7 @@ jobs:
         run: |
           sshpass -p blockhost scp \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            testing/integration-test.sh \
+            testing/integration-test-${BACKEND}.sh \
             "root@${VM_IP}:/tmp/integration-test.sh"
 
       - name: Run integration test
@@ -147,7 +149,7 @@ jobs:
     name: Cleanup
     needs: [provision, integration-test, ipv6-login-test]
     if: ${{ always() && inputs.skip_provision == false && needs.provision.outputs.vm_name != '' }}
-    runs-on: [self-hosted, blockhost-proxmox]
+    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
     steps:
       - uses: actions/checkout@v4
 

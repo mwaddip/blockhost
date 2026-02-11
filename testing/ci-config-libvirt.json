@@ -1,0 +1,25 @@
+{
+  "admin_public_secret": "blockhost-access",
+  "blockchain": {
+    "chain_id": "11155111",
+    "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
+    "contract_mode": "deploy",
+    "plan_name": "Basic VM",
+    "plan_price_cents": 50
+  },
+  "libvirt": {
+    "storage_pool": "blockhost",
+    "storage_path": "/var/lib/blockhost/vms",
+    "ip_network": "192.168.122.0/24",
+    "ip_start": "2",
+    "ip_end": "254",
+    "gateway": "192.168.122.1",
+    "gc_grace_days": 7
+  },
+  "ipv6": {
+    "mode": "broker"
+  },
+  "admin_commands": {
+    "enabled": false
+  }
+}

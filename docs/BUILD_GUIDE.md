@@ -405,10 +405,11 @@ Exercises the full subscription → provisioning → NFT flow on a finalized sys
 
 ```bash
 # Run on the BlockHost machine as the blockhost user
-sudo -u blockhost ./testing/integration-test.sh [--cleanup]
+sudo -u blockhost ./testing/integration-test-proxmox.sh [--cleanup]   # Proxmox
+sudo -u blockhost ./testing/integration-test-libvirt.sh [--cleanup]  # libvirt
 ```
 
-9 phases: pre-flight checks → wallet generation → funding from deployer → message signing → on-chain `buySubscription()` → wait for monitor to detect event + provision VM → verify VM via Proxmox API → verify NFT minted + decrypt `userEncrypted` → cleanup (optional: destroy VM, withdraw funds).
+9 phases: pre-flight checks → wallet generation → funding from deployer → message signing → on-chain `buySubscription()` → wait for monitor to detect event + provision VM → verify VM running → verify NFT minted + decrypt `userEncrypted` → cleanup (optional: sweep test ETH, destroy VM, withdraw funds). Backend-specific scripts handle VM verification and cleanup differently (Proxmox uses PVE API + Terraform, libvirt uses `blockhost-vm-status` + `blockhost-vm-destroy`).
 
 Requires: finalized system, `blockhost-engine` running, deployer key, Foundry (`cast`), `pam_web3_tool`.
 
