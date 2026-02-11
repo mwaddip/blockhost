@@ -20,7 +20,9 @@ jobs:
   provision:
     name: Provision VM from ISO
     if: ${{ inputs.skip_provision == false }}
-    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
+    runs-on:
+      - self-hosted
+      - "blockhost-${{ inputs.backend || 'proxmox' }}"
     outputs:
       vm_name: ${{ steps.provision.outputs.vm_name }}
       vm_ip: ${{ steps.provision.outputs.vm_ip }}
@@ -67,7 +69,9 @@ jobs:
     name: Integration Test
     needs: [provision]
     if: ${{ always() && (needs.provision.result == 'success' || inputs.skip_provision == true) }}
-    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
+    runs-on:
+      - self-hosted
+      - "blockhost-${{ inputs.backend || 'proxmox' }}"
     env:
       BACKEND: ${{ inputs.backend || 'proxmox' }}
     outputs:
@@ -149,7 +153,9 @@ jobs:
     name: Cleanup
     needs: [provision, integration-test, ipv6-login-test]
     if: ${{ always() && inputs.skip_provision == false && needs.provision.outputs.vm_name != '' }}
-    runs-on: [self-hosted, blockhost-${{ inputs.backend || 'proxmox' }}]
+    runs-on:
+      - self-hosted
+      - "blockhost-${{ inputs.backend || 'proxmox' }}"
     steps:
       - uses: actions/checkout@v4
 
