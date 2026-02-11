@@ -443,24 +443,25 @@ sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" "shutdown -r now" 2>/dev/nu
 # Wait for SSH to go down
 sleep 10
 
-# Wait for SSH to come back
+# Wait for SSH to come back — re-resolve IP in case DHCP assigns a new one
 ELAPSED=0
 REBOOT_TIMEOUT=300
 while [ "$ELAPSED" -lt "$REBOOT_TIMEOUT" ]; do
+    refresh_ip
     if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=5 \
         "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active"; then
         break
     fi
-    wait_ "Waiting for reboot + services (${ELAPSED}s / ${REBOOT_TIMEOUT}s)"
+    wait_ "Waiting for reboot + services at ${VM_IP} (${ELAPSED}s / ${REBOOT_TIMEOUT}s)"
     sleep "$POLL_INTERVAL"
     ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
 done
 
 sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=10 \
     "root@${VM_IP}" "systemctl is-active blockhost-monitor" 2>/dev/null | grep -q "active" || \
-    fail "blockhost-monitor not running after reboot"
+    fail "blockhost-monitor not running after reboot (IP: ${VM_IP})"
 
-pass "System rebooted, services running ($(elapsed))"
+pass "System rebooted, services running at ${VM_IP} ($(elapsed))"
 
 # =============================================================================
 # Output — VM details for subsequent CI jobs
