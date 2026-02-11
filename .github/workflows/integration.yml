@@ -3,6 +3,10 @@ name: Integration Tests
 on:
   workflow_dispatch:
     inputs:
+      backend:
+        description: 'Provisioner backend to build'
+        type: string
+        default: 'proxmox'
       run_ipv6_test:
         description: 'Run IPv6 login test (requires ADB phone with carrier IPv6)'
         type: boolean
