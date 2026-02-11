@@ -270,6 +270,8 @@ for iface in json.load(sys.stdin):
                 brctl addif br0 "$PRIMARY_NIC"
                 brctl stp br0 off
                 brctl setfd br0 0
+                # Inherit NIC's MAC so DHCP renews the same lease after bridge creation
+                ip link set br0 address "$(cat /sys/class/net/${PRIMARY_NIC}/address)"
                 ip link set br0 up
                 ip addr del "$BRIDGE_IP" dev "$PRIMARY_NIC" 2>/dev/null
                 ip addr add "$BRIDGE_IP" dev br0
