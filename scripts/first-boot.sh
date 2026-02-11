@@ -289,6 +289,7 @@ for iface in json.load(sys.stdin):
                         sed -i "s/^allow-hotplug ${PRIMARY_NIC}$/# allow-hotplug ${PRIMARY_NIC}  # moved to br0/" /etc/network/interfaces
                         sed -i "s/^iface ${PRIMARY_NIC} inet/# iface ${PRIMARY_NIC} inet/" /etc/network/interfaces
                     fi
+                    NIC_MAC=$(cat /sys/class/net/${PRIMARY_NIC}/address)
                     cat >> /etc/network/interfaces << BREOF
 
 # Bridge created by BlockHost first-boot
@@ -296,6 +297,7 @@ iface ${PRIMARY_NIC} inet manual
 
 auto br0
 iface br0 inet dhcp
+    hwaddress ether ${NIC_MAC}
     bridge_ports ${PRIMARY_NIC}
     bridge_stp off
     bridge_fd 0
