@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-11
+> Last updated: 2026-02-12
 
 ## FILE MAP
 
@@ -51,6 +51,18 @@ blockhost/
 │   ├── ci-config-libvirt.json         # CI config for libvirt backend
 │   ├── ipv6-login-test.sh             # IPv6 PAM web3 SSH login test
 │   └── ci-provision.sh                # CI: VM lifecycle (create, boot, wizard, finalize)
+├── admin/
+│   ├── __init__.py
+│   ├── __main__.py                   # python3 -m admin entry
+│   ├── app.py                        # Flask app factory, session config, CLI
+│   ├── auth.py                       # Wallet auth: challenge, verify (cast), sessions, login_required
+│   ├── routes.py                     # Auth routes + protected API endpoints + dashboard
+│   ├── system.py                     # Data collection + system actions (~200 lines)
+│   ├── templates/
+│   │   ├── base.html                 # Dark theme, sidebar nav, topbar wallet + logout
+│   │   ├── dashboard.html            # Single-page dashboard, all sections
+│   │   └── login.html                # Standalone login: challenge code, MetaMask + paste signature
+│   └── static/css/admin.css          # Style overrides (base styles in template)
 ├── .github/workflows/
 │   ├── ci.yml                         # Push/PR: tests + package build
 │   ├── iso-build.yml                  # Manual/tag: ISO build (self-hosted)
@@ -216,7 +228,7 @@ Subscription purchase flow:
 VM authentication flow (on each SSH login):
   1. SSH connect → PAM module (pam_web3.so) generates OTP
      OTP = HMAC-SHA3(machine_id + timestamp + secret_key), 6 chars
-  2. User sees OTP + signing page URL
+  2. User sees OTP + signing page URL (https://{fqdn}:8080 if dns_zone, http://{ip}:8080 otherwise)
   3. User signs: "Authenticate to {machine_id} with code: {otp}"
   4. PAM recovers wallet via secp256k1 ecrecover
   5. PAM queries web3-auth-svc (Unix socket: /run/web3-auth/web3-auth.sock) for wallet's NFT token IDs
@@ -238,6 +250,100 @@ Admin commands flow:
     → blockhost-engine src/admin/ processes command
     → e.g. port knocking: temporarily open ports on VM
 ```
+
+## ADMIN PANEL
+
+Post-install web dashboard for system management. Wallet-based auth (same flow as libpam-web3 SSH login). Runs as standalone Flask app.
+
+```
+Entry: python3 -m admin.app --port 8443
+Bind: 0.0.0.0:8443
+Later: blockhost-admin.service (systemd)
+```
+
+### Structure
+
+```
+admin/
+├── app.py         → create_app() factory, session config, CLI (argparse --port/--host/--debug)
+├── auth.py        → Challenge generation, signature verification (cast wallet verify), session management, login_required decorator
+├── routes.py      → Blueprint "admin", auth routes + protected API + page routes
+├── system.py      → Data collection (reads host files/commands), action wrappers
+├── templates/
+│   ├── base.html      → Dark theme, sidebar nav, topbar with wallet + logout
+│   ├── dashboard.html → Single-page dashboard, all sections
+│   └── login.html     → Standalone login page: challenge code, MetaMask + paste-signature paths
+└── static/css/    → Style overrides
+```
+
+### Authentication
+
+Wallet-signing flow identical to libpam-web3 SSH login. Access is NFT-gated: only the current holder of the admin credential NFT can authenticate.
+
+```
+1. Visit any page → redirected to /login (login_required decorator)
+2. Login page generates random 6-char OTP (A-Z2-9, no ambiguous chars), shows:
+   "Code: A3B7K2  |  Machine: blockhost  |  Sign at: /sign"
+3. Two signing paths:
+   Path A: Open /sign (serves existing signing page), sign, paste 0x... signature
+   Path B: Click "Sign with MetaMask" (inline personal_sign), auto-submits
+4. POST /api/auth/verify {code, signature}
+5. Backend: bw who admin → queries chain for NFT owner → 0x...
+6. Backend: cast wallet verify --address <nft_owner> "<message>" <signature>
+7. Exit 0 → session cookie → redirect to dashboard
+```
+
+Message format: `"Authenticate to {hostname} with code: {code}"` — same as PAM module.
+
+Auth state (module-level dicts in auth.py):
+- `_challenges`: code → expiry (TTL 300s, one-time use)
+- `_sessions`: token → (address, expiry) (TTL 3600s)
+- Admin wallet resolved via `bw who admin` → queries `ownerOf(credential_nft_id)` on-chain (cached 60s)
+- Signature verification: `cast wallet verify` subprocess (Foundry, already installed)
+- If NFT #0 is transferred, the new holder becomes admin — no config changes needed
+
+Session config: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE=Lax`, `PERMANENT_SESSION_LIFETIME=1h`.
+
+### Dashboard Sections
+
+| Section | Read Source | Writable |
+|---------|-----------|----------|
+| System | `/proc/uptime`, `/etc/os-release`, `socket.gethostname()`, `platform.release()` | Hostname (`hostnamectl`) |
+| Network | `ip -j addr show`, `ip -j route show default`, `/etc/resolv.conf`, `broker-client status` | Broker lease (`broker-client request-lease`) |
+| Security | `/etc/blockhost/admin-commands.json` | Knock settings (direct JSON write) |
+| Storage | `lsblk -J`, `shutil.disk_usage()` | No (placeholder for future) |
+| Wallet | `/etc/blockhost/addressbook.json`, `bw balance`, `/opt/blockhost/.env` | Transfer (`bw send`), withdraw (`bw withdraw`) |
+| Addressbook | `/etc/blockhost/addressbook.json` via `ab` CLI | Add (`ab add`), remove (`ab del`), generate (`ab new`) |
+| VMs | `blockhost-vm-list --format json` | Start/stop/kill/destroy via provisioner CLI |
+
+### API Endpoints
+
+```
+GET  /login                      → login page (standalone, no auth)
+GET  /sign                       → serve signing page HTML from /usr/share/libpam-web3-tools/signing-page/index.html
+POST /api/auth/verify            → {code, signature} → verify → set session → {"ok": true}
+GET  /logout                     → invalidate session → redirect /login
+
+GET  /                           → dashboard (HTML, @login_required)
+GET  /api/system                 → {hostname, uptime_seconds, os, kernel}
+POST /api/system/hostname        → set hostname
+GET  /api/network                → {ipv4, gateway, dns, ipv6_broker}
+POST /api/network/broker/renew   → broker-client request-lease
+GET  /api/security               → admin-commands.json contents
+POST /api/security               → update knock settings (filtered: knock_command, knock_ports, knock_timeout)
+GET  /api/storage                → {devices, usage, boot_device}
+GET  /api/wallet                 → addressbook.json wallet list [{role, address, can_sign}]
+GET  /api/wallet/balance/<role>  → bw balance <role> (raw text output)
+POST /api/wallet/send            → bw send (amount, token, from, to)
+POST /api/wallet/withdraw        → bw withdraw [token] <to>
+POST /api/addressbook/add        → ab add <name> <address>
+POST /api/addressbook/remove     → ab del <name>
+POST /api/addressbook/generate   → ab new <name>
+GET  /api/vms                    → blockhost-vm-list --format json
+POST /api/vms/<name>/{start,stop,kill,destroy}
+```
+
+All data/action endpoints protected by `@login_required`. All POST actions return `{"ok": bool, "error": "..."}`. VM names validated against `^[a-z0-9-]{1,64}$`.
 
 ## PROVISIONER CONTRACT
 
@@ -350,7 +456,6 @@ session = {
         'knock_command': 'blockhost',
         'knock_ports': [22],
         'knock_timeout': 300,
-        'knock_max_duration': 600,
     },
 }
 ```
@@ -406,8 +511,9 @@ deployer: {key_file: '/etc/blockhost/deployer.key'}
 proxmox: {node: str, storage: str, bridge: str}
 server_public_key: '0x04...'
 public_secret: 'blockhost-access'
-admin: {wallet_address: '0x...', max_command_age: 300, destination_mode: 'self'}
+admin: {wallet_address: '0x...', credential_nft_id: 0, max_command_age: 300, destination_mode: 'self'}
 ```
+`credential_nft_id`: Written by `_finalize_mint_nft` after minting. Maps the `admin` alias in `bw who admin` to an NFT token ID. Default 0 (first mint).
 
 ### addressbook.json structure
 ```json
@@ -530,11 +636,12 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 **vm-generator.py workflow**:
 1. Reserve sequential NFT token ID in vms.json
 2. Allocate VMID + IPv4 from pool + IPv6 /128 from prefix
-3. Render cloud-init from `nft-auth.yaml` template (GECOS: `nft=TOKEN_ID`)
-4. Generate `.tf.json` in terraform_dir
-5. `terraform apply` (if --apply)
-6. On success: encrypt connection details via `pam_web3_tool encrypt-symmetric`
-7. Mint NFT: `cast send <nft_contract> "mint(address,bytes,string,string,string,string,uint256)" <to> <userEncrypted> <publicSecret> <description> <imageUri> <animationUrlBase64> <expiresAt>`
+3. Derive FQDN from `dns_zone` if available: `f"{offset:x}.{dns_zone}"` (hex offset of IPv6 within prefix)
+4. Render cloud-init from `nft-auth.yaml` template (GECOS: `nft=TOKEN_ID`, SIGNING_DOMAIN for HTTPS)
+5. Generate `.tf.json` in terraform_dir
+6. `terraform apply` (if --apply)
+7. On success: encrypt connection details via `pam_web3_tool encrypt-symmetric`
+8. Mint NFT: `cast send <nft_contract> "mint(address,bytes,string,string,string,string,uint256)" <to> <userEncrypted> <publicSecret> <description> <imageUri> <animationUrlBase64> <expiresAt>`
 
 **Cloud-init templates** (`cloud-init/templates/`):
 - `nft-auth.yaml` — Default: web3 NFT auth, GECOS nft=TOKEN_ID
@@ -561,7 +668,7 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 | `src/admin/` | TypeScript | On-chain admin commands (ECIES-encrypted, anti-replay nonce) |
 | `src/reconcile/` | TypeScript | Periodic NFT state reconciliation (health check) |
 | `src/fund-manager/` | TypeScript | Automated fund withdrawal, revenue sharing, gas management |
-| `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`) |
+| `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`, `bw who`) |
 | `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`) |
 | `scripts/generate-signup-page.py` | Python | Generates signup.html from template |
 | `scripts/mint_nft.py` | Python | Mint access credential NFT via Foundry cast |
@@ -759,11 +866,13 @@ Internet
   │   ├─ Host bridge IP (migrated from NIC; same subnet as VMs)
   │   └─ VM NICs (tap devices)
   │       ├─ VMs get IPv4 from ip_pool range
-  │       └─ Each VM serves signing page on port 8080
+  │       └─ Each VM serves signing page on port 8080 (HTTPS if dns_zone, HTTP fallback)
   │
   └─ wg-broker (WireGuard, if broker mode)
       └─ IPv6 prefix from broker allocation
-          └─ VMs get /128 from ipv6_pool range (host routes added per VM)
+          ├─ VMs get /128 from ipv6_pool range (host routes added per VM)
+          └─ DNS: {hex_offset}.{dns_zone} → prefix::{hex_offset} (broker authoritative DNS)
+              └─ Enables Let's Encrypt on VM signing pages (HTTPS on port 8080)
 ```
 
 ## PRIVILEGE SEPARATION
