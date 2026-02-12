@@ -5,12 +5,19 @@
 # Checks for all dependencies required to build the BlockHost ISO
 # and optionally installs missing ones.
 #
+# Usage:
+#   ./check-build-deps.sh            # Check deps, prompt to install if missing
+#   ./check-build-deps.sh --install  # Auto-install without prompting
+#
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
+
+# Mode
+INSTALL_MODE=false
 
 # Colors
 RED='\033[0;31m'
@@ -82,6 +89,68 @@ check_debs() {
         WARNINGS+=("No packages in $dir")
         return 1
     fi
+}
+
+# ============================================================
+# Install missing dependencies
+# Uses the MISSING_CMDS / MISSING_PKGS / MISSING_FILES arrays
+# populated by main(), so main() must run first.
+# ============================================================
+install_missing() {
+    # --- apt packages ---
+    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+        local unique_pkgs
+        unique_pkgs=($(echo "${MISSING_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+        echo ""
+        echo "Installing system packages: ${unique_pkgs[*]}"
+        sudo apt update && sudo apt install -y "${unique_pkgs[@]}"
+    fi
+
+    # --- Rust toolchain ---
+    if [[ " ${MISSING_CMDS[*]} " == *" cargo "* ]]; then
+        echo ""
+        echo "Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    fi
+
+    # --- Foundry ---
+    if [[ " ${MISSING_CMDS[*]} " == *" forge "* ]]; then
+        echo ""
+        echo "Installing Foundry..."
+        curl -L https://foundry.paradigm.xyz | bash
+        "$HOME/.foundry/bin/foundryup"
+    fi
+
+    # --- Node.js (can't auto-install — too many methods) ---
+    if [[ " ${MISSING_CMDS[*]} " == *" node "* ]]; then
+        echo ""
+        echo -e "${YELLOW}Node.js 18+ must be installed manually:${NC}"
+        echo "  https://nodejs.org/ or via nvm (https://github.com/nvm-sh/nvm)"
+    fi
+
+    # --- Debian ISO ---
+    local debian_iso="${BUILD_DIR}/debian-12-netinst.iso"
+    if [[ " ${MISSING_FILES[*]} " == *"$debian_iso"* ]]; then
+        echo ""
+        echo "Downloading Debian ISO..."
+        mkdir -p "$BUILD_DIR"
+        local debian_url="https://cdimage.debian.org/cdimage/archive/12.9.0/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso"
+        if command -v wget >/dev/null 2>&1; then
+            wget -q --show-progress "$debian_url" -O "$debian_iso"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L --progress-bar "$debian_url" -o "$debian_iso"
+        else
+            echo "Error: Neither wget nor curl available for download"
+        fi
+    fi
+
+    # Re-run to verify
+    echo ""
+    echo -e "${GREEN}Re-running dependency check...${NC}"
+    echo ""
+    exec "$0"
 }
 
 main() {
@@ -175,6 +244,12 @@ main() {
 
     # curl (Foundry installer, various downloads)
     check_command curl curl
+
+    # C toolchain (libpam-web3 Rust build needs C linker)
+    check_command gcc build-essential
+
+    # pkg-config (libpam-web3 Rust build, native library discovery)
+    check_command pkg-config pkg-config
 
     # ----------------------------------------
     log_section "Required Files"
@@ -294,106 +369,51 @@ main() {
             echo "  - $w"
         done
     fi
-
-    # ----------------------------------------
-    # Installation command
-    # ----------------------------------------
-
-    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-        # Remove duplicates
-        UNIQUE_PKGS=($(echo "${MISSING_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
-
-        echo ""
-        echo -e "${BLUE}Install missing packages with:${NC}"
-        echo "  sudo apt update && sudo apt install -y ${UNIQUE_PKGS[*]}"
-    fi
-
-    # Exit with error if critical dependencies missing
-    if [ ${#MISSING_CMDS[@]} -gt 0 ] || [ ${#MISSING_FILES[@]} -gt 0 ]; then
-        exit 1
-    fi
-
-    exit 0
 }
 
-# Allow --install flag to auto-install missing packages
+# ============================================================
+# Parse arguments
+# ============================================================
 if [ "$1" = "--install" ]; then
-    # First run check to get missing packages
-    MISSING_PKGS=()
-
-    # ISO build deps
-    command -v xorriso >/dev/null 2>&1 || MISSING_PKGS+=("xorriso")
-    command -v cpio >/dev/null 2>&1 || MISSING_PKGS+=("cpio")
-    command -v gzip >/dev/null 2>&1 || MISSING_PKGS+=("gzip")
-    command -v dpkg-deb >/dev/null 2>&1 || MISSING_PKGS+=("dpkg")
-    command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || MISSING_PKGS+=("curl")
-    [ -f "/usr/lib/ISOLINUX/isohdpfx.bin" ] || MISSING_PKGS+=("isolinux")
-
-    # Package build deps (apt-installable only)
-    command -v python3 >/dev/null 2>&1 || MISSING_PKGS+=("python3")
-    command -v git >/dev/null 2>&1 || MISSING_PKGS+=("git")
-    command -v curl >/dev/null 2>&1 || MISSING_PKGS+=("curl")
-    command -v pkg-config >/dev/null 2>&1 || MISSING_PKGS+=("pkg-config")
-    command -v gcc >/dev/null 2>&1 || MISSING_PKGS+=("build-essential")
-
-    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-        # Remove duplicates
-        UNIQUE_PKGS=($(echo "${MISSING_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
-        echo "Installing missing system packages: ${UNIQUE_PKGS[*]}"
-        sudo apt update && sudo apt install -y "${UNIQUE_PKGS[@]}"
-    else
-        echo "All system packages already installed"
-    fi
-
-    # Install Rust toolchain if missing
-    if ! command -v cargo >/dev/null 2>&1; then
-        echo ""
-        echo "Installing Rust toolchain..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
-    fi
-
-    # Install Foundry if missing
-    if ! command -v forge >/dev/null 2>&1 && [ ! -x "$HOME/.foundry/bin/forge" ]; then
-        echo ""
-        echo "Installing Foundry..."
-        curl -L https://foundry.paradigm.xyz | bash
-        "$HOME/.foundry/bin/foundryup"
-    fi
-
-    # Check Node.js
-    if ! command -v node >/dev/null 2>&1; then
-        echo ""
-        echo "Node.js 18+ is required but not installed."
-        echo "Install via: https://nodejs.org/ or nvm (https://github.com/nvm-sh/nvm)"
-    else
-        node_major=$(node --version | sed 's/v//' | cut -d. -f1)
-        if [ "$node_major" -lt 18 ] 2>/dev/null; then
-            echo ""
-            echo "Node.js 18+ required, found $(node --version). Please upgrade."
-        fi
-    fi
-
-    # Download Debian ISO if missing
-    DEBIAN_ISO="${BUILD_DIR}/debian-12-netinst.iso"
-    if [ ! -f "$DEBIAN_ISO" ]; then
-        echo ""
-        echo "Downloading Debian ISO..."
-        mkdir -p "$BUILD_DIR"
-        DEBIAN_URL="https://cdimage.debian.org/cdimage/archive/12.9.0/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso"
-        if command -v wget >/dev/null 2>&1; then
-            wget -q --show-progress "$DEBIAN_URL" -O "$DEBIAN_ISO"
-        elif command -v curl >/dev/null 2>&1; then
-            curl -L --progress-bar "$DEBIAN_URL" -o "$DEBIAN_ISO"
-        else
-            echo "Error: Neither wget nor curl available for download"
-            exit 1
-        fi
-    fi
-
-    echo ""
-    echo "Running dependency check..."
-    echo ""
+    INSTALL_MODE=true
 fi
 
+# ============================================================
+# Run checks
+# ============================================================
 main
+
+# Nothing missing — clean exit
+if [ ${#MISSING_CMDS[@]} -eq 0 ] && [ ${#MISSING_FILES[@]} -eq 0 ]; then
+    exit 0
+fi
+
+# ============================================================
+# Handle missing dependencies
+# ============================================================
+if [ "$INSTALL_MODE" = true ]; then
+    install_missing
+elif [ -t 0 ]; then
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Install missing dependencies now? [y/N]${NC} ")" answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+        install_missing
+    else
+        echo ""
+        echo -e "${BLUE}Install manually when ready:${NC}"
+        if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+            local_pkgs=($(echo "${MISSING_PKGS[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+            echo "  sudo apt update && sudo apt install -y ${local_pkgs[*]}"
+        fi
+        [[ " ${MISSING_CMDS[*]} " == *" cargo "* ]] && \
+            echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        [[ " ${MISSING_CMDS[*]} " == *" forge "* ]] && \
+            echo "  curl -L https://foundry.paradigm.xyz | bash && foundryup"
+        [[ " ${MISSING_CMDS[*]} " == *" node "* ]] && \
+            echo "  Node.js 18+: https://nodejs.org/ or nvm"
+        exit 1
+    fi
+else
+    # Non-interactive (piped, CI, etc.) — just report and exit
+    exit 1
+fi
