@@ -646,7 +646,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'knock_command': request.form.get('knock_command', ''),
                     'knock_ports': ports,
                     'knock_timeout': int(request.form.get('knock_timeout', 300)),
-                    'knock_max_duration': int(request.form.get('knock_max_duration', 600)),
                 })
 
             session['admin_commands'] = admin_commands
@@ -2143,7 +2142,6 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
                         'description': 'Open configured ports temporarily',
                         'params': {
                             'allowed_ports': admin_commands.get('knock_ports', [22]),
-                            'max_duration': admin_commands.get('knock_max_duration', 600),
                             'default_duration': admin_commands.get('knock_timeout', 300),
                         }
                     }
@@ -2718,6 +2716,18 @@ def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
                 'token_id': '0',
                 'tx_hash': result or '',
             }
+
+        # Write credential_nft_id to blockhost.yaml so `bw who admin` can resolve it
+        token_id = int(config['mint_nft_result']['token_id'])
+        blockhost_yaml = Path('/etc/blockhost/blockhost.yaml')
+        try:
+            import yaml
+            bh_config = yaml.safe_load(blockhost_yaml.read_text()) or {}
+        except ImportError:
+            bh_config = {}
+        bh_config.setdefault('admin', {})['credential_nft_id'] = token_id
+        _write_yaml(blockhost_yaml, bh_config)
+        _set_blockhost_ownership(blockhost_yaml, 0o640)
 
         return True, None
     except Exception as e:

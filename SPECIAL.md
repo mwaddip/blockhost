@@ -64,6 +64,12 @@ root-agent daemon (in blockhost-common)  S8  P10 E7  C4  I8  A6  L7
 
 installer/wizard          S7  P6  E9  C8  I6  A4  L6
   Will get interrupted, must resume. Only thing the admin actually looks at.
+
+admin/                    S7  P9  E6  C8  I6  A7  L6
+  Auth gate to the management plane. Signature verification is the lock — get it wrong
+  and someone else is managing your VMs. UI clarity matters (admin stares at this daily).
+  Not a long-running service, just Flask — endurance is less critical than the wizard.
+  Keep it lean: no new dependencies, no abstractions that outlive their purpose.
 ```
 
 ### blockhost-engine

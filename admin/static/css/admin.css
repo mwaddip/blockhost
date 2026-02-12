@@ -1,0 +1,3 @@
+/* Admin-specific style overrides.
+   Base styles live in templates/base.html (matching wizard pattern).
+   Use this file for styles that don't belong in the base template. */
