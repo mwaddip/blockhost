@@ -151,7 +151,7 @@ def _get_finalization_step_ids() -> list[str]:
             provisioner_ids = [s[0] for s in prov_mod.get_finalization_steps()]
     elif _provisioner and _provisioner.get('manifest'):
         provisioner_ids = _provisioner['manifest'].get('setup', {}).get('finalization_steps', [])
-    post_ids = ['ipv6', 'https', 'signup', 'mint_nft', 'finalize', 'validate']
+    post_ids = ['ipv6', 'https', 'signup', 'nginx', 'mint_nft', 'finalize', 'validate']
 
     return core_ids + provisioner_ids + post_ids
 
@@ -1701,8 +1701,9 @@ def _get_finalization_steps() -> list[tuple]:
 
     post_steps = [
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
-        ('https', 'Configuring HTTPS for signup page', _finalize_https),
+        ('https', 'Configuring HTTPS', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
+        ('nginx', 'Setting up nginx reverse proxy', _finalize_nginx),
         ('mint_nft', 'Minting admin NFT', _finalize_mint_nft),
         ('finalize', 'Finalizing setup', _finalize_complete),
         ('validate', 'Validating system (testing only)', _finalize_validate),
@@ -2358,29 +2359,45 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
 
 
 def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure HTTPS for the signup page using sslip.io and Let's Encrypt."""
+    """Configure HTTPS using dns_zone (preferred) or sslip.io fallback, with Let's Encrypt."""
     try:
         config_dir = Path('/etc/blockhost')
         ssl_dir = config_dir / 'ssl'
         ssl_dir.mkdir(parents=True, exist_ok=True)
 
-        # Try to get IPv6 address from broker allocation
+        # Try to get IPv6 address and dns_zone from broker allocation
+        import ipaddress as _ipaddress
         ipv6_address = None
+        dns_zone = None
+        ipv6_network = None
         broker_file = config_dir / 'broker-allocation.json'
         if broker_file.exists():
             broker_data = json.loads(broker_file.read_text())
             prefix = broker_data.get('prefix', '')
+            dns_zone = broker_data.get('dns_zone', '')
             if prefix:
-                import ipaddress as _ipaddress
-                network = _ipaddress.IPv6Network(prefix, strict=False)
+                ipv6_network = _ipaddress.IPv6Network(prefix, strict=False)
                 # Host/gateway is first address in prefix (e.g., ::701 for ::700/120)
-                ipv6_address = str(network.network_address + 1)
+                ipv6_address = str(ipv6_network.network_address + 1)
 
         hostname = None
+        use_dns_zone = False
         use_sslip = False
 
-        if ipv6_address:
-            # Convert IPv6 to sslip.io format (replace : with -)
+        if ipv6_address and dns_zone:
+            # Preferred: derive hostname from dns_zone
+            # offset = host IPv6 address - prefix base (part before :: in prefix notation)
+            # e.g., prefix 2a11:6c7:f04:276::200/120, host ::201 → offset 0x201
+            prefix_addr = broker_data['prefix'].split('/')[0]
+            if '::' in prefix_addr:
+                prefix_base = int(_ipaddress.IPv6Address(prefix_addr.split('::')[0] + '::'))
+            else:
+                prefix_base = int(ipv6_network.network_address)
+            offset = int(_ipaddress.IPv6Address(ipv6_address)) - prefix_base
+            hostname = f"{offset:x}.{dns_zone}"
+            use_dns_zone = True
+        elif ipv6_address:
+            # Fallback: sslip.io (no dns_zone available)
             ipv6_dashed = ipv6_address.replace(':', '-')
             hostname = f"signup.{ipv6_dashed}.sslip.io"
             use_sslip = True
@@ -2397,13 +2414,14 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
         # Store hostname in config for services to use
         https_config = {
             'hostname': hostname,
+            'use_dns_zone': use_dns_zone,
             'use_sslip': use_sslip,
             'ipv6_address': ipv6_address,
             'cert_file': str(ssl_dir / 'cert.pem'),
             'key_file': str(ssl_dir / 'key.pem'),
         }
 
-        if use_sslip or (hostname and '.' in hostname and not hostname.endswith('.local')):
+        if use_dns_zone or use_sslip or (hostname and '.' in hostname and not hostname.endswith('.local')):
             # Try to get Let's Encrypt certificate
             try:
                 # Check if certbot is available
@@ -2486,9 +2504,8 @@ def _generate_self_signed_cert(hostname: str, ssl_dir: Path):
 
 
 def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
-    """Generate signup page and create systemd service to serve it."""
+    """Generate signup page as a static file (served by nginx)."""
     try:
-        https_config = config.get('https', {})
         signup_dir = Path('/var/www/blockhost')
         signup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2505,88 +2522,107 @@ def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
         if result.returncode != 0:
             return False, f"Failed to generate signup page: {result.stderr}"
 
-        # Determine port and TLS settings based on HTTPS config
-        tls_mode = https_config.get('tls_mode', 'self-signed')
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
+    """Install and configure nginx as TLS reverse proxy for signup + admin panel."""
+    try:
+        # Install nginx
+        result = subprocess.run(
+            ['apt-get', 'install', '-y', 'nginx'],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if result.returncode != 0:
+            return False, f"Failed to install nginx: {result.stderr}"
+
+        # Read HTTPS config for cert paths and hostname
+        https_config = config.get('https', {})
+        if not https_config:
+            https_file = Path('/etc/blockhost/https.json')
+            if https_file.exists():
+                https_config = json.loads(https_file.read_text())
+
+        hostname = https_config.get('hostname', socket.gethostname())
         cert_file = https_config.get('cert_file', '/etc/blockhost/ssl/cert.pem')
         key_file = https_config.get('key_file', '/etc/blockhost/ssl/key.pem')
 
-        # Create systemd service for signup page server
-        # Use port 443 with TLS for HTTPS, or 8080 for HTTP fallback
-        if tls_mode in ('letsencrypt', 'self-signed'):
-            # Write the server script to a separate file (inline Python in systemd doesn't work)
-            server_script = f'''#!/usr/bin/env python3
-import http.server
-import socket
-import ssl
-import socketserver
+        # Write nginx config
+        nginx_config = f"""server {{
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {hostname};
 
-class DualStackTCPServer(socketserver.TCPServer):
-    address_family = socket.AF_INET6
-    def server_bind(self):
-        # Allow dual-stack (IPv4 + IPv6) on a single socket
-        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        super().server_bind()
+    ssl_certificate {cert_file};
+    ssl_certificate_key {key_file};
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory='/var/www/blockhost', **kwargs)
-    def do_GET(self):
-        if self.path == '/' or self.path == '':
-            self.path = '/signup.html'
-        return super().do_GET()
+    # Signup page (static)
+    root /var/www/blockhost;
+    index signup.html;
 
-context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-context.load_cert_chain('{cert_file}', '{key_file}')
-with DualStackTCPServer(('::', 443), Handler) as httpd:
-    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-    print("Serving signup page on https://[::]:443 (IPv4+IPv6)")
-    httpd.serve_forever()
-'''
-            script_file = Path('/usr/local/bin/blockhost-signup-server')
-            script_file.write_text(server_script)
-            script_file.chmod(0o755)
+    location / {{
+        try_files $uri $uri/ /signup.html;
+    }}
 
-            service_content = """[Unit]
-Description=Blockhost Signup Page Server (HTTPS)
-After=network.target
+    # Admin panel (reverse proxy)
+    location /admin {{
+        proxy_pass http://127.0.0.1:8443/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }}
+}}
 
-[Service]
-Type=simple
-User=blockhost
-Group=blockhost
-ExecStart=/usr/local/bin/blockhost-signup-server
-Restart=on-failure
-RestartSec=10
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
+server {{
+    listen 80;
+    listen [::]:80;
+    server_name {hostname};
+    return 301 https://$host$request_uri;
+}}
 """
-        else:
-            # HTTP fallback (no TLS)
-            service_content = """[Unit]
-Description=Blockhost Signup Page Server (HTTP)
-After=network.target
+        sites_available = Path('/etc/nginx/sites-available/blockhost')
+        sites_available.write_text(nginx_config)
 
-[Service]
-Type=simple
-User=blockhost
-Group=blockhost
-ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/www/blockhost
-Restart=on-failure
-RestartSec=10
+        sites_enabled = Path('/etc/nginx/sites-enabled/blockhost')
+        default_enabled = Path('/etc/nginx/sites-enabled/default')
 
-[Install]
-WantedBy=multi-user.target
-"""
+        # Symlink to sites-enabled
+        if sites_enabled.exists() or sites_enabled.is_symlink():
+            sites_enabled.unlink()
+        sites_enabled.symlink_to(sites_available)
 
-        service_file = Path('/etc/systemd/system/blockhost-signup.service')
-        service_file.write_text(service_content)
+        # Remove default site
+        if default_enabled.exists() or default_enabled.is_symlink():
+            default_enabled.unlink()
 
-        # Reload systemd and enable the service
-        subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=30)
-        subprocess.run(['systemctl', 'enable', 'blockhost-signup'], capture_output=True, timeout=30)
-        subprocess.run(['systemctl', 'start', 'blockhost-signup'], capture_output=True, timeout=30)
+        # Verify config
+        result = subprocess.run(
+            ['nginx', '-t'],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            return False, f"nginx config validation failed: {result.stderr}"
+
+        # Enable but do NOT start — nginx starts on reboot
+        subprocess.run(
+            ['systemctl', 'enable', 'nginx'],
+            capture_output=True,
+            timeout=30
+        )
+
+        # Stop nginx if apt started it (apt-get install often auto-starts it)
+        subprocess.run(
+            ['systemctl', 'stop', 'nginx'],
+            capture_output=True,
+            timeout=30
+        )
 
         return True, None
     except Exception as e:
@@ -2839,6 +2875,11 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
         # Enable blockhost services (will start on reboot)
         subprocess.run(
             ['systemctl', 'enable', 'blockhost-monitor'],
+            capture_output=True,
+            timeout=30
+        )
+        subprocess.run(
+            ['systemctl', 'enable', 'blockhost-admin'],
             capture_output=True,
             timeout=30
         )

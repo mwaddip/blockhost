@@ -115,11 +115,13 @@ def get_network_info():
     except OSError:
         pass
 
-    # IPv6 broker status
+    # IPv6 broker allocation (read directly — no subprocess needed)
     ipv6_broker = None
-    broker_data = _run_json(["broker-client", "status"])
-    if broker_data is not None:
-        ipv6_broker = broker_data
+    try:
+        with open("/etc/blockhost/broker-allocation.json") as f:
+            ipv6_broker = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+        pass
 
     return {
         "ipv4": ipv4,
@@ -130,11 +132,15 @@ def get_network_info():
 
 
 def renew_broker_lease():
-    """Trigger broker-client request-lease. Returns (ok, error)."""
-    ok, out, err = _run(["broker-client", "request-lease"], timeout=30)
-    if not ok:
-        return False, err or "broker-client request-lease failed"
-    return True, None
+    """Renew broker allocation via root agent (needs root for WireGuard + config files)."""
+    from blockhost.root_agent import call, RootAgentError
+    try:
+        result = call("broker-renew", timeout=60)
+        if not result.get("ok"):
+            return False, result.get("error", "broker-renew failed")
+        return True, None
+    except RootAgentError as e:
+        return False, str(e)
 
 
 # --- Security ---

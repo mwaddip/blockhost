@@ -436,7 +436,6 @@ def run_full_validation() -> ValidationReport:
     private_keys = [
         (etc_blockhost / 'server.key', 'Server private key'),
         (etc_blockhost / 'deployer.key', 'Deployer private key'),
-        (etc_blockhost / 'ssl' / 'key.pem', 'SSL private key'),
     ]
 
     # Proxmox-specific private keys
@@ -463,9 +462,6 @@ def run_full_validation() -> ValidationReport:
 
     for path, name in public_keys:
         report.add(_check_file_exists(path, "Files", name))
-
-    # SSL certificate
-    report.add(_check_file_exists(etc_blockhost / 'ssl' / 'cert.pem', "Files", "SSL certificate"))
 
     # ========== YAML CONFIG FILES ==========
 
@@ -868,11 +864,36 @@ def run_full_validation() -> ValidationReport:
 
     # ========== SERVICES ==========
 
-    # blockhost-signup should be enabled (may still be starting)
-    report.add(_check_service_state('blockhost-signup', expected_enabled=True, expected_active=None))
+    # nginx should be enabled (serves signup page + reverse proxies admin panel)
+    report.add(_check_service_state('nginx', expected_enabled=True, expected_active=None))
+
+    # nginx config file exists
+    nginx_conf = Path('/etc/nginx/sites-available/blockhost')
+    report.add(_check_file_exists(nginx_conf, "Web", "nginx site config"))
+
+    # nginx config syntax valid
+    try:
+        nginx_test = subprocess.run(
+            ['nginx', '-t'],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if nginx_test.returncode == 0:
+            report.add(ValidationResult("Web", "nginx config syntax", True, "nginx -t passed"))
+        else:
+            report.add(ValidationResult("Web", "nginx config syntax", False,
+                                        f"nginx -t failed: {nginx_test.stderr}"))
+    except FileNotFoundError:
+        report.add(ValidationResult("Web", "nginx config syntax", False, "nginx not installed"))
+    except Exception as e:
+        report.add(ValidationResult("Web", "nginx config syntax", False, f"Error: {e}"))
 
     # blockhost-monitor should be enabled (may not be active until reboot)
     report.add(_check_service_state('blockhost-monitor', expected_enabled=True, expected_active=None))
+
+    # blockhost-admin should be enabled (behind nginx reverse proxy)
+    report.add(_check_service_state('blockhost-admin', expected_enabled=True, expected_active=None))
 
     # blockhost-gc.timer should be enabled
     report.add(_check_service_state('blockhost-gc.timer', expected_enabled=True, expected_active=None))

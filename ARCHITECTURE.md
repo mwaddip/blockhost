@@ -29,8 +29,8 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + finalization (~3140 lines)
-│       ├── validate_system.py        # Post-install validation (778 lines)
+│       ├── app.py                    # Flask wizard + finalization (~3180 lines)
+│       ├── validate_system.py        # Post-install validation (~1010 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
 │           ├── base.html
@@ -191,8 +191,9 @@ Step dispatch (_get_finalization_steps() in app.py, dynamically built):
     (varies by provisioner — e.g. Proxmox: token, terraform, template)
   Post steps:
     5+  ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
-        https       _finalize_https             → sslip.io hostname, Let's Encrypt cert
-        signup      _finalize_signup            → generate-signup-page.py → /var/www/blockhost/signup.html
+        https       _finalize_https             → dns_zone hostname (preferred) or sslip.io fallback, Let's Encrypt cert
+        signup      _finalize_signup            → blockhost-generate-signup → /var/www/blockhost/signup.html (static)
+        nginx       _finalize_nginx             → install nginx, write reverse proxy config, enable (not start)
         mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
         finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
         validate    _finalize_validate          → System validation (testing mode only)
@@ -203,10 +204,11 @@ Each step: skip if completed, mark running → completed|failed, supports retry.
 ### Phase 6: Runtime (post-setup)
 
 ```
-Services enabled by finalization step 13/finalize (all run as User=blockhost except root-agent):
+Services enabled by finalization (all run as User=blockhost except root-agent and nginx):
   blockhost-root-agent.service → Privileged ops daemon (root, installed + enabled by blockhost-common .deb)
   blockhost-monitor.service    → TypeScript event watcher (blockhost-engine)
-  blockhost-signup.service     → Serve signup page (HTTPS)
+  blockhost-admin.service      → Admin panel Flask app (127.0.0.1:8443, behind nginx)
+  nginx.service                → TLS terminator: signup page (static) + admin panel reverse proxy (:443)
   blockhost-gc.timer           → Daily garbage collection (2 AM)
 
 Subscription purchase flow:
@@ -257,8 +259,8 @@ Post-install web dashboard for system management. Wallet-based auth (same flow a
 
 ```
 Entry: python3 -m admin.app --port 8443
-Bind: 0.0.0.0:8443
-Later: blockhost-admin.service (systemd)
+Bind: 127.0.0.1:8443 (localhost only — accessed via nginx reverse proxy at /admin)
+Service: blockhost-admin.service (systemd)
 ```
 
 ### Structure
@@ -302,7 +304,7 @@ Auth state (module-level dicts in auth.py):
 - Signature verification: `cast wallet verify` subprocess (Foundry, already installed)
 - If NFT #0 is transferred, the new holder becomes admin — no config changes needed
 
-Session config: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE=Lax`, `PERMANENT_SESSION_LIFETIME=1h`.
+Session config: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE=Lax`, `SESSION_COOKIE_SECURE=True`, `PERMANENT_SESSION_LIFETIME=1h`.
 
 ### Dashboard Sections
 
@@ -472,7 +474,7 @@ Directory: `/etc/blockhost/`
 | db.yaml | YAML | root:blockhost | 0644 | config | blockhost-provisioner-proxmox, blockhost-gc |
 | web3-defaults.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, blockhost-provisioner-proxmox |
 | blockhost.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, signup generator |
-| https.json | JSON | root:blockhost | 0644 | https | blockhost-signup |
+| https.json | JSON | root:blockhost | 0644 | https | nginx config generation |
 | pve-token | text | root:blockhost | 0640 | token | blockhost-provisioner-proxmox (Terraform) |
 | terraform_ssh_key | PEM | root:blockhost | 0640 | token | Terraform SSH provisioner |
 | terraform_ssh_key.pub | PEM | root:blockhost | 0644 | token | VM authorized_keys |
@@ -811,11 +813,12 @@ Events (monitored by blockhost-monitor):
 | 1911 | _deploy_contract_with_forge | Deploy contract via cast send --create |
 | 2009 | _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
 | 2181 | _finalize_ipv6 | Broker allocation or manual prefix |
-| 2362 | _finalize_https | sslip.io hostname + Let's Encrypt |
-| 2490 | _finalize_signup | generate-signup-page.py |
-| 2598 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| 2816 | _finalize_complete | Enable services, create subscription plan |
-| 2897 | _finalize_validate | System validation (testing only) |
+| 2361 | _finalize_https | dns_zone / sslip.io hostname + Let's Encrypt |
+| 2502 | _finalize_signup | blockhost-generate-signup (static file only) |
+| 2526 | _finalize_nginx | Install + configure nginx reverse proxy |
+| 2628 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
+| 2858 | _finalize_complete | Enable services, create subscription plan |
+| 2939 | _finalize_validate | System validation (testing only) |
 | 2926 | _create_default_plan | Call createPlan() on subscription contract |
 
 ### Helpers
@@ -858,6 +861,10 @@ Runtime on-chain interactions (by submodule services, not this repo):
 
 ```
 Internet
+  │
+  ├─ nginx :443 (TLS terminator, Let's Encrypt cert)
+  │   ├─ /           → static: /var/www/blockhost/signup.html
+  │   └─ /admin/*    → proxy: 127.0.0.1:8443 (Flask admin panel, strips /admin prefix)
   │
   ├─ eth0/ens* (physical NIC, bridge port after first-boot Step 3a)
   │
@@ -962,7 +969,8 @@ libvirt provisioner actions (from `virsh.py`):
 | blockhost-root-agent | root | — |
 | blockhost-monitor | blockhost | Yes (iptables, wallet, addressbook) |
 | blockhost-gc | blockhost | Yes (provisioner actions, ip6-route) |
-| blockhost-signup | blockhost | No |
+| blockhost-admin | blockhost | Yes (via bw, ab CLIs) |
+| nginx | root (master) / www-data (workers) | No |
 
 ## ENCRYPTION MODEL
 

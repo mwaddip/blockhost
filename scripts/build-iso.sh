@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 ISO_EXTRACT="${BUILD_DIR}/iso-extract"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 
 # Source Debian ISO
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
@@ -170,6 +170,9 @@ add_blockhost_files() {
     # Copy installer Python package
     cp -r "${PROJECT_DIR}/installer" "${ISO_EXTRACT}/blockhost/"
 
+    # Copy admin panel
+    cp -r "${PROJECT_DIR}/admin" "${ISO_EXTRACT}/blockhost/"
+
     # Copy first-boot script
     cp "${PROJECT_DIR}/scripts/first-boot.sh" "${ISO_EXTRACT}/blockhost/"
     chmod +x "${ISO_EXTRACT}/blockhost/first-boot.sh"
@@ -179,8 +182,9 @@ add_blockhost_files() {
     cp "${PROJECT_DIR}/scripts/install-packages.sh" "${ISO_EXTRACT}/blockhost/scripts/"
     chmod +x "${ISO_EXTRACT}/blockhost/scripts/install-packages.sh"
 
-    # Copy systemd service
+    # Copy systemd services
     cp "${PROJECT_DIR}/systemd/blockhost-firstboot.service" "${ISO_EXTRACT}/blockhost/"
+    cp "${PROJECT_DIR}/systemd/blockhost-admin.service" "${ISO_EXTRACT}/blockhost/"
 
     log "BlockHost files added to /blockhost/"
 }
