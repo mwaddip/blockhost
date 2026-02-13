@@ -4,25 +4,51 @@
 
 **Autonomous VM hosting, driven by blockchain.** — [Telegram](https://t.me/BlockHostOS)
 
-> **Status:** Currently only operational on **Sepolia testnet**. Full multichain support is not yet implemented, and the IPv6 broker registry contract is only deployed on testnet. Do not use in production.
->
-> **Security:** This project is built with security as a core design principle — OS-level authentication, on-chain identity, encrypted credentials, zero standing admin access. However, the code has not been formally audited. Review before deploying with real assets.
+> **Status:** Currently operational on **Sepolia testnet** only. Not ready for production use.
 
-BlockHost eliminates traditional hosting accounts entirely. Users purchase a subscription on-chain, receive an NFT containing their encrypted connection details, and authenticate to their VM by signing a message with their wallet. No usernames, no passwords, no control panels — just a wallet and a signature.
+BlockHost turns a bare-metal server into a fully autonomous VM hosting platform. Users pay on-chain, receive an NFT with their encrypted access credentials, and authenticate with their wallet — no accounts, no passwords, no admin intervention.
 
-The entire lifecycle — from payment to VM provisioning to access credential delivery — happens without human intervention. The host operator installs from an ISO, walks through a wizard, and the system runs itself.
-
-### What's different
-
-- **Identity is a wallet.** No registration, no email, no 2FA. Your Ethereum wallet *is* your identity.
-- **Access credentials live on-chain.** Connection details are encrypted into an NFT that only the owner's wallet can decrypt.
-- **VMs provision themselves.** A blockchain event monitor detects purchases and triggers Terraform — no admin dashboard, no ticket system.
-- **Authentication happens at the OS level.** A custom PAM module verifies wallet signatures at SSH login. No application-layer auth to bypass.
-- **Admin access via on-chain commands.** Port knocking through blockchain transactions — no management ports exposed by default.
+The operator boots an ISO, walks through a setup wizard, and the system runs itself from that point on.
 
 ---
 
-## Quick Start
+## What makes it different
+
+**No accounts.** Your Ethereum wallet is your identity. No registration, no email, no 2FA.
+
+**No control panels.** Subscriptions, access credentials, and admin commands all live on-chain. The server watches the blockchain and acts on what it sees.
+
+**No manual provisioning.** A blockchain event monitor detects new purchases and provisions automatically. VMs spin up, suspend on expiry, resume on renewal, and clean up after a grace period.
+
+**No exposed management ports.** Admin operations happen through on-chain commands. Port knocking via blockchain transactions — nothing to scan, nothing to brute-force.
+
+**OS-level auth.** A custom PAM module verifies wallet signatures at SSH login. Not an application-layer wrapper — it's in the authentication stack itself.
+
+---
+
+## How it works
+
+### For the operator
+
+Boot the ISO on dedicated hardware (or a VM). Debian auto-installs, packages deploy on first boot, and a web wizard walks through network, storage, blockchain, and hypervisor configuration. Finalization deploys smart contracts, configures IPv6 tunneling, builds a VM template, and enables all services. After a reboot, the system is live.
+
+An admin panel (NFT-gated, wallet-authenticated) provides system monitoring, network management, certificate renewal, and VM oversight — but day-to-day operation requires zero intervention.
+
+### For the user
+
+```
+Purchase subscription on-chain
+    → VM provisions automatically
+    → NFT minted with encrypted SSH credentials
+    → Decrypt with your wallet, connect via SSH
+    → Wallet signature replaces password at the OS level
+```
+
+VM lifecycle follows the subscription: active while paid, suspended on expiry (data preserved), resumed on renewal, destroyed after a configurable grace period.
+
+---
+
+## Quick start
 
 ```bash
 # Clone with submodules
@@ -32,135 +58,46 @@ cd blockhost
 # Check and install build dependencies
 ./scripts/check-build-deps.sh --install
 
-# Build packages and ISO
-./scripts/build-iso.sh --build-deb
+# Build packages for your chosen backend
+./scripts/build-packages.sh --backend proxmox    # or: libvirt
 
-# Boot the ISO on bare metal or in a VM, then:
-# 1. Wait for Debian auto-install + first boot (installs Proxmox VE)
-# 2. Note the OTP code displayed on the console
-# 3. Open the web wizard at the displayed URL
-# 4. Connect your admin wallet, walk through the 7 wizard steps
-# 5. Finalization deploys contracts, configures IPv6, builds VM template
-# 6. System is live — send a subscription transaction to test
+# Build the ISO
+sudo ./scripts/build-iso.sh --backend proxmox
+
+# Boot the ISO, follow the wizard, done.
 ```
 
-See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for the full build and installation reference.
-
----
-
-## How It Works
-
-### Admin installs once, system runs itself
-
-```
-Boot ISO → Debian auto-install → Proxmox VE
-    → First boot: install packages, generate OTP
-    → Web wizard: network, storage, blockchain, Proxmox, IPv6, admin
-    → Finalization: deploy contracts, configure tunnel, build template
-    → System live: engine monitors the chain
-```
-
-### Users interact with the blockchain, not the server
-
-```
-User wallet                    Blockchain              BlockHost server
-     |                              |                        |
-     |-- purchase subscription ---->|                        |
-     |                              |-- event detected ----->|
-     |                              |                        |-- create VM
-     |                              |<-- mint NFT -----------|
-     |                              |   (encrypted access)   |
-     |                              |                        |
-     |-- decrypt NFT, get details ->|                        |
-     |-- SSH to VM (wallet auth) ---|----------------------->|
-```
-
-### VM lifecycle
-
-```
-Subscription purchased → VM provisioned (active)
-    → subscription expires → VM suspended (data preserved)
-        → renewed → VM resumed
-        → grace period expires → VM destroyed
-```
-
-Default grace period: 7 days (configurable).
-
----
-
-## Architecture
-
-```
-+------------------------------------------------------------------+
-|                        Proxmox VE Host                           |
-|                                                                  |
-|  +-------------------+     +-------------------+                 |
-|  | blockhost-engine  |     | blockhost-        |                 |
-|  | (Node.js)         |     | provisioner       |                 |
-|  |                   |     | (Python)          |                 |
-|  | - monitors chain  |---->| - vm-generator.py |                 |
-|  | - detects events  |     | - mint_nft.py     |                 |
-|  | - triggers        |     | - vm-gc.py        |                 |
-|  |   provisioning    |     | - Terraform       |                 |
-|  +-------------------+     +--------+----------+                 |
-|           |                         |                            |
-|           |  +------------------+   |   +--------------------+   |
-|           |  | blockhost-common |   |   | libpam-web3-tools  |   |
-|           |  | (Python)         |   |   | (Rust)             |   |
-|           +->| - config loading |<--+   | - pam_web3_tool    |   |
-|              | - VM database    |       | - encrypt/decrypt  |   |
-|              | - root agent     |       | - signing page gen |   |
-|              +------------------+       +--------------------+   |
-|                                                                  |
-|  +---------------------------+    +---------------------------+  |
-|  | blockhost-root-agent      |    | blockhost-signup          |  |
-|  | (Python, runs as root)    |    | (static HTML)             |  |
-|  | - privileged ops daemon   |    | - served on port 443      |  |
-|  | - Unix socket IPC         |    | - NFT decrypt UI          |  |
-|  +---------------------------+    +---------------------------+  |
-|                                                                  |
-|  +---------------------------+                                   |
-|  | blockhost-broker-client   |                                   |
-|  | (Python)                  |                                   |
-|  | - requests IPv6 prefix    |                                   |
-|  | - configures WireGuard    |                                   |
-|  +---------------------------+                                   |
-+------------------------------------------------------------------+
-                |                          ^
-        WireGuard tunnel            User wallet
-                |                  (MetaMask etc.)
-     +----------v-----------+
-     |   IPv6 Broker         |
-     |   (NDP proxy)         |
-     +----------------------+
-```
-
-For detailed component interfaces, configuration files, network topology, and the installer flow, see [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md).
+See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for the full build reference and test cycle.
 
 ---
 
 ## Components
 
-| Component | Language | Role |
-|-----------|----------|------|
-| **blockhost-engine** | TypeScript | Monitors blockchain events, triggers provisioning, admin commands, fund management, `bw`/`ab` CLIs |
-| **blockhost-provisioner-proxmox** | Python | VM lifecycle: create, suspend, destroy, resume, template build, NFT minting |
-| **blockhost-common** | Python | Shared library: config loading, VM database, root agent client |
-| **libpam-web3** | Rust | PAM module (in VMs) + host tools: wallet auth at SSH, ECIES encryption |
-| **blockhost-broker-client** | Python | IPv6 prefix allocation via on-chain broker registry + WireGuard tunnel |
-| **blockhost-root-agent** | Python | Privileged operations daemon (qm, iptables, key writes) — only component running as root |
-| **installer** (this repo) | Python/Flask | First boot wizard, finalization, system configuration |
+| Component | Role |
+|-----------|------|
+| **Installer** (this repo) | First-boot wizard, finalization, system configuration |
+| **Admin panel** (this repo) | NFT-gated web interface for system management post-install |
+| **blockhost-engine** | Blockchain event monitor, provisioning trigger, fund management, `bw`/`ab` CLIs |
+| **blockhost-provisioner** | VM lifecycle (pluggable: Proxmox, libvirt), template builds, NFT minting |
+| **blockhost-common** | Shared library: config, VM database, root agent |
+| **libpam-web3** | PAM module for wallet auth + ECIES encryption tools |
+| **blockhost-broker-client** | IPv6 prefix allocation via on-chain broker registry + WireGuard tunnel |
 
 ---
 
 ## Documentation
 
-| Document | Audience | Content |
-|----------|----------|---------|
-| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Developers | Component interfaces, config files, installer flow, how to extend |
-| [docs/STANDARDS.md](docs/STANDARDS.md) | Contributors | Privilege separation, CLI usage, submodule boundaries, conventions |
-| [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | Operators | Build dependencies, ISO creation, test cycle |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | LLM sessions | Dense, structured reference for AI-assisted development |
+| Document | Content |
+|----------|---------|
+| [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | Build dependencies, ISO creation, test cycle |
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Architecture, component interfaces, config files, how to extend |
+| [docs/STANDARDS.md](docs/STANDARDS.md) | Privilege separation, CLI conventions, submodule boundaries |
+
+---
+
+## Security
+
+BlockHost is built with security as a core design principle: OS-level authentication, on-chain identity, encrypted credentials, zero standing admin access. That said, the code has not been formally audited. Review before deploying with real assets.
 
 ---
 
