@@ -411,7 +411,7 @@ def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
         db_config = {
             'db_file': '/var/lib/blockhost/vms.json',
             'ipv6_pool': {
-                'start': 2,  # Skip ::0 (network) and ::1 (host)
+                'start': 1,  # First usable offset after network address
                 'end': 254,
             },
             'default_expiry_days': 30,
@@ -776,6 +776,29 @@ WantedBy=multi-user.target
                         )
             except (ValueError, subprocess.TimeoutExpired) as e:
                 print(f"Warning: Could not add IPv6 gateway to bridge: {e}")
+
+        # Reserve host infrastructure IPv6 addresses in VM database so the
+        # allocator never hands them out to VMs.
+        if prefix:
+            try:
+                network = ipaddress.IPv6Network(prefix, strict=False)
+                reserved = [
+                    str(network.network_address + 1),  # bridge gateway
+                    str(network.network_address + 2),  # dummy0 host address
+                ]
+                vms_json = Path('/var/lib/blockhost/vms.json')
+                if vms_json.exists():
+                    db = json.loads(vms_json.read_text())
+                else:
+                    db = {"vms": {}, "next_vmid": 100, "allocated_ips": [],
+                          "allocated_ipv6": [], "reserved_nft_tokens": {}}
+                allocated = db.setdefault("allocated_ipv6", [])
+                for addr in reserved:
+                    if addr not in allocated:
+                        allocated.append(addr)
+                vms_json.write_text(json.dumps(db, indent=2))
+            except Exception as e:
+                print(f"Warning: Could not reserve host IPv6 in VM database: {e}")
 
         return True, None
     except subprocess.TimeoutExpired:
