@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 
+ADMIN_CONFIG_PATH = "/etc/blockhost/admin.json"
 ADMIN_COMMANDS_PATH = "/etc/blockhost/admin-commands.json"
 ADDRESSBOOK_PATH = "/etc/blockhost/addressbook.json"
 BW_ENV_PATH = "/opt/blockhost/.env"
@@ -228,6 +229,61 @@ def update_security_settings(updates):
         return False, f"cannot write config: {e}"
 
     return True, None
+
+
+# --- Admin Path ---
+
+def get_admin_path():
+    """Read current admin path prefix from config."""
+    try:
+        with open(ADMIN_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        return "/" + cfg.get("path_prefix", "/admin").strip("/")
+    except (OSError, json.JSONDecodeError):
+        return "/admin"
+
+
+def update_admin_path(new_path):
+    """Change admin panel URL path. Writes config, then root agent updates nginx.
+
+    Returns (ok, error).
+    """
+    if not new_path:
+        return False, "path is required"
+
+    # Normalize
+    new_path = "/" + new_path.strip("/")
+
+    if not re.match(r'^/[a-z0-9][a-z0-9/-]{0,62}[a-z0-9]$', new_path):
+        return False, "invalid path (lowercase letters, numbers, hyphens, slashes only)"
+
+    if "//" in new_path:
+        return False, "consecutive slashes not allowed"
+
+    # Write admin.json (blockhost user owns this file)
+    try:
+        with open(ADMIN_CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        cfg = {}
+
+    cfg["path_prefix"] = new_path
+
+    try:
+        with open(ADMIN_CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except OSError as e:
+        return False, f"cannot write admin config: {e}"
+
+    # Root agent handles nginx update + scheduled admin restart
+    from blockhost.root_agent import call, RootAgentError
+    try:
+        result = call("admin-path-update", path_prefix=new_path, timeout=15)
+        if not result.get("ok"):
+            return False, result.get("error", "path update failed")
+        return True, None
+    except RootAgentError as e:
+        return False, str(e)
 
 
 # --- Storage ---

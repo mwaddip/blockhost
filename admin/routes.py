@@ -1,8 +1,8 @@
 """Admin panel routes — API endpoints and page routes."""
 
 from flask import (
-    Blueprint, abort, jsonify, render_template, redirect, request,
-    send_file, session, url_for,
+    Blueprint, abort, current_app, jsonify, render_template, redirect,
+    request, send_file, session,
 )
 
 from . import system
@@ -23,7 +23,7 @@ def login():
     # Already authenticated? Go to dashboard.
     token = session.get("auth_token")
     if validate_session(token):
-        return redirect(url_for("admin.dashboard"))
+        return redirect(current_app.config["PATH_PREFIX"])
     code = generate_challenge()
     return render_template("login.html", code=code, hostname=get_hostname())
 
@@ -63,17 +63,40 @@ def logout():
     token = session.pop("auth_token", None)
     if token:
         invalidate_session(token)
-    return redirect(url_for("admin.login"))
+    return redirect(current_app.config["PATH_PREFIX"] + "/login")
 
 
-# --- Dashboard page ---
+# --- Page routes ---
+
+def _page_context():
+    """Common template context for all authenticated pages."""
+    wallet = get_admin_wallet() or ""
+    short_wallet = wallet[:6] + "..." + wallet[-4:] if len(wallet) > 10 else wallet
+    return {"wallet": short_wallet}
+
 
 @bp.route("/")
 @login_required
 def dashboard():
-    wallet = get_admin_wallet() or ""
-    short_wallet = wallet[:6] + "..." + wallet[-4:] if len(wallet) > 10 else wallet
-    return render_template("dashboard.html", wallet=short_wallet)
+    return render_template("system.html", active_page="system", **_page_context())
+
+
+@bp.route("/network")
+@login_required
+def network_page():
+    return render_template("network.html", active_page="network", **_page_context())
+
+
+@bp.route("/wallet")
+@login_required
+def wallet_page():
+    return render_template("wallet.html", active_page="wallet", **_page_context())
+
+
+@bp.route("/vms")
+@login_required
+def vms_page():
+    return render_template("vms.html", active_page="vms", **_page_context())
 
 
 # --- System API ---
@@ -111,6 +134,26 @@ def api_broker_renew():
     if not ok:
         return jsonify({"ok": False, "error": err}), 500
     return jsonify({"ok": True})
+
+
+# --- Admin Path API ---
+
+@bp.route("/api/admin/path")
+@login_required
+def api_admin_path():
+    return jsonify({"path_prefix": system.get_admin_path()})
+
+
+@bp.route("/api/admin/path", methods=["POST"])
+@login_required
+def api_update_admin_path():
+    data = request.get_json(silent=True)
+    if not data or "path_prefix" not in data:
+        return jsonify({"ok": False, "error": "missing path_prefix"}), 400
+    ok, err = system.update_admin_path(data["path_prefix"])
+    if not ok:
+        return jsonify({"ok": False, "error": err}), 400
+    return jsonify({"ok": True, "new_path": "/" + data["path_prefix"].strip("/")})
 
 
 # --- Security API ---

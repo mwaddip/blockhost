@@ -221,7 +221,7 @@
         </div>
 
         <div class="sign-link">
-            Open <a href="/sign" target="_blank">/sign</a> to sign with the signing page
+            Open <a href="{{ admin_prefix }}/sign" target="_blank">{{ admin_prefix }}/sign</a> to sign with the signing page
         </div>
 
         <!-- Path B: Inline MetaMask -->
@@ -264,7 +264,7 @@
             btn.innerHTML = '<span class="spinner-sm"></span> Verifying...';
 
             try {
-                const res = await fetch('/api/auth/verify', {
+                const res = await fetch('{{ admin_prefix }}/api/auth/verify', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({code: CODE, signature: signature}),
@@ -272,7 +272,7 @@
                 const data = await res.json();
                 if (data.ok) {
                     showAlert('Authenticated — redirecting...', 'success');
-                    window.location.href = '/';
+                    window.location.href = '{{ admin_prefix }}';
                 } else {
                     showAlert(data.error || 'Verification failed', 'error');
                     btn.disabled = false;

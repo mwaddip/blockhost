@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}VMs & Accounts - BlockHost Admin{% endblock %}
+{% block page_title %}VMs & Accounts{% endblock %}
+
+{% block content %}
+<!-- VMs -->
+<div class="card" id="vms">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9654;</span> Virtual Machines</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div id="vm-table">
+            <div class="placeholder-msg"><span class="spinner-sm"></span> Loading...</div>
+        </div>
+    </div>
+</div>
+
+<!-- Accounts (placeholder) -->
+<div class="card" id="accounts">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9979;</span> Accounts</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div class="placeholder-msg">Account management coming soon</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadVMs() {
+    try {
+        const data = await apiGet('/api/vms');
+        const el = document.getElementById('vm-table');
+
+        if (!Array.isArray(data) || data.length === 0) {
+            el.innerHTML = '<div class="placeholder-msg">No virtual machines found</div>';
+            return;
+        }
+
+        let html = '<table><thead><tr><th>Name</th><th>Status</th><th>IP</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+        data.forEach(vm => {
+            const statusClass = 'badge-' + (vm.status || 'unknown');
+            const isActive = vm.status === 'active';
+            const isSuspended = vm.status === 'suspended';
+            html += `<tr>
+                <td style="font-weight: 500;">${vm.name}</td>
+                <td><span class="badge ${statusClass}">${vm.status || 'unknown'}</span></td>
+                <td style="font-family: monospace;">${vm.ip || '-'}</td>
+                <td>${vm.created || '-'}</td>
+                <td>
+                    <div class="btn-group">
+                        ${isSuspended ? `<button class="btn btn-sm btn-success" onclick="vmAction('${vm.name}', 'start', this)">Start</button>` : ''}
+                        ${isActive ? `<button class="btn btn-sm btn-warning" onclick="vmAction('${vm.name}', 'stop', this)">Stop</button>` : ''}
+                        ${isActive ? `<button class="btn btn-sm btn-secondary" onclick="vmAction('${vm.name}', 'kill', this)">Kill</button>` : ''}
+                        <button class="btn btn-sm btn-danger" onclick="confirmDestroy('${vm.name}', this)">Destroy</button>
+                    </div>
+                </td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    } catch (e) {
+        document.getElementById('vm-table').innerHTML = '<div class="placeholder-msg">Error loading VMs</div>';
+    }
+}
+
+async function vmAction(name, action, btn) {
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    const res = await apiPost(`/api/vms/${name}/${action}`);
+    if (res.ok) {
+        showAlert(`${action} on ${name}: success`, 'success');
+        setTimeout(loadVMs, 1000);
+    } else {
+        showAlert(`${action} on ${name} failed: ${res.error || 'unknown'}`, 'error');
+        btn.disabled = false;
+        btn.textContent = origText;
+    }
+}
+
+function confirmDestroy(name, btn) {
+    if (confirm(`Destroy VM "${name}"? This cannot be undone.`)) {
+        vmAction(name, 'destroy', btn);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadVMs();
+    loadStatus();
+});
+</script>
+{% endblock %}

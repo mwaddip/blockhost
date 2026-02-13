@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+
+{% block title %}Wallet Management - BlockHost Admin{% endblock %}
+{% block page_title %}Wallet Management{% endblock %}
+
+{% block content %}
+<!-- Wallet -->
+<div class="card" id="wallet">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9878;</span> Wallet</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <!-- Balances -->
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 0 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Balances</h3>
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+            <select id="wallet-role-select"></select>
+            <button class="btn btn-sm btn-primary" onclick="loadBalance()">Check Balance</button>
+        </div>
+        <pre id="wallet-balance-output" style="background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.75rem; font-size: 0.8125rem; overflow-x: auto; white-space: pre-wrap; color: var(--text-muted);">Select a wallet and click Check Balance</pre>
+
+        <!-- Transfer -->
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 1.25rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Transfer</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;">
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">From</label>
+                <select id="send-from"></select>
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Amount</label>
+                <input type="text" id="send-amount" size="12" placeholder="0.01" style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Token</label>
+                <select id="send-token" onchange="toggleCustomToken()">
+                    <option value="eth">ETH</option>
+                    <option value="stable">Stablecoin</option>
+                    <option value="custom">Custom...</option>
+                </select>
+            </div>
+            <div id="send-token-custom-wrap" style="display: none;">
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Contract</label>
+                <input type="text" id="send-token-custom" size="30" placeholder="0x..." style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">To</label>
+                <select id="send-to" onchange="toggleCustomTo('send')">
+                </select>
+            </div>
+            <div id="send-to-custom-wrap" style="display: none;">
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Address</label>
+                <input type="text" id="send-to-custom" size="30" placeholder="0x..." style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="walletSend(this)">Send</button>
+        </div>
+
+        <!-- Withdraw -->
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 1.25rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Contract Withdraw</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;">
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Token</label>
+                <select id="withdraw-token" onchange="toggleCustomWithdrawToken()">
+                    <option value="">All</option>
+                    <option value="eth">ETH</option>
+                    <option value="stable">Stablecoin</option>
+                    <option value="custom">Custom...</option>
+                </select>
+            </div>
+            <div id="withdraw-token-custom-wrap" style="display: none;">
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Contract</label>
+                <input type="text" id="withdraw-token-custom" size="30" placeholder="0x..." style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">To</label>
+                <select id="withdraw-to" onchange="toggleCustomTo('withdraw')">
+                </select>
+            </div>
+            <div id="withdraw-to-custom-wrap" style="display: none;">
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Address</label>
+                <input type="text" id="withdraw-to-custom" size="30" placeholder="0x..." style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="walletWithdraw(this)">Withdraw</button>
+        </div>
+
+        <!-- Transaction output -->
+        <pre id="wallet-tx-output" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.75rem; font-size: 0.8125rem; overflow-x: auto; white-space: pre-wrap; margin-top: 1rem;"></pre>
+    </div>
+</div>
+
+<!-- Addressbook -->
+<div class="card" id="addressbook">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9993;</span> Addressbook</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div id="addressbook-table">
+            <div class="placeholder-msg"><span class="spinner-sm"></span> Loading...</div>
+        </div>
+
+        <!-- Add -->
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 1.25rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Add Entry</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;">
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Name</label>
+                <input type="text" id="ab-add-name" size="15" maxlength="20" placeholder="mywalletname" style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Address</label>
+                <input type="text" id="ab-add-address" size="30" placeholder="0x..." style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="addressbookAdd(this)">Add</button>
+        </div>
+
+        <!-- Generate -->
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 1.25rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Generate New Wallet</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;">
+            <div>
+                <label style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">Name</label>
+                <input type="text" id="ab-gen-name" size="15" maxlength="20" placeholder="mywalletname" style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.375rem 0.625rem; color: var(--text); font-family: monospace; font-size: 0.875rem;">
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="addressbookGenerate(this)">Generate</button>
+        </div>
+
+        <!-- Output -->
+        <pre id="ab-output" style="display: none; background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.75rem; font-size: 0.8125rem; overflow-x: auto; white-space: pre-wrap; margin-top: 1rem;"></pre>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let walletData = [];
+
+// Single fetch populates both wallet selects and addressbook table
+async function loadWalletData() {
+    try {
+        const data = await apiGet('/api/wallet');
+        if (!Array.isArray(data)) return;
+        walletData = data;
+        populateWalletSelects();
+        renderAddressbook(data);
+    } catch (e) {
+        document.getElementById('addressbook-table').innerHTML = '<div class="placeholder-msg">Error loading data</div>';
+    }
+}
+
+function populateWalletSelects() {
+    // Balance role select: all wallets
+    const roleSelect = document.getElementById('wallet-role-select');
+    roleSelect.innerHTML = '';
+    walletData.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.role;
+        opt.textContent = w.role + ' (' + w.address.slice(0, 6) + '...' + w.address.slice(-4) + ')';
+        roleSelect.appendChild(opt);
+    });
+
+    // From select: only can_sign wallets
+    const fromSelect = document.getElementById('send-from');
+    fromSelect.innerHTML = '';
+    walletData.filter(w => w.can_sign).forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.role;
+        opt.textContent = w.role;
+        fromSelect.appendChild(opt);
+    });
+
+    // To selects: all wallets + Custom
+    ['send-to', 'withdraw-to'].forEach(id => {
+        const sel = document.getElementById(id);
+        sel.innerHTML = '';
+        walletData.forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w.role;
+            opt.textContent = w.role + ' (' + w.address.slice(0, 6) + '...' + w.address.slice(-4) + ')';
+            sel.appendChild(opt);
+        });
+        const customOpt = document.createElement('option');
+        customOpt.value = 'custom';
+        customOpt.textContent = 'Custom address...';
+        sel.appendChild(customOpt);
+    });
+}
+
+async function loadBalance() {
+    const role = document.getElementById('wallet-role-select').value;
+    if (!role) return;
+    const el = document.getElementById('wallet-balance-output');
+    el.textContent = 'Loading...';
+    try {
+        const res = await apiGet('/api/wallet/balance/' + encodeURIComponent(role));
+        el.textContent = res.ok ? res.output : ('Error: ' + res.error);
+    } catch (e) {
+        el.textContent = 'Error: request failed';
+    }
+}
+
+function toggleCustomToken() {
+    const v = document.getElementById('send-token').value;
+    document.getElementById('send-token-custom-wrap').style.display = v === 'custom' ? '' : 'none';
+}
+
+function toggleCustomWithdrawToken() {
+    const v = document.getElementById('withdraw-token').value;
+    document.getElementById('withdraw-token-custom-wrap').style.display = v === 'custom' ? '' : 'none';
+}
+
+function toggleCustomTo(prefix) {
+    const v = document.getElementById(prefix + '-to').value;
+    document.getElementById(prefix + '-to-custom-wrap').style.display = v === 'custom' ? '' : 'none';
+}
+
+function resolveToken(selectId, customId) {
+    const v = document.getElementById(selectId).value;
+    if (v === 'custom') return document.getElementById(customId).value.trim();
+    return v;
+}
+
+function resolveTo(selectId, customId) {
+    const v = document.getElementById(selectId).value;
+    if (v === 'custom') return document.getElementById(customId).value.trim();
+    return v;
+}
+
+function showTxOutput(text, isError) {
+    const el = document.getElementById('wallet-tx-output');
+    el.textContent = text;
+    el.style.display = 'block';
+    el.style.color = isError ? 'var(--error)' : 'var(--success)';
+}
+
+async function walletSend(btn) {
+    const from = document.getElementById('send-from').value;
+    const amount = document.getElementById('send-amount').value.trim();
+    const token = resolveToken('send-token', 'send-token-custom');
+    const to = resolveTo('send-to', 'send-to-custom');
+
+    if (!amount || !token || !to) {
+        showTxOutput('All fields are required', true);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    try {
+        const res = await apiPost('/api/wallet/send', {amount, token, from, to});
+        if (res.ok) {
+            showTxOutput(res.output || 'Transfer successful', false);
+        } else {
+            showTxOutput('Error: ' + (res.error || 'unknown'), true);
+        }
+    } catch (e) {
+        showTxOutput('Error: request failed', true);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Send';
+}
+
+async function walletWithdraw(btn) {
+    const tokenVal = document.getElementById('withdraw-token').value;
+    let token = null;
+    if (tokenVal === 'custom') {
+        token = document.getElementById('withdraw-token-custom').value.trim();
+    } else if (tokenVal) {
+        token = tokenVal;
+    }
+    const to = resolveTo('withdraw-to', 'withdraw-to-custom');
+
+    if (!to) {
+        showTxOutput('Destination is required', true);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    try {
+        const res = await apiPost('/api/wallet/withdraw', {to, token});
+        if (res.ok) {
+            showTxOutput(res.output || 'Withdrawal successful', false);
+        } else {
+            showTxOutput('Error: ' + (res.error || 'unknown'), true);
+        }
+    } catch (e) {
+        showTxOutput('Error: request failed', true);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Withdraw';
+}
+
+// --- Addressbook ---
+
+const RESERVED_ROLES = new Set(['server', 'admin', 'hot', 'dev', 'broker']);
+
+function renderAddressbook(data) {
+    const el = document.getElementById('addressbook-table');
+    if (!data || data.length === 0) {
+        el.innerHTML = '<div class="placeholder-msg">No entries found</div>';
+        return;
+    }
+    let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Signing</th><th></th></tr></thead><tbody>';
+    data.forEach(w => {
+        const sigBadge = w.can_sign
+            ? '<span class="badge badge-active">key</span>'
+            : '';
+        const removeBtn = RESERVED_ROLES.has(w.role)
+            ? ''
+            : `<button class="btn btn-sm btn-danger" onclick="addressbookRemove('${w.role}', this)">Remove</button>`;
+        html += `<tr>
+            <td style="font-weight: 500;">${w.role}</td>
+            <td style="font-family: monospace; font-size: 0.8125rem;">${w.address}</td>
+            <td>${sigBadge}</td>
+            <td>${removeBtn}</td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+}
+
+function showAbOutput(text, isError) {
+    const el = document.getElementById('ab-output');
+    el.textContent = text;
+    el.style.display = 'block';
+    el.style.color = isError ? 'var(--error)' : 'var(--success)';
+}
+
+async function addressbookAdd(btn) {
+    const name = document.getElementById('ab-add-name').value.trim();
+    const address = document.getElementById('ab-add-address').value.trim();
+    if (!name || !address) {
+        showAbOutput('Name and address are required', true);
+        return;
+    }
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    try {
+        const res = await apiPost('/api/addressbook/add', {name, address});
+        if (res.ok) {
+            showAbOutput(res.output || 'Entry added', false);
+            document.getElementById('ab-add-name').value = '';
+            document.getElementById('ab-add-address').value = '';
+            loadWalletData();
+        } else {
+            showAbOutput('Error: ' + (res.error || 'unknown'), true);
+        }
+    } catch (e) {
+        showAbOutput('Error: request failed', true);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Add';
+}
+
+async function addressbookRemove(name, btn) {
+    if (!confirm(`Remove "${name}" from addressbook?`)) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    try {
+        const res = await apiPost('/api/addressbook/remove', {name});
+        if (res.ok) {
+            showAbOutput(res.output || 'Entry removed', false);
+            loadWalletData();
+        } else {
+            showAbOutput('Error: ' + (res.error || 'unknown'), true);
+        }
+    } catch (e) {
+        showAbOutput('Error: request failed', true);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Remove';
+}
+
+async function addressbookGenerate(btn) {
+    const name = document.getElementById('ab-gen-name').value.trim();
+    if (!name) {
+        showAbOutput('Name is required', true);
+        return;
+    }
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+    try {
+        const res = await apiPost('/api/addressbook/generate', {name});
+        if (res.ok) {
+            showAbOutput(res.output || 'Wallet generated', false);
+            document.getElementById('ab-gen-name').value = '';
+            loadWalletData();
+        } else {
+            showAbOutput('Error: ' + (res.error || 'unknown'), true);
+        }
+    } catch (e) {
+        showAbOutput('Error: request failed', true);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadWalletData();
+    loadStatus();
+});
+</script>
+{% endblock %}

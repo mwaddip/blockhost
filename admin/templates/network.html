@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}Network & Security - BlockHost Admin{% endblock %}
+{% block page_title %}Network & Security{% endblock %}
+
+{% block content %}
+<!-- Network -->
+<div class="card" id="network">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9729;</span> Network</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div class="kv-row">
+            <span class="kv-label">IPv4 Address</span>
+            <span class="kv-value" id="net-ipv4">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Gateway</span>
+            <span class="kv-value" id="net-gateway">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">DNS</span>
+            <span class="kv-value" id="net-dns">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">IPv6 Broker</span>
+            <span class="kv-value" id="net-broker">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Broker Lease</span>
+            <span class="kv-value">
+                <button class="btn btn-sm btn-secondary" onclick="renewBrokerLease(this)">Re-request Lease</button>
+            </span>
+        </div>
+    </div>
+</div>
+
+<!-- Security -->
+<div class="card" id="security">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9919;</span> Security</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div class="kv-row">
+            <span class="kv-label">Admin Commands</span>
+            <span class="kv-value" id="sec-enabled">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Knock Command</span>
+            <span class="kv-value">
+                <span class="form-inline-edit">
+                    <input type="text" id="sec-knock-command" size="20">
+                </span>
+            </span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Knock Ports</span>
+            <span class="kv-value">
+                <span class="form-inline-edit">
+                    <input type="text" id="sec-knock-ports" size="30" placeholder="e.g. 7000,8000,9000">
+                </span>
+            </span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Knock Timeout</span>
+            <span class="kv-value">
+                <span class="form-inline-edit">
+                    <input type="number" id="sec-knock-timeout" size="6" min="1">
+                </span>
+            </span>
+        </div>
+        <div style="margin-top: 1rem; text-align: right;">
+            <button class="btn btn-primary" onclick="saveSecuritySettings()">Save Security Settings</button>
+        </div>
+    </div>
+</div>
+
+<!-- Admin Path -->
+<div class="card" id="admin-path">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9881;</span> Admin Panel Path</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div class="kv-row">
+            <span class="kv-label">URL Path</span>
+            <span class="kv-value">
+                <span class="form-inline-edit">
+                    <input type="text" id="admin-path-input" size="30" placeholder="/admin">
+                    <button class="btn btn-sm btn-primary" id="admin-path-btn" onclick="changeAdminPath()">Apply</button>
+                </span>
+            </span>
+        </div>
+        <div id="admin-path-countdown" style="display: none; margin-top: 1rem; padding: 0.75rem 1rem; background: rgba(37, 99, 235, 0.1); border: 1px solid rgba(37, 99, 235, 0.3); border-radius: 0.5rem; color: var(--primary); font-size: 0.875rem; font-weight: 500;">
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadNetwork() {
+    try {
+        const data = await apiGet('/api/network');
+        document.getElementById('net-ipv4').textContent = data.ipv4 || 'Not available';
+        document.getElementById('net-gateway').textContent = data.gateway || 'Not available';
+        document.getElementById('net-dns').textContent = data.dns && data.dns.length ? data.dns.join(', ') : 'None';
+
+        const broker = data.ipv6_broker;
+        if (broker && typeof broker === 'object') {
+            const prefix = broker.prefix || broker.ipv6_prefix || '';
+            const status = broker.status || 'allocated';
+            document.getElementById('net-broker').innerHTML =
+                '<span class="badge badge-active">' + status + '</span> ' + prefix;
+        } else {
+            document.getElementById('net-broker').textContent = 'Not configured';
+        }
+    } catch (e) {
+        // Leave defaults
+    }
+}
+
+async function renewBrokerLease(btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span> Requesting...';
+    const res = await apiPost('/api/network/broker/renew');
+    if (res.ok) {
+        showAlert('Broker lease renewed', 'success');
+        loadNetwork();
+    } else {
+        showAlert('Lease renewal failed: ' + (res.error || 'unknown error'), 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Re-request Lease';
+}
+
+async function loadSecurity() {
+    try {
+        const data = await apiGet('/api/security');
+        if (data.ok === false) {
+            document.getElementById('sec-enabled').textContent = 'Config not found';
+            return;
+        }
+        document.getElementById('sec-enabled').innerHTML = data.enabled
+            ? '<span class="badge badge-active">Enabled</span>'
+            : '<span class="badge badge-destroyed">Disabled</span>';
+        document.getElementById('sec-knock-command').value = data.knock_command || '';
+        const ports = data.knock_ports;
+        document.getElementById('sec-knock-ports').value = Array.isArray(ports) ? ports.join(', ') : (ports || '');
+        document.getElementById('sec-knock-timeout').value = data.knock_timeout || '';
+    } catch (e) {
+        document.getElementById('sec-enabled').textContent = 'Error loading';
+    }
+}
+
+async function saveSecuritySettings() {
+    const portsRaw = document.getElementById('sec-knock-ports').value;
+    let ports = portsRaw;
+    // Parse comma-separated to array of ints if possible
+    if (portsRaw.includes(',')) {
+        ports = portsRaw.split(',').map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
+    }
+
+    const body = {
+        knock_command: document.getElementById('sec-knock-command').value,
+        knock_ports: ports,
+        knock_timeout: parseInt(document.getElementById('sec-knock-timeout').value, 10) || undefined,
+    };
+
+    const res = await apiPost('/api/security', body);
+    if (res.ok) {
+        showAlert('Security settings saved', 'success');
+    } else {
+        showAlert('Failed: ' + (res.error || 'unknown error'), 'error');
+    }
+}
+
+async function loadAdminPath() {
+    document.getElementById('admin-path-input').value = API_PREFIX;
+}
+
+async function changeAdminPath() {
+    const input = document.getElementById('admin-path-input');
+    const btn = document.getElementById('admin-path-btn');
+    const newPath = '/' + input.value.trim().replace(/^\/+|\/+$/g, '');
+
+    if (newPath === API_PREFIX) {
+        showAlert('Path is already ' + newPath, 'error');
+        return;
+    }
+
+    if (!newPath || newPath === '/') {
+        showAlert('Path cannot be empty or root', 'error');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span>';
+
+    const res = await apiPost('/api/admin/path', {path_prefix: newPath});
+    if (!res.ok) {
+        showAlert('Failed: ' + (res.error || 'unknown error'), 'error');
+        btn.disabled = false;
+        btn.textContent = 'Apply';
+        return;
+    }
+
+    // Countdown and redirect
+    input.disabled = true;
+    const countdown = document.getElementById('admin-path-countdown');
+    countdown.style.display = 'block';
+    let remaining = 10;
+
+    const tick = setInterval(() => {
+        countdown.textContent = 'Applying... ' + remaining + 's — redirecting to ' + newPath;
+        remaining--;
+        if (remaining < 0) {
+            clearInterval(tick);
+            window.location.href = newPath + '/network';
+        }
+    }, 1000);
+    countdown.textContent = 'Applying... ' + remaining + 's — redirecting to ' + newPath;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadNetwork();
+    loadSecurity();
+    loadAdminPath();
+    loadStatus();
+});
+</script>
+{% endblock %}

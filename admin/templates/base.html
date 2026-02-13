@@ -405,13 +405,9 @@
             <span class="admin">admin</span>
         </div>
         <ul class="sidebar-nav">
-            <li><a href="#system" class="active" onclick="scrollToSection('system', this)"><span class="nav-icon">&#9881;</span> System</a></li>
-            <li><a href="#storage" onclick="scrollToSection('storage', this)"><span class="nav-icon">&#9744;</span> Storage</a></li>
-            <li><a href="#security" onclick="scrollToSection('security', this)"><span class="nav-icon">&#9919;</span> Security</a></li>
-            <li><a href="#network" onclick="scrollToSection('network', this)"><span class="nav-icon">&#9729;</span> Network</a></li>
-            <li><a href="#wallet" onclick="scrollToSection('wallet', this)"><span class="nav-icon">&#9878;</span> Wallet</a></li>
-            <li><a href="#addressbook" onclick="scrollToSection('addressbook', this)"><span class="nav-icon">&#9993;</span> Addressbook</a></li>
-            <li><a href="#vms" onclick="scrollToSection('vms', this)"><span class="nav-icon">&#9654;</span> VMs</a></li>
+            {% for page in nav_pages %}
+            <li><a href="{{ admin_prefix }}{{ page.path }}" class="{{ 'active' if active_page == page.id }}"><span class="nav-icon">{{ page.icon | safe }}</span> {{ page.label }}</a></li>
+            {% endfor %}
         </ul>
     </nav>
 
@@ -424,23 +420,79 @@
                 {% if wallet %}
                 <span style="margin-left: 1rem; padding-left: 1rem; border-left: 1px solid var(--border); font-family: monospace;">{{ wallet }}</span>
                 {% endif %}
-                <a href="/logout" style="margin-left: 0.75rem; color: var(--text-muted); font-size: 0.8125rem; text-decoration: none;">Logout</a>
+                <a href="{{ admin_prefix }}/logout" style="margin-left: 0.75rem; color: var(--text-muted); font-size: 0.8125rem; text-decoration: none;">Logout</a>
             </div>
         </div>
 
         <div class="content">
+            <div id="global-alert" class="alert"></div>
             {% block content %}{% endblock %}
         </div>
     </div>
 
     <script>
-        function scrollToSection(id, link) {
-            const el = document.getElementById(id);
-            if (el) {
-                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const API_PREFIX = '{{ admin_prefix }}';
+
+        async function apiGet(url) {
+            const r = await fetch(API_PREFIX + url);
+            return r.json();
+        }
+
+        async function apiPost(url, body) {
+            const r = await fetch(API_PREFIX + url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            return r.json();
+        }
+
+        function showAlert(msg, type) {
+            const el = document.getElementById('global-alert');
+            el.textContent = msg;
+            el.className = 'alert alert-' + type + ' visible';
+            setTimeout(() => el.classList.remove('visible'), 4000);
+        }
+
+        function formatUptime(seconds) {
+            if (seconds == null) return '-';
+            const d = Math.floor(seconds / 86400);
+            const h = Math.floor((seconds % 86400) / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const parts = [];
+            if (d > 0) parts.push(d + 'd');
+            if (h > 0) parts.push(h + 'h');
+            parts.push(m + 'm');
+            return parts.join(' ');
+        }
+
+        function formatBytes(bytes) {
+            if (bytes == null) return '-';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0;
+            let v = bytes;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return v.toFixed(1) + ' ' + units[i];
+        }
+
+        function toggleCard(header) {
+            header.closest('.card').classList.toggle('collapsed');
+        }
+
+        // Topbar status — call with data if you already have it, or without to fetch
+        function updateStatus(data) {
+            document.getElementById('status-dot').style.background = 'var(--success)';
+            document.getElementById('status-text').textContent =
+                (data.hostname || 'Online') + ' — up ' + formatUptime(data.uptime_seconds);
+        }
+
+        async function loadStatus() {
+            try {
+                updateStatus(await apiGet('/api/system'));
+            } catch {
+                document.getElementById('status-dot').style.background = 'var(--error)';
+                document.getElementById('status-text').textContent = 'Error';
             }
-            document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
-            if (link) link.classList.add('active');
         }
     </script>
     {% block extra_js %}{% endblock %}

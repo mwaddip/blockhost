@@ -15,7 +15,7 @@ import time
 from functools import wraps
 from pathlib import Path
 
-from flask import redirect, request, session, url_for
+from flask import current_app, redirect, request, session
 
 KNOCK_ACTIVE_PATH = Path("/run/blockhost/knock.active")
 
@@ -176,7 +176,7 @@ def login_required(f):
         address = validate_session(token)
         if not address:
             session.pop("auth_token", None)
-            return redirect(url_for("admin.login"))
+            return redirect(current_app.config["PATH_PREFIX"] + "/login")
         _touch_knock_active()
         return f(*args, **kwargs)
     return decorated

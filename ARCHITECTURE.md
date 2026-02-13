@@ -29,7 +29,9 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + finalization (~3180 lines)
+│       ├── app.py                    # Flask wizard + routes (~1440 lines)
+│       ├── finalize.py              # Finalization pipeline + step functions (~1510 lines)
+│       ├── utils.py                 # Pure utilities: crypto, validation, YAML, disks (~400 lines)
 │       ├── validate_system.py        # Post-install validation (~1010 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
@@ -175,13 +177,13 @@ All state stored in Flask session (see SESSION SCHEMA below).
 ### Phase 5: Finalization (background thread)
 
 ```
-POST /api/finalize → _run_finalization_with_state() in thread
-  State file: /var/lib/blockhost/setup-state.json (SetupState class, app.py:69-204)
+POST /api/finalize → run_finalization_with_state() in thread (finalize.py)
+  State file: /var/lib/blockhost/setup-state.json (SetupState class, app.py)
   Poll: GET /api/finalize/status
   Retry: POST /api/finalize/retry {step_id?}
   Reset: POST /api/finalize/reset
 
-Step dispatch (_get_finalization_steps() in app.py, dynamically built):
+Step dispatch (get_finalization_steps() in finalize.py, dynamically built):
   Core steps:
     1   keypair     _finalize_keypair           → server.key, server.pubkey
     2   wallet      _finalize_wallet            → deployer.key
@@ -259,9 +261,11 @@ Post-install web dashboard for system management. Wallet-based auth (same flow a
 
 ```
 Entry: python3 -m admin.app --port 8443
-Bind: 127.0.0.1:8443 (localhost only — accessed via nginx reverse proxy at /admin)
+Bind: 127.0.0.1:8443 (localhost only — accessed via nginx reverse proxy at configurable prefix, default /admin)
 Service: blockhost-admin.service (systemd)
 ```
+
+Full interface specification: `facts/ADMIN_INTERFACE.md`
 
 ### Structure
 
@@ -271,9 +275,14 @@ admin/
 ├── auth.py        → Challenge generation, signature verification (cast wallet verify), session management, login_required decorator
 ├── routes.py      → Blueprint "admin", auth routes + protected API + page routes
 ├── system.py      → Data collection (reads host files/commands), action wrappers
+├── root-agent-actions/
+│   └── admin_panel.py → Root agent plugin: admin-path-update (nginx + service restart)
 ├── templates/
-│   ├── base.html      → Dark theme, sidebar nav, topbar with wallet + logout
-│   ├── dashboard.html → Single-page dashboard, all sections
+│   ├── base.html      → Dark theme, sidebar nav, topbar status, shared JS (apiGet/apiPost/showAlert/formatUptime/formatBytes)
+│   ├── system.html    → System & Storage page (hostname, uptime, disk usage, block devices)
+│   ├── network.html   → Network & Security page (IPv4, broker, knock settings, admin path)
+│   ├── wallet.html    → Wallet & Addressbook page (balances, transfer, withdraw, addressbook CRUD)
+│   ├── vms.html       → VMs & Accounts page (VM table with actions, accounts placeholder)
 │   └── login.html     → Standalone login page: challenge code, MetaMask + paste-signature paths
 └── static/css/    → Style overrides
 ```
@@ -306,36 +315,39 @@ Auth state (module-level dicts in auth.py):
 
 Session config: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE=Lax`, `SESSION_COOKIE_SECURE=True`, `PERMANENT_SESSION_LIFETIME=1h`.
 
-### Dashboard Sections
+### Pages & Cards
 
-| Section | Read Source | Writable |
-|---------|-----------|----------|
-| System | `/proc/uptime`, `/etc/os-release`, `socket.gethostname()`, `platform.release()` | Hostname (`hostnamectl`) |
-| Network | `ip -j addr show`, `ip -j route show default`, `/etc/resolv.conf`, `broker-client status` | Broker lease (`broker-client request-lease`) |
-| Security | `/etc/blockhost/admin-commands.json` | Knock settings (direct JSON write) |
-| Storage | `lsblk -J`, `shutil.disk_usage()` | No (placeholder for future) |
-| Wallet | `/etc/blockhost/addressbook.json`, `bw balance`, `/opt/blockhost/.env` | Transfer (`bw send`), withdraw (`bw withdraw`) |
-| Addressbook | `/etc/blockhost/addressbook.json` via `ab` CLI | Add (`ab add`), remove (`ab del`), generate (`ab new`) |
-| VMs | `blockhost-vm-list --format json` | Start/stop/kill/destroy via provisioner CLI |
+| Page | Cards | Read Source | Writable |
+|------|-------|-----------|----------|
+| System & Storage | System, Storage | `/proc/uptime`, `/etc/os-release`, `lsblk -J`, `shutil.disk_usage()` | Hostname (`hostnamectl`) |
+| Network & Security | Network, Security, Admin Path | `ip -j addr/route`, `/etc/resolv.conf`, `broker-allocation.json`, `admin-commands.json`, `admin.json` | Broker lease (root agent), knock settings, admin path (root agent) |
+| Wallet | Wallet, Addressbook | `addressbook.json`, `bw balance`, `/opt/blockhost/.env` | Transfer (`bw send`), withdraw (`bw withdraw`), addressbook CRUD (`ab` CLI) |
+| VMs & Accounts | VMs, Accounts (placeholder) | `blockhost-vm-list --format json` | Start/stop/kill/destroy via provisioner CLI |
 
 ### API Endpoints
 
 ```
 GET  /login                      → login page (standalone, no auth)
-GET  /sign                       → serve signing page HTML from /usr/share/libpam-web3-tools/signing-page/index.html
+GET  /sign                       → serve signing page HTML
 POST /api/auth/verify            → {code, signature} → verify → set session → {"ok": true}
 GET  /logout                     → invalidate session → redirect /login
 
-GET  /                           → dashboard (HTML, @login_required)
+GET  /                           → System & Storage page (@login_required)
+GET  /network                    → Network & Security page
+GET  /wallet                     → Wallet Management page
+GET  /vms                        → VMs & Accounts page
+
 GET  /api/system                 → {hostname, uptime_seconds, os, kernel}
 POST /api/system/hostname        → set hostname
 GET  /api/network                → {ipv4, gateway, dns, ipv6_broker}
-POST /api/network/broker/renew   → broker-client request-lease
+POST /api/network/broker/renew   → root agent broker-renew
 GET  /api/security               → admin-commands.json contents
-POST /api/security               → update knock settings (filtered: knock_command, knock_ports, knock_timeout)
+POST /api/security               → update knock settings
+GET  /api/admin/path             → {path_prefix}
+POST /api/admin/path             → update path prefix (writes admin.json, root agent updates nginx)
 GET  /api/storage                → {devices, usage, boot_device}
 GET  /api/wallet                 → addressbook.json wallet list [{role, address, can_sign}]
-GET  /api/wallet/balance/<role>  → bw balance <role> (raw text output)
+GET  /api/wallet/balance/<role>  → bw balance <role>
 POST /api/wallet/send            → bw send (amount, token, from, to)
 POST /api/wallet/withdraw        → bw withdraw [token] <to>
 POST /api/addressbook/add        → ab add <name> <address>
@@ -765,74 +777,56 @@ Events (monitored by blockhost-monitor):
 - View/release active leases, wallet info + ETH top-up
 - Configurable session expiry (default 1hr, `SESSION_LIFETIME_HOURS`)
 
-## KEY FUNCTIONS (app.py line index)
+## KEY FUNCTIONS
 
-### Constants & Setup
-| Line | Symbol |
-|------|--------|
-| 46 | CHAIN_NAMES dict |
-| 128 | WIZARD_STEPS list |
-| 163 | SETUP_STATE_FILE path |
-| 166 | class SetupState |
+### app.py — Flask wizard, routes, state
+| Symbol | Purpose |
+|--------|---------|
+| CHAIN_NAMES | Chain ID → network name mapping |
+| WIZARD_STEPS | Ordered wizard step list (core + provisioner + post) |
+| SETUP_STATE_FILE | Path to setup-state.json |
+| class SetupState | Persistent finalization state management |
+| create_app() | Flask app factory with all routes |
+| _run_contract_deployment() | Background contract deployment (uses _jobs) |
+| _build_vm_template() | Background template build (uses _jobs) |
 
-### Routes
-| Line | Route | Method |
-|------|-------|--------|
-| 376 | / | GET → redirect |
-| 386 | /login | GET, POST |
-| 421 | /wizard/wallet | GET, POST |
-| 500 | /wizard/network | GET, POST |
-| 549 | /wizard/storage | GET, POST |
-| 563 | /wizard/blockchain | GET, POST |
-| — | /wizard/<provisioner> | GET, POST (from provisioner Blueprint) |
-| 595 | /wizard/ipv6 | GET, POST |
-| 628 | /wizard/admin-commands | GET, POST |
-| 662 | /wizard/summary | GET, POST |
-| 750 | /wizard/install | GET |
-| 1001 | /api/setup-test | POST (testing only) |
-| 1075 | /api/finalize | POST |
-| 1120 | /api/finalize/status | GET |
-| 1172 | /api/finalize/retry | POST |
-| 1217 | /api/finalize/reset | POST |
-| 1275 | /api/validation-output | GET |
+### finalize.py — Finalization pipeline
+| Function | Purpose |
+|----------|---------|
+| get_finalization_steps(provisioner) | Build step list (core + provisioner + post) |
+| run_finalization_with_state(state, config, prov) | Step dispatcher loop |
+| run_finalization(job_id, config, jobs, prov) | Legacy wrapper |
+| _finalize_keypair | Generate server secp256k1 key |
+| _finalize_wallet | Write deployer.key |
+| _finalize_contracts | Deploy or verify contracts |
+| _deploy_contract_with_forge | Deploy contract via cast send --create |
+| _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
+| _finalize_ipv6 | Broker allocation or manual prefix |
+| _finalize_https | dns_zone / sslip.io hostname + Let's Encrypt |
+| _finalize_signup | blockhost-generate-signup (static file only) |
+| _finalize_nginx | Install + configure nginx reverse proxy |
+| _finalize_mint_nft | Mint NFT #0 to admin wallet |
+| _finalize_complete | Enable services, create subscription plan |
+| _finalize_validate | System validation (testing only) |
+| _create_default_plan | Call createPlan() on subscription contract |
 
-### API endpoints (AJAX from wizard UI)
-| Line | Route | Purpose |
-|------|-------|---------|
-| 801 | /api/blockchain/generate-wallet | Generate new secp256k1 keypair |
-| 815 | /api/blockchain/validate-key | Validate imported private key |
-| 828 | /api/blockchain/balance | Check wallet balance via RPC |
-
-### Finalization functions
-| Line | Function | Purpose |
-|------|----------|---------|
-| 1715 | _run_finalization_with_state | Step dispatcher loop |
-| 1799 | _finalize_keypair | Generate server secp256k1 key |
-| 1828 | _finalize_wallet | Write deployer.key |
-| 1848 | _finalize_contracts | Deploy or verify contracts |
-| 1911 | _deploy_contract_with_forge | Deploy contract via cast send --create |
-| 2009 | _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
-| 2181 | _finalize_ipv6 | Broker allocation or manual prefix |
-| 2361 | _finalize_https | dns_zone / sslip.io hostname + Let's Encrypt |
-| 2502 | _finalize_signup | blockhost-generate-signup (static file only) |
-| 2526 | _finalize_nginx | Install + configure nginx reverse proxy |
-| 2628 | _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| 2858 | _finalize_complete | Enable services, create subscription plan |
-| 2939 | _finalize_validate | System validation (testing only) |
-| 2926 | _create_default_plan | Call createPlan() on subscription contract |
-
-### Helpers
-| Line | Function | Purpose |
-|------|----------|---------|
-| 1303 | _detect_disks | List available disks (lsblk) |
-| 1331 | _generate_secp256k1_keypair | Generate wallet keypair |
-| 1418 | _get_address_from_key | Derive address from private key |
-| 1456 | _is_valid_address | Validate 0x + 40 hex |
-| 1487 | _get_broker_registry | Look up broker registry by chain_id |
-| 1498 | _get_wallet_balance | eth_getBalance via JSON-RPC |
-| 1535 | _fetch_broker_registry_from_github | Fetch registry address from GitHub |
-| 1570 | _request_broker_allocation | Call blockhost-broker-client CLI |
-| 3029 | _write_yaml | Write YAML file helper |
+### utils.py — Pure utilities (no Flask dependency)
+| Function | Purpose |
+|----------|---------|
+| detect_disks | List available disks (lsblk) |
+| generate_secp256k1_keypair | Generate wallet keypair |
+| generate_secp256k1_keypair_with_pubkey | Keypair + uncompressed public key |
+| get_address_from_key | Derive address from private key |
+| is_valid_address | Validate 0x + 40 hex |
+| is_valid_ipv6_prefix | Validate prefix/length format |
+| get_broker_registry | Look up broker registry by chain_id |
+| get_wallet_balance | eth_getBalance via JSON-RPC |
+| fetch_broker_registry_from_github | Fetch registry address from GitHub |
+| request_broker_allocation | Call blockhost-broker-client CLI |
+| write_yaml | Write YAML file (pyyaml or fallback) |
+| set_blockhost_ownership | Set file to root:blockhost |
+| generate_self_signed_cert | Self-signed cert for run_server |
+| generate_self_signed_cert_for_finalization | Self-signed cert for HTTPS step |
 
 ## BLOCKCHAIN INTERACTIONS
 
@@ -864,7 +858,7 @@ Internet
   │
   ├─ nginx :443 (TLS terminator, Let's Encrypt cert)
   │   ├─ /           → static: /var/www/blockhost/signup.html
-  │   └─ /admin/*    → proxy: 127.0.0.1:8443 (Flask admin panel, strips /admin prefix)
+  │   └─ {path_prefix}/* → proxy: 127.0.0.1:8443 (Flask admin panel, strips prefix; default /admin, configurable via admin.json)
   │
   ├─ eth0/ens* (physical NIC, bridge port after first-boot Step 3a)
   │

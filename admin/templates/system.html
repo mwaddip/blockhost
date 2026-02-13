@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}System & Storage - BlockHost Admin{% endblock %}
+{% block page_title %}System & Storage{% endblock %}
+
+{% block content %}
+<!-- System -->
+<div class="card" id="system">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9881;</span> System</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div class="kv-row">
+            <span class="kv-label">Hostname</span>
+            <span class="kv-value">
+                <span class="form-inline-edit">
+                    <input type="text" id="hostname-input" size="20" placeholder="hostname">
+                    <button class="btn btn-sm btn-primary" onclick="setHostname()">Save</button>
+                </span>
+            </span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Uptime</span>
+            <span class="kv-value" id="sys-uptime">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">OS</span>
+            <span class="kv-value" id="sys-os">-</span>
+        </div>
+        <div class="kv-row">
+            <span class="kv-label">Kernel</span>
+            <span class="kv-value" id="sys-kernel">-</span>
+        </div>
+    </div>
+</div>
+
+<!-- Storage -->
+<div class="card" id="storage">
+    <div class="card-header" onclick="toggleCard(this)">
+        <h2><span class="section-icon">&#9744;</span> Storage</h2>
+        <span class="card-arrow">&#9660;</span>
+    </div>
+    <div class="card-body">
+        <div id="storage-usage"></div>
+        <h3 style="font-size: 0.875rem; color: var(--text-muted); margin: 1.25rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.03em;">Block Devices</h3>
+        <div id="storage-devices">
+            <div class="placeholder-msg"><span class="spinner-sm"></span> Loading...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadSystem() {
+    try {
+        const data = await apiGet('/api/system');
+        document.getElementById('hostname-input').value = data.hostname || '';
+        document.getElementById('sys-uptime').textContent = formatUptime(data.uptime_seconds);
+        document.getElementById('sys-os').textContent = data.os || '-';
+        document.getElementById('sys-kernel').textContent = data.kernel || '-';
+        updateStatus(data);
+    } catch (e) {
+        // Leave defaults
+    }
+}
+
+async function setHostname() {
+    const name = document.getElementById('hostname-input').value.trim();
+    if (!name) return;
+    const res = await apiPost('/api/system/hostname', {hostname: name});
+    if (res.ok) {
+        showAlert('Hostname updated to ' + name, 'success');
+        loadSystem();
+    } else {
+        showAlert('Failed: ' + (res.error || 'unknown error'), 'error');
+    }
+}
+
+async function loadStorage() {
+    try {
+        const data = await apiGet('/api/storage');
+
+        // Usage bars
+        const usageEl = document.getElementById('storage-usage');
+        usageEl.innerHTML = '';
+        if (data.usage && data.usage.length) {
+            data.usage.forEach(u => {
+                const pct = ((u.used / u.total) * 100).toFixed(1);
+                const cls = pct > 90 ? 'crit' : pct > 75 ? 'warn' : '';
+                usageEl.innerHTML += `
+                    <div class="kv-row">
+                        <span class="kv-label" style="min-width: 5rem; flex-shrink: 0;">${u.mount}</span>
+                        <span class="kv-value" style="flex: 1; margin-left: 1rem;">
+                            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                                <div class="progress-bar" style="flex: 1;">
+                                    <div class="progress-fill ${cls}" style="width: ${pct}%;"></div>
+                                </div>
+                                <span style="min-width: 7rem; text-align: right; font-size: 0.8125rem;">
+                                    ${formatBytes(u.used)} / ${formatBytes(u.total)}
+                                </span>
+                            </div>
+                        </span>
+                    </div>`;
+            });
+        }
+
+        // Block devices
+        const devEl = document.getElementById('storage-devices');
+        if (!data.devices || data.devices.length === 0) {
+            devEl.innerHTML = '<div class="placeholder-msg">No block devices found</div>';
+            return;
+        }
+
+        let html = '<table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Mount</th><th>Note</th></tr></thead><tbody>';
+        function renderDev(dev, indent) {
+            const isBoot = dev.name === data.boot_device;
+            const prefix = indent > 0 ? '&nbsp;'.repeat(indent * 2) + '&#9492; ' : '';
+            const note = isBoot ? '<span class="badge badge-suspended">boot</span>' : '';
+            const mount = dev.mountpoint || dev.mountpoints?.filter(m => m).join(', ') || '';
+            html += `<tr>
+                <td>${prefix}${dev.name}</td>
+                <td>${dev.size || '-'}</td>
+                <td>${dev.type || '-'}</td>
+                <td style="font-family: monospace;">${mount}</td>
+                <td>${note}</td>
+            </tr>`;
+            if (dev.children) {
+                dev.children.forEach(c => renderDev(c, indent + 1));
+            }
+        }
+        data.devices.forEach(d => renderDev(d, 0));
+        html += '</tbody></table>';
+        devEl.innerHTML = html;
+    } catch (e) {
+        document.getElementById('storage-devices').innerHTML = '<div class="placeholder-msg">Error loading storage info</div>';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadSystem();
+    loadStorage();
+});
+</script>
+{% endblock %}
