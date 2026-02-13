@@ -33,6 +33,12 @@
                 <button class="btn btn-sm btn-secondary" onclick="renewBrokerLease(this)">Re-request Lease</button>
             </span>
         </div>
+        <div class="kv-row">
+            <span class="kv-label">TLS Certificate</span>
+            <span class="kv-value">
+                <button class="btn btn-sm btn-secondary" onclick="renewCert(this)">Renew Let's Encrypt</button>
+            </span>
+        </div>
     </div>
 </div>
 
@@ -134,6 +140,19 @@ async function renewBrokerLease(btn) {
     }
     btn.disabled = false;
     btn.textContent = 'Re-request Lease';
+}
+
+async function renewCert(btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-sm"></span> Renewing...';
+    const res = await apiPost('/api/network/cert/renew');
+    if (res.ok) {
+        showAlert('Certificate renewed successfully', 'success');
+    } else {
+        showAlert('Renewal failed: ' + (res.error || 'unknown error'), 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = "Renew Let's Encrypt";
 }
 
 async function loadSecurity() {

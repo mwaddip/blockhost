@@ -862,12 +862,16 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
 
                 # Run certbot for HTTP-01 challenge
                 # Use --http-01-port on a free port, redirect :80 via iptables
-                # (the wizard is already listening on :80)
-                subprocess.run(
-                    ['iptables', '-t', 'nat', '-A', 'PREROUTING',
-                     '-p', 'tcp', '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088'],
-                    capture_output=True, timeout=10
-                )
+                # (the wizard is already listening on :80 IPv4)
+                # Both iptables (IPv4) and ip6tables (IPv6) needed — Let's Encrypt
+                # may connect over either protocol depending on DNS resolution.
+                _redirect_rule = ['-t', 'nat', '-p', 'tcp',
+                                  '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088']
+                for cmd in ['iptables', 'ip6tables']:
+                    subprocess.run(
+                        [cmd, '-A', 'PREROUTING'] + _redirect_rule,
+                        capture_output=True, timeout=10
+                    )
                 try:
                     result = subprocess.run(
                         [
@@ -887,11 +891,11 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
                         timeout=120
                     )
                 finally:
-                    subprocess.run(
-                        ['iptables', '-t', 'nat', '-D', 'PREROUTING',
-                         '-p', 'tcp', '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088'],
-                        capture_output=True, timeout=10
-                    )
+                    for cmd in ['iptables', 'ip6tables']:
+                        subprocess.run(
+                            [cmd, '-D', 'PREROUTING'] + _redirect_rule,
+                            capture_output=True, timeout=10
+                        )
 
                 if result.returncode == 0:
                     https_config['tls_mode'] = 'letsencrypt'
@@ -900,6 +904,35 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
                     if le_path.exists():
                         https_config['cert_file'] = str(le_path / 'fullchain.pem')
                         https_config['key_file'] = str(le_path / 'privkey.pem')
+
+                    # Switch renewal to webroot so certbot renews through nginx
+                    # without needing to stop anything (standalone won't work
+                    # post-reboot since nginx owns port 80)
+                    certbot_webroot = Path('/var/www/certbot')
+                    certbot_webroot.mkdir(parents=True, exist_ok=True)
+                    renewal_conf = Path(f'/etc/letsencrypt/renewal/{hostname}.conf')
+                    if renewal_conf.exists():
+                        txt = renewal_conf.read_text()
+                        txt = txt.replace(
+                            'authenticator = standalone',
+                            'authenticator = webroot',
+                        )
+                        if 'webroot_path' not in txt:
+                            # certbot needs webroot_path in [renewalparams] AND
+                            # the [[webroot]] domain mapping section
+                            txt = txt.replace(
+                                'authenticator = webroot',
+                                'authenticator = webroot\nwebroot_path = /var/www/certbot,',
+                            )
+                            txt += f'\n[[webroot]]\n{hostname} = /var/www/certbot\n'
+                        renewal_conf.write_text(txt)
+
+                    # Deploy hook: reload nginx after renewal to pick up new cert
+                    deploy_dir = Path('/etc/letsencrypt/renewal-hooks/deploy')
+                    deploy_dir.mkdir(parents=True, exist_ok=True)
+                    hook = deploy_dir / 'reload-nginx.sh'
+                    hook.write_text('#!/bin/sh\nsystemctl reload nginx\n')
+                    hook.chmod(0o755)
                 else:
                     # Let's Encrypt failed, fall back to self-signed
                     generate_self_signed_cert_for_finalization(hostname, ssl_dir)
@@ -1021,7 +1054,15 @@ server {{
     listen 80;
     listen [::]:80;
     server_name {hostname};
-    return 301 https://$host$request_uri;
+
+    # Let's Encrypt ACME challenge (webroot renewal)
+    location /.well-known/acme-challenge/ {{
+        root /var/www/certbot;
+    }}
+
+    location / {{
+        return 301 https://$host$request_uri;
+    }}
 }}
 """
         sites_available = Path('/etc/nginx/sites-available/blockhost')

@@ -144,6 +144,14 @@ def renew_broker_lease():
         return False, str(e)
 
 
+def renew_letsencrypt_cert():
+    """Run certbot renew (webroot mode, no downtime). Returns (ok, error)."""
+    ok, out, err = _run(["certbot", "renew", "--non-interactive"], timeout=120)
+    if not ok:
+        return False, err or out or "certbot renew failed"
+    return True, None
+
+
 # --- Security ---
 
 def get_security_info():

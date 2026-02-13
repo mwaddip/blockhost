@@ -136,6 +136,15 @@ def api_broker_renew():
     return jsonify({"ok": True})
 
 
+@bp.route("/api/network/cert/renew", methods=["POST"])
+@login_required
+def api_cert_renew():
+    ok, err = system.renew_letsencrypt_cert()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), 500
+    return jsonify({"ok": True})
+
+
 # --- Admin Path API ---
 
 @bp.route("/api/admin/path")

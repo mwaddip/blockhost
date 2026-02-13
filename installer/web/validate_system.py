@@ -889,6 +889,56 @@ def run_full_validation() -> ValidationReport:
     except Exception as e:
         report.add(ValidationResult("Web", "nginx config syntax", False, f"Error: {e}"))
 
+    # ========== CERTBOT RENEWAL (only when tls_mode == letsencrypt) ==========
+
+    https_json = etc_blockhost / 'https.json'
+    _tls_mode = None
+    _le_hostname = None
+    if https_json.exists():
+        try:
+            _https_data = json.loads(https_json.read_text())
+            _tls_mode = _https_data.get('tls_mode')
+            _le_hostname = _https_data.get('hostname')
+        except Exception:
+            pass
+
+    if _tls_mode == 'letsencrypt' and _le_hostname:
+        # ACME webroot directory
+        certbot_webroot = Path('/var/www/certbot')
+        report.add(ValidationResult(
+            "Certbot", "webroot directory",
+            certbot_webroot.is_dir(),
+            f"{'Exists' if certbot_webroot.is_dir() else 'Missing'}: {certbot_webroot}",
+        ))
+
+        # Renewal config exists and uses webroot authenticator
+        renewal_conf = Path(f'/etc/letsencrypt/renewal/{_le_hostname}.conf')
+        if renewal_conf.exists():
+            report.add(ValidationResult("Certbot", "renewal config", True, f"Exists: {renewal_conf}"))
+            _renewal_txt = renewal_conf.read_text()
+            report.add(ValidationResult(
+                "Certbot", "webroot authenticator",
+                'authenticator = webroot' in _renewal_txt,
+                "authenticator = webroot" if 'authenticator = webroot' in _renewal_txt
+                else f"Expected webroot, found other authenticator",
+            ))
+            report.add(ValidationResult(
+                "Certbot", "webroot_path in renewalparams",
+                'webroot_path' in _renewal_txt,
+                "webroot_path present" if 'webroot_path' in _renewal_txt
+                else "Missing webroot_path in [renewalparams]",
+            ))
+        else:
+            report.add(ValidationResult("Certbot", "renewal config", False, f"Missing: {renewal_conf}"))
+
+        # Deploy hook to reload nginx after renewal
+        deploy_hook = Path('/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh')
+        report.add(ValidationResult(
+            "Certbot", "nginx reload deploy hook",
+            deploy_hook.exists() and os.access(str(deploy_hook), os.X_OK),
+            f"{'Exists and executable' if deploy_hook.exists() and os.access(str(deploy_hook), os.X_OK) else 'Missing or not executable'}: {deploy_hook}",
+        ))
+
     # blockhost-monitor should be enabled (may not be active until reboot)
     report.add(_check_service_state('blockhost-monitor', expected_enabled=True, expected_active=None))
 
