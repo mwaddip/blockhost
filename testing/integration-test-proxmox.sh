@@ -189,18 +189,21 @@ PAYMENT_WITH_BUFFER=$(python3 -c "print(int(int('$PAYMENT_AMOUNT') * 1.1))")
 # Human-readable amount
 PAYMENT_HUMAN=$(python3 -c "print(f'{int(\"$PAYMENT_WITH_BUFFER\") / 10**$DECIMALS:.2f}')")
 
+# Get current nonce to avoid race with monitor's fund cycle
+NONCE=$(cast nonce "$DEPLOYER_ADDR" --rpc-url "$RPC")
+
 # Send ETH for gas
-info "Sending $GAS_ETH ETH for gas..."
+info "Sending $GAS_ETH ETH for gas (nonce $NONCE)..."
 cast send "$TEST_ADDR" --value "${GAS_ETH}ether" \
     --private-key "$DEPLOYER_KEY" --rpc-url "$RPC" \
-    --json > /dev/null
+    --nonce "$NONCE" --json > /dev/null
 
 # Send stablecoin
-info "Sending $PAYMENT_HUMAN stablecoin..."
+info "Sending $PAYMENT_HUMAN stablecoin (nonce $((NONCE + 1)))..."
 cast send "$STABLECOIN" "transfer(address,uint256)" \
     "$TEST_ADDR" "$PAYMENT_WITH_BUFFER" \
     --private-key "$DEPLOYER_KEY" --rpc-url "$RPC" \
-    --json > /dev/null
+    --nonce "$((NONCE + 1))" --json > /dev/null
 
 # Verify balances
 TEST_ETH=$(cast balance "$TEST_ADDR" --rpc-url "$RPC" --ether)
