@@ -47,9 +47,9 @@ jobs:
 
       - name: Build ISO (testing mode)
         run: |
-          sudo rm -f build/blockhost_0.1.0.iso
+          sudo rm -f build/blockhost_*.iso
           ./scripts/build-packages.sh --backend "$BACKEND"
-          sudo ./scripts/build-iso.sh --backend "$BACKEND" --testing
+          sudo ./scripts/build-iso.sh --backend "$BACKEND" --testing --apt-proxy http://192.168.122.1:3142
 
       - name: Provision VM
         id: provision
@@ -59,8 +59,9 @@ jobs:
           # Create ramdisk for VM disk image (faster I/O)
           sudo mkdir -p /mnt/ramdisk
           mountpoint -q /mnt/ramdisk || sudo mount -t tmpfs -o size=16G tmpfs /mnt/ramdisk
+          ISO_PATH=$(ls build/blockhost_*.iso | head -1)
           ./testing/ci-provision.sh \
-            --iso build/blockhost_0.1.0.iso \
+            --iso "$ISO_PATH" \
             --config testing/ci-config-${BACKEND}.json \
             --name "blockhost-ci-${{ github.run_number }}" \
             --disk-path /mnt/ramdisk
