@@ -2309,7 +2309,69 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
             _set_blockhost_ownership(allocation_file, 0o640)
             config['ipv6']['prefix'] = ipv6.get('prefix', '')
 
-        # Step 4: Add gateway address to bridge for VM connectivity
+        # Step 4: Create dummy interface with host's own routable IPv6 address
+        # The host's wg-broker address (::201) has routing issues due to the
+        # WireGuard tunnel topology. A dummy interface with ::202 sidesteps
+        # this by giving the host a separate routable /128 address.
+        prefix = config.get('ipv6', {}).get('prefix', '')
+        if prefix:
+            import ipaddress as _ipaddress_step4
+            try:
+                network = _ipaddress_step4.IPv6Network(prefix, strict=False)
+                host_addr = str(network.network_address + 2)
+
+                # Load dummy module
+                subprocess.run(
+                    ['modprobe', 'dummy'],
+                    capture_output=True, timeout=10
+                )
+                Path('/etc/modules-load.d/dummy.conf').write_text('dummy\n')
+
+                # Create and configure dummy0
+                subprocess.run(
+                    ['ip', 'link', 'add', 'dummy0', 'type', 'dummy'],
+                    capture_output=True, timeout=10
+                )
+                subprocess.run(
+                    ['ip', 'link', 'set', 'dummy0', 'up'],
+                    capture_output=True, timeout=10
+                )
+                subprocess.run(
+                    ['ip', '-6', 'addr', 'add', f'{host_addr}/128', 'dev', 'dummy0'],
+                    capture_output=True, timeout=10
+                )
+                subprocess.run(
+                    ['ip', '-6', 'route', 'add', f'{host_addr}/128', 'dev', 'wg-broker'],
+                    capture_output=True, timeout=10
+                )
+
+                # Persist via systemd oneshot (works on both Proxmox and standard Debian
+                # — Proxmox bypasses ifupdown, so interfaces.d is not reliable)
+                service_content = f"""[Unit]
+Description=BlockHost host routable IPv6 (dummy interface)
+After=wg-quick@wg-broker.service
+Wants=wg-quick@wg-broker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip link add dummy0 type dummy
+ExecStart=/sbin/ip link set dummy0 up
+ExecStart=/sbin/ip -6 addr add {host_addr}/128 dev dummy0
+ExecStart=/sbin/ip -6 route add {host_addr}/128 dev wg-broker
+ExecStop=/sbin/ip link del dummy0
+
+[Install]
+WantedBy=multi-user.target
+"""
+                service_file = Path('/etc/systemd/system/blockhost-dummy-ipv6.service')
+                service_file.write_text(service_content)
+                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+                subprocess.run(['systemctl', 'enable', 'blockhost-dummy-ipv6'], capture_output=True, timeout=10)
+            except (ValueError, subprocess.TimeoutExpired) as e:
+                print(f"Warning: Could not create dummy interface: {e}")
+
+        # Step 5: Add gateway address to bridge for VM connectivity
         # VMs use the first host address in the prefix as their IPv6 gateway.
         # This address must exist on the bridge VMs are connected to.
         prefix = config.get('ipv6', {}).get('prefix', '')
@@ -2377,8 +2439,9 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
             dns_zone = broker_data.get('dns_zone', '')
             if prefix:
                 ipv6_network = _ipaddress.IPv6Network(prefix, strict=False)
-                # Host/gateway is first address in prefix (e.g., ::701 for ::700/120)
-                ipv6_address = str(ipv6_network.network_address + 1)
+                # Host's routable address is +2 in prefix (e.g., ::702 for ::700/120)
+                # +1 is the VM gateway on the bridge, +2 is on dummy0 (publicly routable)
+                ipv6_address = str(ipv6_network.network_address + 2)
 
         hostname = None
         use_dns_zone = False
@@ -2435,23 +2498,37 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
                     )
 
                 # Run certbot for HTTP-01 challenge
-                # The signup server needs to be stopped or we use standalone mode
-                result = subprocess.run(
-                    [
-                        'certbot', 'certonly',
-                        '--standalone',
-                        '--non-interactive',
-                        '--agree-tos',
-                        '--register-unsafely-without-email',
-                        '--domain', hostname,
-                        '--cert-path', str(ssl_dir / 'cert.pem'),
-                        '--key-path', str(ssl_dir / 'key.pem'),
-                        '--fullchain-path', str(ssl_dir / 'fullchain.pem'),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=120
+                # Use --http-01-port on a free port, redirect :80 via iptables
+                # (the wizard is already listening on :80)
+                subprocess.run(
+                    ['iptables', '-t', 'nat', '-A', 'PREROUTING',
+                     '-p', 'tcp', '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088'],
+                    capture_output=True, timeout=10
                 )
+                try:
+                    result = subprocess.run(
+                        [
+                            'certbot', 'certonly',
+                            '--standalone',
+                            '--http-01-port', '8088',
+                            '--non-interactive',
+                            '--agree-tos',
+                            '--register-unsafely-without-email',
+                            '--domain', hostname,
+                            '--cert-path', str(ssl_dir / 'cert.pem'),
+                            '--key-path', str(ssl_dir / 'key.pem'),
+                            '--fullchain-path', str(ssl_dir / 'fullchain.pem'),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+                finally:
+                    subprocess.run(
+                        ['iptables', '-t', 'nat', '-D', 'PREROUTING',
+                         '-p', 'tcp', '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088'],
+                        capture_output=True, timeout=10
+                    )
 
                 if result.returncode == 0:
                     https_config['tls_mode'] = 'letsencrypt'
@@ -2568,13 +2645,17 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
         try_files $uri $uri/ /signup.html;
     }}
 
-    # Admin panel (reverse proxy)
-    location /admin {{
+    # Admin panel (reverse proxy — strip /admin prefix via trailing slash)
+    location /admin/ {{
         proxy_pass http://127.0.0.1:8443/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect / /admin/;
+    }}
+    location = /admin {{
+        return 301 /admin/;
     }}
 }}
 
