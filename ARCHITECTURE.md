@@ -1017,27 +1017,33 @@ provisioner_steps  # list[dict] from get_finalization_steps() metadata: {id, lab
 
 ### Test Setup API (`/api/setup-test`)
 
-Testing-only endpoint that bypasses the browser wizard for CI automation.
+Testing-only endpoint (legacy). Accepts all wizard config in a single JSON POST.
+Not used by CI anymore — CI steps through the wizard pages like a real user.
 
 - **Guard**: Returns 404 unless `/etc/blockhost/.testing-mode` exists (created by `build-iso.sh --testing`)
 - **Auth**: Verifies OTP from request body (same as `/login`)
-- **Flow**: Populates Flask session → auto-detects Proxmox → triggers finalization
+- **Flow**: Populates Flask session → triggers finalization
 - **Poll**: Returns `poll_url: /api/finalize/status` (use cookie jar for session)
 
 ### CI Provision Script (`testing/ci-provision.sh`)
 
-VM lifecycle automation for integration tests:
+VM lifecycle automation for integration tests. Steps through the wizard like a real user
+(form POSTs to each wizard page, server-side wallet generation, then finalization).
 
 ```
-Phase 1: virt-install (ISO boot, virbr0 NAT network)
-Phase 2: Wait for preseed install (VM shuts off)
-Phase 3: Eject ISO, boot from HDD (first-boot begins)
-Phase 4: Poll SSH + /run/blockhost/otp.json (first-boot complete)
-Phase 5: Read OTP via SSH
-Phase 6: POST /api/setup-test with OTP + config JSON
-Phase 7: Poll /api/finalize/status until completed
-Output:  VM_NAME, VM_IP (to GITHUB_OUTPUT if in Actions)
+Phase 1:    virt-install (ISO boot, virbr0 NAT network)
+Phase 2:    Wait for preseed install (VM shuts off)
+Phase 3:    Eject ISO, boot from HDD (first-boot begins)
+Phase 4:    Poll SSH + /run/blockhost/otp.json (first-boot complete)
+Phase 5:    Read OTP via SSH
+Phase 5.5:  Step through wizard (login → wallet → network → storage →
+            generate-wallet → fund → blockchain → provisioner → ipv6 → admin)
+Phase 6:    POST /api/finalize, poll /api/finalize/status until completed
+Phase 7-9:  Read contracts, reboot, verify services
+Output:     VM_NAME, VM_IP, NFT_CONTRACT, REQUESTS_CONTRACT (to GITHUB_OUTPUT)
 ```
+
+Backend is auto-detected from the config file's provisioner section key (e.g., `proxmox` or `libvirt`).
 
 ### GitHub Secrets (for integration workflow)
 

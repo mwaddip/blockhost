@@ -3,9 +3,9 @@
 # BlockHost CI Provisioning — VM Lifecycle Script
 #
 # Creates a VM from the BlockHost ISO, waits for preseed + first-boot,
-# retrieves OTP, submits wizard config via /api/setup-test, and polls
-# finalization until complete (or it fails, which it will, because
-# that's what software does).
+# retrieves OTP, steps through the wizard (same flow as a real user),
+# and polls finalization until complete (or it fails, which it will,
+# because that's what software does).
 #
 # Usage:
 #   ./testing/ci-provision.sh --iso <path> --config <json-file>
@@ -105,7 +105,7 @@ while [ $# -gt 0 ]; do
             echo ""
             echo "Options:"
             echo "  --iso <path>       Path to BlockHost ISO"
-            echo "  --config <file>    JSON config for /api/setup-test"
+            echo "  --config <file>    JSON config (blockchain, provisioner, IPv6 settings)"
             echo "  --name <name>      VM name (default: blockhost-ci-PID)"
             echo "  --destroy <name>   Destroy a VM and remove storage"
             echo "  --ram <MB>         RAM in MB (default: 8192)"
@@ -151,6 +151,10 @@ jq -e '.otp' "$CONFIG_FILE" > /dev/null 2>&1 && \
 jq -e '.blockchain' "$CONFIG_FILE" > /dev/null 2>&1 || \
     fail "Config file must contain 'blockchain' section"
 
+# Detect backend from config file — the provisioner key is whichever isn't a common key
+BACKEND=$(jq -r 'del(.admin_public_secret, .blockchain, .ipv6, .admin_commands) | keys[0]' "$CONFIG_FILE")
+[ -n "$BACKEND" ] && [ "$BACKEND" != "null" ] || fail "Could not detect backend from config file (no provisioner section)"
+
 # Secrets from environment — admin key authenticates + funds the VM's fresh deployer wallet
 [ -n "${DEPLOYER_KEY:-}" ]          || fail "DEPLOYER_KEY env var required (admin private key)"
 
@@ -162,6 +166,7 @@ info "Admin wallet: $ADMIN_WALLET"
 info "VM name:    $VM_NAME"
 info "ISO:        $ISO_PATH"
 info "Config:     $CONFIG_FILE"
+info "Backend:    $BACKEND"
 echo ""
 
 # =============================================================================
@@ -283,23 +288,70 @@ STABLE_IP="$VM_IP"
 info "Locking IP to $STABLE_IP for remaining phases"
 
 # =============================================================================
-# Phase 5.5 — Generate fresh deployer wallet for VM
+# Phase 5.5 — Step through wizard (same flow as a real user)
 # =============================================================================
-info "Phase 5.5: Generating fresh deployer wallet"
 
 RPC_URL=$(jq -r '.blockchain.rpc_url' "$CONFIG_FILE")
 [ -n "$RPC_URL" ] || fail "blockchain.rpc_url missing from config"
 USDC_SEPOLIA="0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
 
-# Fresh keypair — this becomes the VM's deployer.key (admin key never touches the VM)
-VM_WALLET_JSON=$(cast wallet new --json)
-VM_DEPLOYER_KEY=$(echo "$VM_WALLET_JSON" | jq -r '.[0].private_key')
-VM_DEPLOYER_ADDR=$(echo "$VM_WALLET_JSON" | jq -r '.[0].address')
+# Helper: POST form data to a wizard page, expect 302 redirect on success
+wizard_post() {
+    local step_name="$1"
+    local url="$2"
+    shift 2
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -X POST "http://${STABLE_IP}${url}" \
+        "$@")
+    if [ "$http_code" = "302" ]; then
+        pass "Wizard: $step_name"
+    else
+        fail "Wizard: $step_name failed (HTTP $http_code)"
+    fi
+}
 
-[ -n "$VM_DEPLOYER_KEY" ] || fail "Could not generate fresh deployer wallet"
+# --- 5.5a: Authenticate with OTP ---
+info "Phase 5.5a: Authenticating (OTP)"
+wizard_post "Login" "/login" -d "otp=${OTP_CODE}"
+
+# --- 5.5b: Connect admin wallet ---
+info "Phase 5.5b: Connecting admin wallet"
+ADMIN_PUBLIC_SECRET=$(jq -r '.admin_public_secret // "blockhost-access"' "$CONFIG_FILE")
+ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOYER_KEY")
+[ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
+
+wizard_post "Wallet" "/wizard/wallet" \
+    -d "admin_wallet=${ADMIN_WALLET}" \
+    -d "admin_signature=${ADMIN_SIGNATURE}" \
+    -d "public_secret=${ADMIN_PUBLIC_SECRET}"
+
+# --- 5.5c: Network (DHCP already working) ---
+info "Phase 5.5c: Network configuration"
+wizard_post "Network" "/wizard/network" -d "method=dhcp"
+
+# --- 5.5d: Storage (detect root disk) ---
+info "Phase 5.5d: Storage configuration"
+ROOT_DISK=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${STABLE_IP}" \
+    "lsblk -ndo NAME,TYPE | grep disk | head -1 | awk '{print \$1}'" 2>/dev/null)
+[ -n "$ROOT_DISK" ] || ROOT_DISK="vda"
+wizard_post "Storage" "/wizard/storage" -d "disk=${ROOT_DISK}"
+
+# --- 5.5e: Generate deployer wallet (server-side, like the wizard does) ---
+info "Phase 5.5e: Generating deployer wallet"
+WALLET_RESP=$(curl -s \
+    -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+    -X POST "http://${STABLE_IP}/api/blockchain/generate-wallet")
+VM_DEPLOYER_KEY=$(echo "$WALLET_RESP" | jq -r '.private_key')
+VM_DEPLOYER_ADDR=$(echo "$WALLET_RESP" | jq -r '.address')
+WALLET_OK=$(echo "$WALLET_RESP" | jq -r '.success')
+
+[ "$WALLET_OK" = "true" ] || fail "Could not generate wallet: $(echo "$WALLET_RESP" | jq -r '.error // "unknown"')"
 info "VM deployer: $VM_DEPLOYER_ADDR"
 
-# Fund with ETH + USDC using explicit nonces to avoid race on public RPC
+# --- 5.5f: Fund the deployer wallet ---
+info "Phase 5.5f: Funding deployer wallet"
 NONCE=$(cast nonce "$ADMIN_WALLET" --rpc-url "$RPC_URL")
 
 info "Sending 0.1 ETH to VM deployer (nonce $NONCE)..."
@@ -318,73 +370,87 @@ cast send "$USDC_SEPOLIA" "transfer(address,uint256)" \
 
 pass "VM deployer funded: 0.1 ETH + 10 USDC"
 
-# =============================================================================
-# Phase 6 — Submit wizard config via /api/setup-test
-# =============================================================================
-info "Phase 6: Submitting wizard config"
+# --- 5.5g: Submit blockchain config ---
+info "Phase 5.5g: Blockchain configuration"
+wizard_post "Blockchain" "/wizard/blockchain" \
+    --data-urlencode "wallet_mode=generate" \
+    --data-urlencode "deployer_key=${VM_DEPLOYER_KEY}" \
+    --data-urlencode "chain_id=$(jq -r '.blockchain.chain_id' "$CONFIG_FILE")" \
+    --data-urlencode "rpc_url=$(jq -r '.blockchain.rpc_url' "$CONFIG_FILE")" \
+    --data-urlencode "contract_mode=$(jq -r '.blockchain.contract_mode' "$CONFIG_FILE")" \
+    --data-urlencode "plan_name=$(jq -r '.blockchain.plan_name' "$CONFIG_FILE")" \
+    --data-urlencode "plan_price_cents=$(jq -r '.blockchain.plan_price_cents' "$CONFIG_FILE")"
 
-# Generate admin signature (same as MetaMask wallet-connect in wizard)
-ADMIN_PUBLIC_SECRET=$(jq -r '.admin_public_secret // "blockhost-access"' "$CONFIG_FILE")
-ADMIN_SIGNATURE=$(cast wallet sign "$ADMIN_PUBLIC_SECRET" --private-key "$DEPLOYER_KEY")
-[ -n "$ADMIN_SIGNATURE" ] || fail "Could not generate admin signature"
+# =============================================================================
+# Phase 6 — Provisioner + IPv6 + Admin + Finalize
+# =============================================================================
+
+# --- 6a: Submit provisioner config ---
+info "Phase 6a: Provisioner configuration ($BACKEND)"
+
+# Build form data from provisioner section of config file
+PROV_ARGS=()
+while IFS='=' read -r key value; do
+    PROV_ARGS+=(--data-urlencode "$key=$value")
+done < <(jq -r ".$BACKEND | to_entries[] | \"\(.key)=\(.value)\"" "$CONFIG_FILE")
+
+wizard_post "Provisioner ($BACKEND)" "/wizard/$BACKEND" "${PROV_ARGS[@]}"
+
+# --- 6b: Submit IPv6 config ---
+info "Phase 6b: IPv6 configuration"
 
 # Fetch broker registry address from GitHub (single source of truth)
-# CI always uses testnet registry
 REGISTRY_URL="https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/registry-testnet.json"
 BROKER_REGISTRY=$(curl -sf "$REGISTRY_URL" | jq -r '.registry_contract // empty')
 [ -n "$BROKER_REGISTRY" ] || fail "Could not fetch broker registry from $REGISTRY_URL"
 info "Broker registry: $BROKER_REGISTRY"
 
-# Look up the broker's requests contract from the on-chain registry (broker ID 1)
-# getBroker returns a struct; requestsContract is the second address field
+IPV6_MODE=$(jq -r '.ipv6.mode // "broker"' "$CONFIG_FILE")
+wizard_post "IPv6" "/wizard/ipv6" \
+    -d "ipv6_mode=${IPV6_MODE}" \
+    -d "broker_registry=${BROKER_REGISTRY}"
+
+# --- 6c: Submit admin commands config ---
+info "Phase 6c: Admin commands configuration"
+ADMIN_ENABLED=$(jq -r '.admin_commands.enabled // false' "$CONFIG_FILE")
+if [ "$ADMIN_ENABLED" = "true" ]; then
+    wizard_post "Admin commands" "/wizard/admin-commands" \
+        -d "admin_enabled=yes" \
+        --data-urlencode "knock_command=$(jq -r '.admin_commands.knock_command // ""' "$CONFIG_FILE")" \
+        --data-urlencode "knock_ports=$(jq -r '.admin_commands.knock_ports // [] | join(",")' "$CONFIG_FILE")" \
+        --data-urlencode "knock_timeout=$(jq -r '.admin_commands.knock_timeout // 300' "$CONFIG_FILE")"
+else
+    wizard_post "Admin commands" "/wizard/admin-commands" -d "admin_enabled=no"
+fi
+
+# --- 6d: Trigger finalization ---
+info "Phase 6d: Starting finalization"
+
+RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+    -X POST "http://${STABLE_IP}/api/finalize" \
+    -H "Content-Type: application/json" \
+    -d '{}')
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ]; then
+    ERROR=$(echo "$BODY" | jq -r '.error // .message // "unknown error"' 2>/dev/null || echo "$BODY")
+    fail "Finalize API returned $HTTP_CODE: $ERROR"
+fi
+
+STATUS=$(echo "$BODY" | jq -r '.status')
+pass "Finalization started (status: $STATUS)"
+
+# Look up broker requests contract for cleanup (needed by GitHub Actions cleanup job)
 RAW=$(cast call "$BROKER_REGISTRY" "getBroker(uint256)" 1 --rpc-url "$RPC_URL") \
     || fail "Could not call getBroker on registry $BROKER_REGISTRY"
-# Struct has offset pointer (32B), then operator (32B), then requestsContract (32B)
-# Address is last 20 bytes (40 hex chars) of its 32-byte slot
 RAW_HEX="${RAW#0x}"
 REQUESTS_CONTRACT="0x${RAW_HEX:152:40}"
 [ "$REQUESTS_CONTRACT" != "0x0000000000000000000000000000000000000000" ] \
     || fail "Requests contract is zero address — broker not registered?"
 info "Requests contract: $REQUESTS_CONTRACT"
-
-# Inject OTP + fresh deployer key + broker registry into config
-# Note: DEPLOYER_KEY (admin) authenticates; VM_DEPLOYER_KEY (fresh) goes to the VM
-SUBMIT_JSON=$(jq \
-    --arg otp "$OTP_CODE" \
-    --arg deployer_key "$VM_DEPLOYER_KEY" \
-    --arg admin_wallet "$ADMIN_WALLET" \
-    --arg admin_sig "$ADMIN_SIGNATURE" \
-    --arg broker_registry "$BROKER_REGISTRY" \
-    '. + {
-        otp: $otp,
-        admin_wallet: $admin_wallet,
-        admin_signature: $admin_sig
-    } | .blockchain += {
-        deployer_key: $deployer_key
-    } | .ipv6 += {
-        broker_registry: $broker_registry
-    }' "$CONFIG_FILE")
-
-RESPONSE=$(curl -s -w "\n%{http_code}" \
-    -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
-    -X POST "http://${VM_IP}/api/setup-test" \
-    -H "Content-Type: application/json" \
-    -d "$SUBMIT_JSON")
-
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" = "404" ]; then
-    fail "API returned 404 — ISO was not built with --testing flag"
-fi
-
-if [ "$HTTP_CODE" != "200" ]; then
-    ERROR=$(echo "$BODY" | jq -r '.error // .message // "unknown error"' 2>/dev/null || echo "$BODY")
-    fail "API returned $HTTP_CODE: $ERROR"
-fi
-
-STATUS=$(echo "$BODY" | jq -r '.status')
-pass "Wizard submitted (status: $STATUS)"
 
 # =============================================================================
 # Phase 7 — Poll finalization until complete
@@ -395,7 +461,7 @@ ELAPSED=0
 while [ "$ELAPSED" -lt "$FINALIZE_TIMEOUT" ]; do
     POLL=$(curl -s \
         -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
-        "http://${VM_IP}/api/finalize/status" 2>/dev/null || echo '{}')
+        "http://${STABLE_IP}/api/finalize/status" 2>/dev/null || echo '{}')
 
     STATUS=$(echo "$POLL" | jq -r '.status // "unknown"')
     STEP=$(echo "$POLL" | jq -r '.current_step // "none"')
@@ -430,7 +496,7 @@ pass "Finalization complete ($(elapsed))"
 # =============================================================================
 info "Phase 8: Reading deployed contract addresses"
 
-NFT_CONTRACT=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" \
+NFT_CONTRACT=$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${STABLE_IP}" \
     "python3 -c \"import yaml; c=yaml.safe_load(open('/etc/blockhost/web3-defaults.yaml')); print(c['blockchain']['nft_contract'])\"")
 [ -n "$NFT_CONTRACT" ] && [ "$NFT_CONTRACT" != "None" ] || fail "Could not read NFT contract address from VM"
 pass "NFT contract: $NFT_CONTRACT"
@@ -440,7 +506,7 @@ pass "NFT contract: $NFT_CONTRACT"
 # =============================================================================
 info "Phase 9: Rebooting VM (services start after reboot)"
 
-sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${VM_IP}" "shutdown -r now" 2>/dev/null || true
+sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${STABLE_IP}" "shutdown -r now" 2>/dev/null || true
 
 # Wait for SSH to go down
 sleep 10
