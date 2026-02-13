@@ -22,7 +22,7 @@ d-i netcfg/hostname string blockhost
 d-i mirror/country string manual
 d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
-d-i mirror/http/proxy string http://192.168.122.1:3142
+d-i mirror/http/proxy string
 
 #
 # Clock and Timezone

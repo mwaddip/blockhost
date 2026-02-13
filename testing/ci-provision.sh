@@ -98,6 +98,7 @@ while [ $# -gt 0 ]; do
         --vcpus)    VCPUS="$2"; shift 2 ;;
         --disk)     DISK_GB="$2"; shift 2 ;;
         --disk-path) DISK_PATH="$2"; shift 2 ;;
+        --apt-proxy) APT_PROXY="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 --iso <path> --config <config.json> [--name <vm-name>]"
             echo "       $0 --destroy <vm-name>"
@@ -110,7 +111,8 @@ while [ $# -gt 0 ]; do
             echo "  --ram <MB>         RAM in MB (default: 8192)"
             echo "  --vcpus <N>        vCPUs (default: 4)"
             echo "  --disk <GB>        Disk in GB (default: 64)"
-    echo "  --disk-path <dir>  Directory for VM disk image (default: libvirt pool)"
+            echo "  --disk-path <dir>  Directory for VM disk image (default: libvirt pool)"
+            echo "  --apt-proxy <url>  apt-cacher-ng proxy (passed to build-iso.sh if building)"
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;

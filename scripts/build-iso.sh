@@ -24,7 +24,7 @@ OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 TESTING_MODE=false
 BUILD_DEBS=false
 BACKEND=""
-APT_PROXY="http://192.168.122.1:3142"
+APT_PROXY=""
 
 # Colors
 RED='\033[0;31m'
@@ -44,12 +44,14 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --build-deb       Build all .deb packages from submodules before ISO creation"
-    echo "  --testing         Enable testing mode (apt proxy, SSH root login)"
+    echo "  --testing         Enable testing mode (SSH root login, testing marker)"
+    echo "  --apt-proxy <url> Use apt-cacher-ng proxy (e.g. http://192.168.122.1:3142)"
     echo "  --help            Show this help message"
     echo ""
     echo "Testing mode enables:"
-    echo "  - apt proxy at $APT_PROXY for faster package downloads"
     echo "  - PermitRootLogin yes in sshd_config for easier debugging"
+    echo "  - /etc/blockhost/.testing-mode marker for validation scripts"
+    echo "  - apt proxy for faster package downloads (only with --apt-proxy)"
 }
 
 parse_args() {
@@ -69,6 +71,14 @@ parse_args() {
                 ;;
             --testing)
                 TESTING_MODE=true
+                shift
+                ;;
+            --apt-proxy)
+                APT_PROXY="$2"
+                shift 2
+                ;;
+            --apt-proxy=*)
+                APT_PROXY="${1#*=}"
                 shift
                 ;;
             --help|-h)
@@ -240,10 +250,10 @@ configure_testing_mode() {
         warn "Generate with: ssh-keygen -t ed25519 -f testing/blockhost-test-key -N ''"
     fi
 
-    # Ensure apt proxy is set in preseed
     PRESEED_FILE="${ISO_EXTRACT}/preseed.cfg"
-    if [ -f "$PRESEED_FILE" ]; then
-        # Update or add apt proxy
+
+    # Set apt proxy in preseed if provided
+    if [ -n "$APT_PROXY" ] && [ -f "$PRESEED_FILE" ]; then
         if grep -q "mirror/http/proxy" "$PRESEED_FILE"; then
             sed -i "s|d-i mirror/http/proxy string.*|d-i mirror/http/proxy string ${APT_PROXY}|" "$PRESEED_FILE"
         else
@@ -279,9 +289,11 @@ if [ -n "${SSH_PUBKEY}" ]; then
     echo "SSH public key added to /root/.ssh/authorized_keys" >> /var/log/blockhost-install.log
 fi
 
-# Set apt proxy for post-install
-mkdir -p /etc/apt/apt.conf.d
-echo 'Acquire::http::Proxy "http://192.168.122.1:3142";' > /etc/apt/apt.conf.d/00proxy
+# Set apt proxy for post-install (only if provided at build time)
+if [ -n "${APT_PROXY}" ]; then
+    mkdir -p /etc/apt/apt.conf.d
+    echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/00proxy
+fi
 
 # Ensure SSH is always accessible in testing mode (bypass pve-firewall)
 # Persist across reboots via /etc/network/interfaces post-up or iptables-persistent
@@ -353,8 +365,10 @@ main() {
 
     if [ "$TESTING_MODE" = "true" ]; then
         log "TESTING MODE ENABLED"
-        log "  - apt proxy: $APT_PROXY"
         log "  - SSH root login: enabled"
+        if [ -n "$APT_PROXY" ]; then
+            log "  - apt proxy: $APT_PROXY"
+        fi
     fi
 
     if [ "$BUILD_DEBS" = "true" ]; then
@@ -386,7 +400,9 @@ main() {
         log "Testing mode features:"
         log "  - Root password: blockhost"
         log "  - SSH root login: enabled"
-        log "  - apt proxy: $APT_PROXY"
+        if [ -n "$APT_PROXY" ]; then
+            log "  - apt proxy: $APT_PROXY"
+        fi
     fi
 }
 
