@@ -23,58 +23,20 @@
         </div>
     </div>
 
-    <!-- Blockchain Summary -->
+    <!-- Engine Summary (dynamic — loaded from engine plugin or fallback) -->
+    {% if engine_summary_template %}
+        {% include engine_summary_template %}
+    {% elif engine_summary %}
     <div class="summary-section">
         <h3>Blockchain</h3>
+        {% for key, value in engine_summary.items() %}
         <div class="summary-item">
-            <span class="summary-label">Network</span>
-            <span class="summary-value">{{ summary.blockchain.network_name }} (Chain ID: {{ summary.blockchain.chain_id }})</span>
+            <span class="summary-label">{{ key | replace('_', ' ') | title }}</span>
+            <span class="summary-value">{{ value }}</span>
         </div>
-        <div class="summary-item">
-            <span class="summary-label">RPC Endpoint</span>
-            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.rpc_url | truncate(50) }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Deployer Address</span>
-            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.deployer_address }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Contracts</span>
-            <span class="summary-value">{{ 'Deploy new' if summary.blockchain.deploy_contracts else 'Use existing' }}</span>
-        </div>
-        {% if not summary.blockchain.deploy_contracts %}
-        <div class="summary-item">
-            <span class="summary-label">NFT Contract</span>
-            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.nft_contract }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Subscriptions</span>
-            <span class="summary-value" style="font-size: 0.75rem;">{{ summary.blockchain.subscription_contract }}</span>
-        </div>
-        {% endif %}
-        <div class="summary-item">
-            <span class="summary-label">Plan Name</span>
-            <span class="summary-value">{{ summary.blockchain.plan_name }}</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Price per Day</span>
-            <span class="summary-value">{{ summary.blockchain.plan_price_cents }} cents (${{ '%.2f' | format(summary.blockchain.plan_price_cents / 100) }}/day)</span>
-        </div>
-        <div class="summary-item">
-            <span class="summary-label">Revenue Sharing</span>
-            <span class="summary-value">
-                {% if summary.blockchain.revenue_share_enabled %}
-                    {{ summary.blockchain.revenue_share_percent }}% to
-                    {% set recipients = [] %}
-                    {% if summary.blockchain.revenue_share_dev %}{% set _ = recipients.append('Dev') %}{% endif %}
-                    {% if summary.blockchain.revenue_share_broker %}{% set _ = recipients.append('Broker') %}{% endif %}
-                    {{ recipients | join(' + ') or 'None selected' }}
-                {% else %}
-                    Disabled
-                {% endif %}
-            </span>
-        </div>
+        {% endfor %}
     </div>
+    {% endif %}
 
     <!-- Provisioner Summary (dynamic — loaded from provisioner plugin or fallback) -->
     {% if provisioner_summary_template %}
@@ -160,58 +122,7 @@
     </div>
 
     <ul class="progress-list" id="progress-steps">
-        <li id="step-keypair" data-step="keypair">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Generate server keypair</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('keypair')">Retry</button>
-        </li>
-        <li id="step-wallet" data-step="wallet">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Configure deployer wallet</span>
-                <span class="step-status"></span>
-                <div id="wallet-data" class="hidden" style="margin-top: 0.5rem;">
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Deployer:</span>
-                        <code id="wallet-deployer-addr" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('wallet-deployer-addr')" title="Copy">&#128203;</button>
-                    </div>
-                </div>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('wallet')">Retry</button>
-        </li>
-        <li id="step-contracts" data-step="contracts">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name" id="step-contracts-text">Deploy smart contracts</span>
-                <span class="step-status"></span>
-                <div id="contract-addresses" class="hidden" style="margin-top: 0.5rem;">
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">NFT:</span>
-                        <code id="contract-nft-addr" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('contract-nft-addr')" title="Copy">&#128203;</button>
-                    </div>
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Subscriptions:</span>
-                        <code id="contract-sub-addr" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('contract-sub-addr')" title="Copy">&#128203;</button>
-                    </div>
-                </div>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('contracts')">Retry</button>
-        </li>
-        <li id="step-config" data-step="config">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Write configuration files</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('config')">Retry</button>
-        </li>
-        {% for step in provisioner_steps %}
+        {% for step in all_finalization_steps %}
         <li id="step-{{ step.id }}" data-step="{{ step.id }}">
             <span class="step-icon">&#9675;</span>
             <div class="step-content">
@@ -220,92 +131,11 @@
                 {% if step.hint %}
                 <span class="step-hint">{{ step.hint }}</span>
                 {% endif %}
+                <div id="step-{{ step.id }}-data" class="step-data hidden"></div>
             </div>
             <button class="btn btn-small btn-retry hidden" onclick="retryStep('{{ step.id }}')">Retry</button>
         </li>
         {% endfor %}
-        <li id="step-ipv6" data-step="ipv6">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Configure IPv6</span>
-                <span class="step-status"></span>
-                <div id="ipv6-data" class="hidden" style="margin-top: 0.5rem;">
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Prefix:</span>
-                        <code id="ipv6-prefix" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('ipv6-prefix')" title="Copy">&#128203;</button>
-                    </div>
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Mode:</span>
-                        <code id="ipv6-mode" class="contract-addr"></code>
-                    </div>
-                </div>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('ipv6')">Retry</button>
-        </li>
-        <li id="step-https" data-step="https">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Configure HTTPS for signup</span>
-                <span class="step-status"></span>
-                <div id="https-data" class="hidden" style="margin-top: 0.5rem;">
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Hostname:</span>
-                        <code id="https-hostname" class="contract-addr"></code>
-                        <button type="button" class="btn-copy" onclick="copyAddress('https-hostname')" title="Copy">&#128203;</button>
-                    </div>
-                </div>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('https')">Retry</button>
-        </li>
-        <li id="step-signup" data-step="signup">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Generate signup page</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('signup')">Retry</button>
-        </li>
-        <li id="step-nginx" data-step="nginx">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Setting up nginx reverse proxy</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('nginx')">Retry</button>
-        </li>
-        <li id="step-mint_nft" data-step="mint_nft">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Mint admin NFT</span>
-                <span class="step-status"></span>
-                <div id="mint-nft-data" class="hidden" style="margin-top: 0.5rem;">
-                    <div id="mint-nft-message" class="hidden" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.25rem;"></div>
-                    <div class="contract-addr-row">
-                        <span class="contract-addr-label">Token ID:</span>
-                        <code id="mint-nft-token-id" class="contract-addr"></code>
-                    </div>
-                </div>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('mint_nft')">Retry</button>
-        </li>
-        <li id="step-finalize" data-step="finalize">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Finalize setup</span>
-                <span class="step-status"></span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('finalize')">Retry</button>
-        </li>
-        <li id="step-validate" data-step="validate">
-            <span class="step-icon">&#9675;</span>
-            <div class="step-content">
-                <span class="step-name">Validate system</span>
-                <span class="step-status"></span>
-                <span class="step-hint">(testing builds only)</span>
-            </div>
-            <button class="btn btn-small btn-retry hidden" onclick="retryStep('validate')">Retry</button>
-        </li>
     </ul>
 
     <!-- Validation Output (testing mode only) -->
@@ -356,7 +186,7 @@
 
     <div class="alert alert-success" style="margin: 2rem 0;">
         <strong>Important:</strong> The system is now operational. VMs will be provisioned automatically
-        when users purchase subscriptions on the blockchain.
+        when users purchase subscriptions.
     </div>
 
     <div class="summary-section" style="text-align: left;">
@@ -365,9 +195,9 @@
             {% if prov_ui.management_url %}
             <li>Access management at <a href="{{ prov_ui.management_url }}">{{ prov_ui.management_url }}</a></li>
             {% endif %}
-            <li>The blockhost-engine is monitoring the blockchain for subscription events</li>
-            <li>VMs will be created automatically when subscriptions are purchased</li>
-            <li>Users connect to their VMs using NFT-based authentication</li>
+            <li>The engine is monitoring for new subscriptions</li>
+            <li>VMs will be created automatically when orders are placed</li>
+            <li>Users connect to their VMs using token-based authentication</li>
         </ul>
     </div>
 
@@ -432,6 +262,10 @@
     font-size: 0.7rem;
     color: var(--text-muted);
     font-style: italic;
+}
+
+.step-data {
+    margin-top: 0.5rem;
 }
 
 .progress-list li.completed .step-icon {
@@ -527,26 +361,11 @@
 {% block extra_js %}
 <script>
 let pollInterval;
-// Step order is rendered from the backend finalization step list (dynamic — includes provisioner steps)
-const stepOrder = {{ finalization_step_ids | tojson }};
-// Step names are resolved from the DOM (step-name spans), with fallback for unknown steps
+// Step metadata from backend (dynamic — includes engine + provisioner + installer steps)
+const allSteps = {{ all_finalization_steps | tojson }};
+const stepOrder = allSteps.map(s => s.id);
 const stepNames = {};
-stepOrder.forEach(id => {
-    const li = document.getElementById('step-' + id);
-    if (li) {
-        const nameEl = li.querySelector('.step-name');
-        stepNames[id] = nameEl ? nameEl.textContent.trim() : id;
-    } else {
-        stepNames[id] = id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    }
-});
-
-// Hide progress-list steps that aren't in stepOrder (provisioner-specific steps)
-document.querySelectorAll('#progress-steps li[data-step]').forEach(li => {
-    if (!stepOrder.includes(li.dataset.step)) {
-        li.style.display = 'none';
-    }
-});
+allSteps.forEach(s => { stepNames[s.id] = s.label; });
 
 // Check for existing state on page load
 document.addEventListener('DOMContentLoaded', function() {
@@ -597,11 +416,6 @@ document.getElementById('summary-form').addEventListener('submit', function(e) {
 function showProgressCard() {
     document.getElementById('summary-card').classList.add('hidden');
     document.getElementById('progress-card').classList.remove('hidden');
-
-    // Update contracts step text based on mode
-    {% if not summary.blockchain.deploy_contracts %}
-    document.getElementById('step-contracts-text').textContent = 'Verify contract addresses';
-    {% endif %}
 }
 
 function startFinalization() {
@@ -710,10 +524,17 @@ function resetAndRestart() {
         // Reset UI
         stepOrder.forEach(step => {
             const li = document.getElementById('step-' + step);
+            if (!li) return;
             li.classList.remove('completed', 'in-progress', 'failed');
             li.querySelector('.step-icon').innerHTML = '&#9675;';
             li.querySelector('.step-status').textContent = '';
             li.querySelector('.btn-retry').classList.add('hidden');
+            // Clear step data
+            const dataDiv = document.getElementById('step-' + step + '-data');
+            if (dataDiv) {
+                dataDiv.innerHTML = '';
+                dataDiv.classList.add('hidden');
+            }
         });
 
         document.getElementById('progress-fill').style.width = '0%';
@@ -762,6 +583,69 @@ function pollStatus() {
     });
 }
 
+function formatLabel(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+}
+
+function renderStepData(stepId, container, data) {
+    container.innerHTML = '';
+    for (const key of Object.keys(data)) {
+        const value = data[key];
+        if (value === null || value === undefined) continue;
+
+        // Render 'message' as muted text
+        if (key === 'message') {
+            const msg = document.createElement('div');
+            msg.style.cssText = 'font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.25rem;';
+            msg.textContent = value;
+            container.appendChild(msg);
+            continue;
+        }
+
+        // Handle nested objects (one level deep)
+        if (typeof value === 'object' && !Array.isArray(value)) {
+            for (const subKey of Object.keys(value)) {
+                const subValue = value[subKey];
+                if (subValue === null || subValue === undefined) continue;
+                appendDataRow(container, stepId + '-' + subKey, subKey, String(subValue));
+            }
+            continue;
+        }
+
+        appendDataRow(container, stepId + '-' + key, key, String(value));
+    }
+}
+
+function appendDataRow(container, id, key, value) {
+    const row = document.createElement('div');
+    row.className = 'contract-addr-row';
+
+    const label = document.createElement('span');
+    label.className = 'contract-addr-label';
+    label.textContent = formatLabel(key) + ':';
+
+    const code = document.createElement('code');
+    code.className = 'contract-addr';
+    code.id = 'step-data-' + id.replace(/[^a-z0-9_-]/gi, '-');
+    code.textContent = value;
+
+    row.appendChild(label);
+    row.appendChild(code);
+
+    // Add copy button for address-like or long values
+    if (value.startsWith('0x') || value.includes(':') || value.length > 20) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-copy';
+        btn.title = 'Copy';
+        btn.innerHTML = '&#128203;';
+        btn.onclick = function() { copyAddress(code.id); };
+        row.appendChild(btn);
+    }
+
+    container.appendChild(row);
+}
+
 function updateProgress(data) {
     // Update progress bar
     const percent = data.progress || 0;
@@ -773,9 +657,9 @@ function updateProgress(data) {
     const completedSteps = data.completed_steps || [];
     const steps = data.steps || {};
 
-    stepOrder.forEach(stepId => {
+    stepOrder.forEach(function(stepId) {
         const li = document.getElementById('step-' + stepId);
-        if (!li) return;  // Step has no UI element (hidden/internal)
+        if (!li) return;
         const icon = li.querySelector('.step-icon');
         const status = li.querySelector('.step-status');
         const retryBtn = li.querySelector('.btn-retry');
@@ -790,36 +674,13 @@ function updateProgress(data) {
             icon.innerHTML = '&#10003;';
             status.textContent = stepData.completed_at ? 'Completed' : '';
 
-            // Show step data when steps complete
-            if (stepId === 'wallet' && stepData.data && stepData.data.deployer_address) {
-                document.getElementById('wallet-deployer-addr').textContent = stepData.data.deployer_address;
-                document.getElementById('wallet-data').classList.remove('hidden');
-            }
-            if (stepId === 'contracts' && stepData.data && stepData.data.contracts) {
-                const addrs = document.getElementById('contract-addresses');
-                document.getElementById('contract-nft-addr').textContent = stepData.data.contracts.nft || '';
-                document.getElementById('contract-sub-addr').textContent = stepData.data.contracts.subscription || '';
-                addrs.classList.remove('hidden');
-            }
-            if (stepId === 'ipv6' && stepData.data && stepData.data.prefix) {
-                document.getElementById('ipv6-prefix').textContent = stepData.data.prefix;
-                document.getElementById('ipv6-mode').textContent = stepData.data.mode || '';
-                document.getElementById('ipv6-data').classList.remove('hidden');
-            }
-            if (stepId === 'https' && stepData.data && stepData.data.hostname) {
-                document.getElementById('https-hostname').textContent = stepData.data.hostname;
-                document.getElementById('https-data').classList.remove('hidden');
-            }
-            if (stepId === 'mint_nft' && stepData.data) {
-                if (stepData.data.message) {
-                    const msgEl = document.getElementById('mint-nft-message');
-                    msgEl.textContent = stepData.data.message;
-                    msgEl.classList.remove('hidden');
+            // Render step data generically
+            if (stepData.data) {
+                const dataDiv = document.getElementById('step-' + stepId + '-data');
+                if (dataDiv && dataDiv.children.length === 0) {
+                    renderStepData(stepId, dataDiv, stepData.data);
+                    dataDiv.classList.remove('hidden');
                 }
-                if (stepData.data.token_id) {
-                    document.getElementById('mint-nft-token-id').textContent = stepData.data.token_id;
-                }
-                document.getElementById('mint-nft-data').classList.remove('hidden');
             }
         } else if (stepData.status === 'in_progress' || stepId === currentStep) {
             li.classList.add('in-progress');
@@ -838,15 +699,15 @@ function updateProgress(data) {
                 status.parentNode.appendChild(hint);
                 retryBtn.disabled = true;
                 retryBtn.textContent = 'Wait 2m...';
-                let remaining = 120;
-                const countdown = setInterval(() => {
+                var remaining = 120;
+                var countdown = setInterval(function() {
                     remaining--;
                     if (remaining <= 0) {
                         clearInterval(countdown);
                         retryBtn.disabled = false;
                         retryBtn.textContent = 'Retry';
                     } else {
-                        retryBtn.textContent = `Wait ${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}`;
+                        retryBtn.textContent = 'Wait ' + Math.floor(remaining/60) + ':' + String(remaining%60).padStart(2,'0');
                     }
                 }, 1000);
             }
@@ -880,21 +741,21 @@ function fetchValidationOutput() {
     .then(response => response.json())
     .then(data => {
         if (data.success && data.output) {
-            const section = document.getElementById('validation-output-section');
-            const pre = document.getElementById('validation-output');
+            var section = document.getElementById('validation-output-section');
+            var pre = document.getElementById('validation-output');
             pre.textContent = data.output;
             section.classList.remove('hidden');
         }
     })
-    .catch(error => {
+    .catch(function(error) {
         console.error('Error fetching validation output:', error);
     });
 }
 
 function showError(stepId, message) {
-    const errorSection = document.getElementById('error-section');
-    const errorStepName = document.getElementById('error-step-name');
-    const errorMessage = document.getElementById('error-message');
+    var errorSection = document.getElementById('error-section');
+    var errorStepName = document.getElementById('error-step-name');
+    var errorMessage = document.getElementById('error-message');
 
     errorSection.classList.remove('hidden');
     errorStepName.textContent = stepId ? stepNames[stepId] : 'Unknown step';
@@ -902,7 +763,7 @@ function showError(stepId, message) {
 
     // Show retry button on the failed step
     if (stepId) {
-        const li = document.getElementById('step-' + stepId);
+        var li = document.getElementById('step-' + stepId);
         if (li) {
             li.querySelector('.btn-retry').classList.remove('hidden');
         }
@@ -915,28 +776,28 @@ function showError(stepId, message) {
 }
 
 function copyAddress(elementId) {
-    const text = document.getElementById(elementId).textContent;
-    navigator.clipboard.writeText(text).then(() => {
-        const btn = document.getElementById(elementId).nextElementSibling;
+    var text = document.getElementById(elementId).textContent;
+    navigator.clipboard.writeText(text).then(function() {
+        var btn = document.getElementById(elementId).nextElementSibling;
         btn.classList.add('copied');
         btn.innerHTML = '&#10003;';
-        setTimeout(() => {
+        setTimeout(function() {
             btn.classList.remove('copied');
             btn.innerHTML = '&#128203;';
         }, 2000);
-    }).catch(() => {
+    }).catch(function() {
         // Fallback for Firefox on HTTP (clipboard API requires secure context)
-        const range = document.createRange();
+        var range = document.createRange();
         range.selectNodeContents(document.getElementById(elementId));
-        const sel = window.getSelection();
+        var sel = window.getSelection();
         sel.removeAllRanges();
         sel.addRange(range);
         try {
             document.execCommand('copy');
-            const btn = document.getElementById(elementId).nextElementSibling;
+            var btn = document.getElementById(elementId).nextElementSibling;
             btn.classList.add('copied');
             btn.innerHTML = '&#10003;';
-            setTimeout(() => {
+            setTimeout(function() {
                 btn.classList.remove('copied');
                 btn.innerHTML = '&#128203;';
             }, 2000);
@@ -953,7 +814,7 @@ function reboot() {
     }
 
     fetch('/api/reboot', {method: 'POST'})
-    .catch(error => {
+    .catch(function(error) {
         alert('Reboot failed: ' + error.message);
     });
 }

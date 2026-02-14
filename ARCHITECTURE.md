@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-12
+> Last updated: 2026-02-14
 
 ## FILE MAP
 
@@ -29,9 +29,9 @@ blockhost/
 │   │   └── detection.py              # Boot medium detection (220 lines)
 │   └── web/
 │       ├── __init__.py
-│       ├── app.py                    # Flask wizard + routes (~1440 lines)
-│       ├── finalize.py              # Finalization pipeline + step functions (~1510 lines)
-│       ├── utils.py                 # Pure utilities: crypto, validation, YAML, disks (~400 lines)
+│       ├── app.py                    # Flask wizard + routes (~1360 lines)
+│       ├── finalize.py              # Finalization pipeline + step functions (~880 lines)
+│       ├── utils.py                 # Pure utilities: validation, YAML, disks (~275 lines)
 │       ├── validate_system.py        # Post-install validation (~1010 lines)
 │       ├── static/                   # CSS, JS assets
 │       └── templates/
@@ -42,7 +42,6 @@ blockhost/
 │               ├── wallet.html       # Admin wallet connect (pre-wizard)
 │               ├── network.html
 │               ├── storage.html
-│               ├── blockchain.html   # Chain, RPC, wallet, contracts, plan
 │               ├── ipv6.html
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
@@ -163,8 +162,9 @@ Wizard steps (WIZARD_STEPS in app.py, dynamically built):
   Core:
   1. /wizard/network        → DHCP or static IP
   2. /wizard/storage         → Disk selection for LVM
-  3. /wizard/blockchain      → chain_id, rpc_url, wallet (generate/import), contracts (deploy/existing), plan_name, plan_price_cents, revenue_share_*
-  Provisioner (from manifest.setup.wizard_module → Flask Blueprint):
+  Engine (from engine manifest.setup.wizard_module → Flask Blueprint):
+  3. /wizard/<engine>        → chain-specific config (chain_id, rpc_url, wallet, contracts, plan, revenue_share)
+  Provisioner (from provisioner manifest.setup.wizard_module → Flask Blueprint):
   4. /wizard/<provisioner>   → provisioner-specific config (ip_pool, gc_grace_days, ...)
   Post:
   5. /wizard/ipv6            → broker allocation or manual prefix
@@ -183,21 +183,20 @@ POST /api/finalize → run_finalization_with_state() in thread (finalize.py)
   Retry: POST /api/finalize/retry {step_id?}
   Reset: POST /api/finalize/reset
 
-Step dispatch (get_finalization_steps() in finalize.py, dynamically built):
-  Core steps:
-    1   keypair     _finalize_keypair           → server.key, server.pubkey
-    2   wallet      _finalize_wallet            → deployer.key
-    3   contracts   _finalize_contracts         → deploy via cast or verify existing
-    4   config      _finalize_config            → db.yaml (incl. bridge), web3-defaults.yaml, blockhost.yaml
-  Provisioner steps (from manifest.setup.wizard_module.get_finalization_steps()):
+Step dispatch (get_finalization_steps() in finalize.py, dynamically built, 5 phases):
+  Engine pre-steps (from engine module get_finalization_steps()):
+    (varies by engine — e.g. EVM: keypair, wallet, contracts, chain_config)
+  Provisioner steps (from provisioner module get_finalization_steps()):
     (varies by provisioner — e.g. Proxmox: token, terraform, template)
-  Post steps:
-    5+  ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
+  Installer post-steps (hardcoded):
+        ipv6        _finalize_ipv6              → broker-client or manual prefix, WireGuard
         https       _finalize_https             → dns_zone hostname (preferred) or sslip.io fallback, Let's Encrypt cert
         signup      _finalize_signup            → blockhost-generate-signup → /var/www/blockhost/signup.html (static)
         nginx       _finalize_nginx             → install nginx, write reverse proxy config, enable (not start)
-        mint_nft    _finalize_mint_nft          → Mint NFT #0 to admin wallet
-        finalize    _finalize_complete          → .setup-complete marker, enable services, create plan
+  Engine post-steps (from engine module get_post_finalization_steps()):
+    (varies by engine — e.g. EVM: mint_nft, plan, revenue_share)
+  Final steps (hardcoded):
+        finalize    _finalize_complete          → .setup-complete marker, enable services, permissions
         validate    _finalize_validate          → System validation (testing mode only)
 
 Each step: skip if completed, mark running → completed|failed, supports retry.
@@ -365,6 +364,60 @@ POST /api/vms/<name>/{start,stop,kill,destroy}
 
 All data/action endpoints protected by `@login_required`. All POST actions return `{"ok": bool, "error": "..."}`. VM names validated against `^[a-z0-9-]{1,64}$`.
 
+## ENGINE CONTRACT
+
+Full interface specification: `facts/ENGINE_INTERFACE.md`
+
+One active engine per host. Package installs manifest at well-known path.
+
+### Manifest (`/usr/share/blockhost/engine.json`)
+
+```json
+{
+  "name": "evm",
+  "version": "0.1.0",
+  "display_name": "EVM (Ethereum/Polygon)",
+  "setup": {
+    "wizard_module": "blockhost.engine_evm.wizard",
+    "finalization_steps": ["keypair", "wallet", "contracts", "chain_config"],
+    "post_finalization_steps": ["mint_nft", "plan", "revenue_share"]
+  },
+  "config_keys": { "session_key": "blockchain" }
+}
+```
+
+### Discovery (`_discover_engine()` in app.py)
+
+Same pattern as provisioner discovery. Loads manifest JSON, imports wizard module, extracts Flask blueprint.
+
+### Plugin Points
+
+| Extension | Mechanism | Provider |
+|-----------|-----------|----------|
+| Wizard step | Flask Blueprint via `wizard_module` | Engine .deb |
+| Pre-finalization | `get_finalization_steps()` from wizard module | Engine .deb |
+| Post-finalization | `get_post_finalization_steps()` from wizard module | Engine .deb |
+| Summary section | `get_summary_data()` + `get_summary_template()` | Engine .deb |
+| UI parameters | `get_ui_params(session)` → `eng_ui` context variable (optional) | Engine .deb |
+| Address validation | `validate_address(address)` → bool | Engine .deb |
+| Keypair generation | `generate_keypair()` → (private_key, address) | Engine .deb |
+| Progress step metadata | `get_progress_steps_meta()` → list[dict] | Engine .deb |
+
+### Wizard Module Exports
+
+The module at `blockhost.engine_<name>.wizard` must export:
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `blueprint` | `flask.Blueprint` | Routes for wizard page + API endpoints |
+| `get_finalization_steps()` | `-> list[tuple]` | Pre-provisioner steps (keypair, wallet, contracts, config) |
+| `get_post_finalization_steps()` | `-> list[tuple]` | Post-nginx steps (mint, plan, revenue_share) |
+| `get_summary_data(session_data)` | `-> dict` | Summary values for summary page |
+| `get_summary_template()` | `-> str` | Path to custom summary template partial |
+| `get_ui_params(session_data)` | `-> dict` | Chain-specific template variables |
+| `get_progress_steps_meta()` | `-> list[dict]` | Step metadata for progress UI (id, label, hint) |
+| `validate_address(address)` | `-> bool` | Chain-specific address validation |
+
 ## PROVISIONER CONTRACT
 
 Full interface specification: `facts/PROVISIONER_INTERFACE.md`
@@ -436,23 +489,12 @@ session = {
     'admin_public_secret': str,        # ECIES shared secret
     'selected_disk': '/dev/sda',       # from /wizard/storage
 
-    'blockchain': {                     # from /wizard/blockchain
-        'chain_id': '11155111',
-        'rpc_url': 'https://...',
-        'wallet_mode': 'generate'|'import',
-        'deployer_key': '0x...',
-        'contract_mode': 'deploy'|'existing',
-        'nft_contract': '0x...',       # only if existing
-        'subscription_contract': '0x...',
-        'plan_name': 'Basic VM',
-        'plan_price_cents': 50,
-        'revenue_share_enabled': bool,
-        'revenue_share_percent': 1.0,
-        'revenue_share_dev': bool,
-        'revenue_share_broker': bool,
+    '<engine_session_key>': {             # from /wizard/<engine> (key from engine manifest config_keys.session_key)
+        # Engine-specific keys (e.g. EVM: chain_id, rpc_url, deployer_key, contracts, plan, revenue_share)
+        # Structure defined by engine wizard module, not hardcoded in installer
     },
 
-    '<session_key>': {                  # from /wizard/<provisioner> (key from manifest config_keys.session_key)
+    '<prov_session_key>': {             # from /wizard/<provisioner> (key from provisioner manifest config_keys.session_key)
         'ip_network': '192.168.122.0/24',
         'ip_start': '200',
         'ip_end': '250',
@@ -486,21 +528,21 @@ Directory: `/etc/blockhost/`
 
 | File | Format | Owner:Group | Permissions | Written by step | Read by |
 |------|--------|-------------|-------------|-----------------|---------|
-| server.key | hex 64 chars | root:blockhost | 0640 | keypair | blockhost-engine, provisioner |
-| server.pubkey | hex 0x04+... | root:blockhost | 0644 | keypair | signup page, NFT mint |
-| deployer.key | hex 64 chars | root:blockhost | 0640 | wallet | contract calls (cast send) |
-| db.yaml | YAML | root:blockhost | 0644 | config | blockhost-provisioner-proxmox, blockhost-gc |
-| web3-defaults.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, blockhost-provisioner-proxmox |
-| blockhost.yaml | YAML | root:blockhost | 0644 | config | blockhost-engine, signup generator |
+| server.key | hex 64 chars | root:blockhost | 0640 | engine:keypair | blockhost-engine, provisioner |
+| server.pubkey | hex 0x04+... | root:blockhost | 0644 | engine:keypair | signup page, NFT mint |
+| deployer.key | hex 64 chars | root:blockhost | 0640 | engine:wallet | contract calls (cast send) |
+| db.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-provisioner-proxmox, blockhost-gc |
+| web3-defaults.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-engine, blockhost-provisioner-proxmox |
+| blockhost.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-engine, signup generator |
 | https.json | JSON | root:blockhost | 0644 | https | nginx config generation |
 | pve-token | text | root:blockhost | 0640 | token | blockhost-provisioner-proxmox (Terraform) |
 | terraform_ssh_key | PEM | root:blockhost | 0640 | token | Terraform SSH provisioner |
 | terraform_ssh_key.pub | PEM | root:blockhost | 0644 | token | VM authorized_keys |
-| admin-signature.key | hex | root:blockhost | 0640 | config | admin command verification |
-| admin-commands.json | JSON | root:blockhost | 0644 | config | blockhost-engine src/admin/ |
+| admin-signature.key | hex | root:blockhost | 0640 | finalize | admin command verification |
+| admin-commands.json | JSON | root:blockhost | 0644 | finalize | blockhost-engine src/admin/ |
 | broker-allocation.json | JSON | root:blockhost | 0644 | ipv6 | blockhost-broker-client |
-| addressbook.json | JSON | root:blockhost | 0640 | finalize/root-agent | blockhost-engine fund-manager, bw, ab CLIs |
-| revenue-share.json | JSON | root:blockhost | 0644 | finalize | blockhost-engine fund-manager |
+| addressbook.json | JSON | root:blockhost | 0640 | engine:revenue_share/root-agent | blockhost-engine fund-manager, bw, ab CLIs |
+| revenue-share.json | JSON | root:blockhost | 0644 | engine:revenue_share | blockhost-engine fund-manager |
 | hot.key | hex 64 chars | root:blockhost | 0640 | root-agent (auto) | blockhost-engine fund-manager (hot wallet signing) |
 
 ### db.yaml structure
@@ -533,7 +575,7 @@ server_public_key: '0x04...'
 public_secret: 'blockhost-access'
 admin: {wallet_address: '0x...', credential_nft_id: 0, max_command_age: 300, destination_mode: 'self'}
 ```
-`credential_nft_id`: Written by `_finalize_mint_nft` after minting. Maps the `admin` alias in `bw who admin` to an NFT token ID. Default 0 (first mint).
+`credential_nft_id`: Written by engine's `mint_nft` post-step after minting. Maps the `admin` alias in `bw who admin` to an NFT token ID. Default 0 (first mint).
 
 ### addressbook.json structure
 ```json
@@ -789,42 +831,32 @@ Events (monitored by blockhost-monitor):
 ### app.py — Flask wizard, routes, state
 | Symbol | Purpose |
 |--------|---------|
-| CHAIN_NAMES | Chain ID → network name mapping |
-| WIZARD_STEPS | Ordered wizard step list (core + provisioner + post) |
+| WIZARD_STEPS | Ordered wizard step list (core + engine + provisioner + post) |
 | SETUP_STATE_FILE | Path to setup-state.json |
 | class SetupState | Persistent finalization state management |
+| _discover_engine() | Load engine manifest + import wizard module |
+| _discover_provisioner() | Load provisioner manifest + import wizard module |
 | create_app() | Flask app factory with all routes |
-| _run_contract_deployment() | Background contract deployment (uses _jobs) |
 | _build_vm_template() | Background template build (uses _jobs) |
 
 ### finalize.py — Finalization pipeline
 | Function | Purpose |
 |----------|---------|
-| get_finalization_steps(provisioner) | Build step list (core + provisioner + post) |
-| run_finalization_with_state(state, config, prov) | Step dispatcher loop |
-| run_finalization(job_id, config, jobs, prov) | Legacy wrapper |
-| _finalize_keypair | Generate server secp256k1 key |
-| _finalize_wallet | Write deployer.key |
-| _finalize_contracts | Deploy or verify contracts |
-| _deploy_contract_with_forge | Deploy contract via cast send --create |
-| _finalize_config | Write YAML config files (incl. bridge to db.yaml) |
+| get_finalization_steps(provisioner, engine) | Build step list (engine pre + provisioner + post + engine post + final) |
+| run_finalization_with_state(state, config, prov, engine) | Step dispatcher loop |
+| run_finalization(job_id, config, jobs, prov, engine) | Legacy wrapper |
 | _finalize_ipv6 | Broker allocation or manual prefix |
 | _finalize_https | dns_zone / sslip.io hostname + Let's Encrypt |
 | _finalize_signup | blockhost-generate-signup (static file only) |
 | _finalize_nginx | Install + configure nginx reverse proxy |
-| _finalize_mint_nft | Mint NFT #0 to admin wallet |
-| _finalize_complete | Enable services, create subscription plan |
+| _finalize_complete | Permissions, markers, enable services |
 | _finalize_validate | System validation (testing only) |
-| _create_default_plan | Call createPlan() on subscription contract |
 
 ### utils.py — Pure utilities (no Flask dependency)
 | Function | Purpose |
 |----------|---------|
 | detect_disks | List available disks (lsblk) |
-| generate_secp256k1_keypair | Generate wallet keypair |
-| generate_secp256k1_keypair_with_pubkey | Keypair + uncompressed public key |
-| get_address_from_key | Derive address from private key |
-| is_valid_address | Validate 0x + 40 hex |
+| is_valid_address | Validate 0x + 40 hex (abstraction debt — used by wallet page) |
 | is_valid_ipv6_prefix | Validate prefix/length format |
 | get_broker_registry | Look up broker registry by chain_id |
 | get_wallet_balance | eth_getBalance via JSON-RPC |
@@ -837,17 +869,21 @@ Events (monitored by blockhost-monitor):
 
 ## BLOCKCHAIN INTERACTIONS
 
-All on-chain calls from this repo use Foundry `cast` CLI:
+On-chain calls from the installer (chain-agnostic):
 
 | Action | Tool | Contract | Function | Called by |
 |--------|------|----------|----------|-----------|
-| Deploy NFT | cast send --create | AccessCredentialNFT | constructor(name, symbol, imageUri) | _finalize_contracts |
-| Deploy Subscription | cast send --create | BlockhostSubscriptions | constructor(nftContract) | _finalize_contracts |
-| Create plan | cast send | BlockhostSubscriptions | createPlan(string,uint256) | _create_default_plan |
-| Set stablecoin | cast send | BlockhostSubscriptions | setPrimaryStablecoin(address) | _create_default_plan |
-| Mint NFT | cast send | AccessCredentialNFT | mint(address,bytes,string,string,string,string,uint256) | engine mint_nft.py |
-| Check balance | JSON-RPC | — | eth_getBalance | _get_wallet_balance |
 | Broker allocation | broker-client | BrokerRequests | submitRequest(address,bytes) | _finalize_ipv6 |
+
+On-chain calls from the engine wizard plugin (chain-specific, e.g. EVM):
+
+| Action | Tool | Contract | Function | Called by |
+|--------|------|----------|----------|-----------|
+| Deploy contracts | blockhost-deploy-contracts CLI | — | — | engine:contracts step |
+| Create plan | bw plan create CLI | BlockhostSubscriptions | createPlan(string,uint256) | engine:plan step |
+| Set stablecoin | bw config stable CLI | BlockhostSubscriptions | setPrimaryStablecoin(address) | engine:plan step |
+| Mint NFT | blockhost-mint-credential CLI | AccessCredentialNFT | mint(...) | engine:mint_nft step |
+| Init addressbook | ab --init CLI | — | — | engine:revenue_share step |
 
 Runtime on-chain interactions (by submodule services, not this repo):
 
@@ -991,11 +1027,17 @@ Three distinct encryption contexts:
 ### Summary template (summary.html) receives:
 ```python
 summary.network.{ip, gateway}
-summary.blockchain.{chain_id, network_name, rpc_url, deployer_address, deploy_contracts, nft_contract, subscription_contract, plan_name, plan_price_cents, revenue_share_enabled, revenue_share_percent, revenue_share_dev, revenue_share_broker}
-provisioner_summary — dict from provisioner module's get_summary_data(session), or None
-provisioner_summary_template — template path from provisioner module's get_summary_template(), or None
 summary.ipv6.{mode, prefix, broker_node, broker_registry}
 summary.admin.{wallet, enabled, destination_mode, command_count}
+
+engine_summary           # dict from engine module's get_summary_data(session), or None
+engine_summary_template  # template path from engine module's get_summary_template(), or None
+provisioner_summary      # dict from provisioner module's get_summary_data(session), or None
+provisioner_summary_template  # template path from provisioner module's get_summary_template(), or None
+
+all_finalization_steps   # list[dict] — all steps in pipeline order: {id, label, hint?}
+                         # Rendered as dynamic <li> elements in progress list
+                         # Source: engine pre + provisioner + installer post + engine post + final
 ```
 
 ### All templates receive (via context_processor):
@@ -1004,12 +1046,7 @@ wizard_steps  # WIZARD_STEPS list for step bar rendering
 prov_ui       # dict from provisioner module's get_ui_params(session), or {} if no provisioner
               # Keys: management_url, management_label, knock_ports_default, knock_description,
               #        storage_hint, storage_extra_hint (all optional, templates use | default())
-```
-
-### Summary template also receives:
-```python
-provisioner_steps  # list[dict] from get_finalization_steps() metadata: {id, label, hint?}
-                   # Rendered as dynamic <li> elements in progress list (replaces hardcoded provisioner steps)
+eng_ui        # dict from engine module's get_ui_params(session), or {} if no engine
 ```
 
 ## CI/CD
@@ -1044,7 +1081,7 @@ Phase 3:    Eject ISO, boot from HDD (first-boot begins)
 Phase 4:    Poll SSH + /run/blockhost/otp.json (first-boot complete)
 Phase 5:    Read OTP via SSH
 Phase 5.5:  Step through wizard (login → wallet → network → storage →
-            generate-wallet → fund → blockchain → provisioner → ipv6 → admin)
+            generate-wallet → fund → engine → provisioner → ipv6 → admin)
 Phase 6:    POST /api/finalize, poll /api/finalize/status until completed
 Phase 7-9:  Read contracts, reboot, verify services
 Output:     VM_NAME, VM_IP, NFT_CONTRACT, REQUESTS_CONTRACT (to GITHUB_OUTPUT)

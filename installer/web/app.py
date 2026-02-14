@@ -6,20 +6,18 @@ Provides web-based installation wizard with:
 - OTP authentication
 - Network configuration
 - Storage detection
-- Blockchain configuration
+- Engine integration (blockchain wizard plugin)
 - Provisioner integration
 - IPv6 allocation
 - Package configuration
 """
 
 import importlib
-import os
 import ssl
 import json
 import secrets
 import subprocess
 import threading
-import datetime
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
@@ -41,13 +39,9 @@ from installer.common.detection import detect_boot_medium, BootMedium
 # Import extracted modules
 from installer.web.utils import (
     detect_disks,
-    generate_secp256k1_keypair,
-    generate_secp256k1_keypair_with_pubkey,
-    get_address_from_key,
     is_valid_address,
     is_valid_ipv6_prefix,
     get_broker_registry,
-    get_wallet_balance,
     fetch_broker_registry_from_github,
     parse_pam_ciphertext,
     request_broker_allocation,
@@ -59,16 +53,11 @@ from installer.web.finalize import (
 )
 
 
-# Chain ID to network name mapping
-CHAIN_NAMES = {
-    '1': 'Ethereum Mainnet',
-    '11155111': 'Sepolia Testnet',
-    '137': 'Polygon Mainnet',
-    '80001': 'Polygon Mumbai',
-}
-
 # Provisioner manifest path (installed by provisioner .deb package)
 PROVISIONER_MANIFEST_PATH = Path('/usr/share/blockhost/provisioner.json')
+
+# Engine manifest path (installed by engine .deb package)
+ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
 
 
 def _discover_provisioner() -> Optional[dict]:
@@ -94,6 +83,29 @@ def _discover_provisioner() -> Optional[dict]:
         return None
 
 
+def _discover_engine() -> Optional[dict]:
+    """Discover the active engine from its manifest.
+
+    Returns a dict with 'manifest', 'module', and 'blueprint' keys,
+    or None if no engine is installed.
+    """
+    if not ENGINE_MANIFEST_PATH.is_file():
+        return None
+
+    try:
+        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
+        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
+        if not wizard_module_name:
+            return {'manifest': manifest, 'module': None, 'blueprint': None}
+
+        module = importlib.import_module(wizard_module_name)
+        blueprint = getattr(module, 'blueprint', None)
+        return {'manifest': manifest, 'module': module, 'blueprint': blueprint}
+    except (json.JSONDecodeError, ImportError, Exception) as e:
+        print(f"Warning: Failed to load engine: {e}")
+        return None
+
+
 # Discover active provisioner (if installed)
 _provisioner = _discover_provisioner()
 
@@ -102,11 +114,18 @@ _prov_session_key = None
 if _provisioner and _provisioner.get('manifest'):
     _prov_session_key = _provisioner['manifest'].get('config_keys', {}).get('session_key')
 
+# Discover active engine (if installed)
+_engine = _discover_engine()
+
+# Resolve engine session key from manifest (e.g. the value of config_keys.session_key)
+_engine_session_key = None
+if _engine and _engine.get('manifest'):
+    _engine_session_key = _engine['manifest'].get('config_keys', {}).get('session_key')
+
 
 def _gather_session_config() -> dict:
-    """Build config dict from session, using the provisioner's session key."""
-    return {
-        'blockchain': session.get('blockchain', {}),
+    """Build config dict from session, using plugin session keys."""
+    config = {
         'provisioner': session.get(_prov_session_key, {}) if _prov_session_key else {},
         'ipv6': session.get('ipv6', {}),
         'admin_wallet': session.get('admin_wallet', ''),
@@ -114,14 +133,27 @@ def _gather_session_config() -> dict:
         'admin_public_secret': session.get('admin_public_secret', ''),
         'admin_commands': session.get('admin_commands', {}),
     }
+    if _engine_session_key:
+        config[_engine_session_key] = session.get(_engine_session_key, {})
+    return config
 
 
 # Core wizard steps (always present)
 _CORE_STEPS = [
     {'id': 'network',        'label': 'Network',    'endpoint': 'wizard_network'},
     {'id': 'storage',        'label': 'Storage',    'endpoint': 'wizard_storage'},
-    {'id': 'blockchain',     'label': 'Blockchain', 'endpoint': 'wizard_blockchain'},
 ]
+
+# Engine wizard step (inserted dynamically from manifest)
+_ENGINE_STEP = None
+if _engine and _engine.get('manifest'):
+    _eng_name = _engine['manifest'].get('name', 'engine')
+    _eng_display = _engine['manifest'].get('display_name', 'Blockchain')
+    _ENGINE_STEP = {
+        'id': _eng_name,
+        'label': _eng_display.split('(')[0].strip(),
+        'endpoint': f'engine_{_eng_name}.wizard_{_eng_name}',
+    }
 
 # Provisioner wizard step (inserted dynamically from manifest)
 _PROVISIONER_STEP = None
@@ -141,8 +173,10 @@ _POST_STEPS = [
     {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
 ]
 
-# Build WIZARD_STEPS: core + provisioner (if present) + post
+# Build WIZARD_STEPS: core + engine (if present) + provisioner (if present) + post
 WIZARD_STEPS = list(_CORE_STEPS)
+if _ENGINE_STEP:
+    WIZARD_STEPS.append(_ENGINE_STEP)
 if _PROVISIONER_STEP:
     WIZARD_STEPS.append(_PROVISIONER_STEP)
 WIZARD_STEPS.extend(_POST_STEPS)
@@ -159,8 +193,16 @@ def _get_finalization_step_ids() -> list[str]:
 
     Used by SetupState at module load time to know what steps exist.
     """
-    core_ids = ['keypair', 'wallet', 'contracts', 'config']
+    # Engine pre-steps
+    engine_ids = []
+    if _engine and _engine.get('module'):
+        eng_mod = _engine['module']
+        if hasattr(eng_mod, 'get_finalization_steps'):
+            engine_ids = [s[0] for s in eng_mod.get_finalization_steps()]
+    elif _engine and _engine.get('manifest'):
+        engine_ids = _engine['manifest'].get('setup', {}).get('finalization_steps', [])
 
+    # Provisioner steps
     provisioner_ids = []
     if _provisioner and _provisioner.get('module'):
         prov_mod = _provisioner['module']
@@ -168,9 +210,21 @@ def _get_finalization_step_ids() -> list[str]:
             provisioner_ids = [s[0] for s in prov_mod.get_finalization_steps()]
     elif _provisioner and _provisioner.get('manifest'):
         provisioner_ids = _provisioner['manifest'].get('setup', {}).get('finalization_steps', [])
-    post_ids = ['ipv6', 'https', 'signup', 'nginx', 'mint_nft', 'finalize', 'validate']
 
-    return core_ids + provisioner_ids + post_ids
+    post_ids = ['ipv6', 'https', 'signup', 'nginx']
+
+    # Engine post-steps
+    engine_post_ids = []
+    if _engine and _engine.get('module'):
+        eng_mod = _engine['module']
+        if hasattr(eng_mod, 'get_post_finalization_steps'):
+            engine_post_ids = [s[0] for s in eng_mod.get_post_finalization_steps()]
+    elif _engine and _engine.get('manifest'):
+        engine_post_ids = _engine['manifest'].get('setup', {}).get('post_finalization_steps', [])
+
+    final_ids = ['finalize', 'validate']
+
+    return engine_ids + provisioner_ids + post_ids + engine_post_ids + final_ids
 
 
 # Global job storage for async operations
@@ -346,12 +400,17 @@ def create_app(config: Optional[dict] = None) -> Flask:
     app.otp_manager = otp_manager
     app.net_manager = net_manager
     app.provisioner = _provisioner
+    app.engine = _engine
+
+    # Register engine Blueprint (if available)
+    if _engine and _engine.get('blueprint'):
+        app.register_blueprint(_engine['blueprint'])
 
     # Register provisioner Blueprint (if available)
     if _provisioner and _provisioner.get('blueprint'):
         app.register_blueprint(_provisioner['blueprint'])
 
-    # Inject wizard steps and provisioner UI params into all templates
+    # Inject wizard steps and plugin UI params into all templates
     @app.context_processor
     def inject_wizard_context():
         prov_ui = {}
@@ -362,9 +421,18 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     prov_ui = prov_mod.get_ui_params(dict(session))
                 except Exception:
                     pass
+        eng_ui = {}
+        if _engine and _engine.get('module'):
+            eng_mod = _engine['module']
+            if hasattr(eng_mod, 'get_ui_params'):
+                try:
+                    eng_ui = eng_mod.get_ui_params(dict(session))
+                except Exception:
+                    pass
         return {
             'wizard_steps': WIZARD_STEPS,
             'prov_ui': prov_ui,
+            'eng_ui': eng_ui,
         }
 
     @app.template_global()
@@ -491,11 +559,18 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if not isinstance(config, dict):
                 return jsonify({'error': 'Decrypted content is not valid config'}), 400
 
-            # Restore session data from config
-            for key in ('blockchain', 'ipv6', 'admin_commands',
+            # Restore chain-agnostic session data
+            for key in ('ipv6', 'admin_commands',
                         'admin_wallet', 'admin_public_secret'):
                 if key in config:
                     session[key] = config[key]
+
+            # Restore engine data: new format uses engine session key,
+            # old backups use 'blockchain' — map to the active session key
+            if _engine_session_key:
+                eng_data = config.get(_engine_session_key) or config.get('blockchain', {})
+                if eng_data:
+                    session[_engine_session_key] = eng_data
 
             # Restore provisioner data: new format uses 'provisioner',
             # old Proxmox backups use 'proxmox' — map to the active session key
@@ -572,50 +647,18 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if request.method == 'POST':
             selected_disk = request.form.get('disk')
             session['selected_disk'] = selected_disk
-            return redirect(url_for('wizard_blockchain'))
+            return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_ipv6')))
 
         return render_template('wizard/storage.html',
                              disks=disks)
-
-    @app.route('/wizard/blockchain', methods=['GET', 'POST'])
-    @require_auth
-    def wizard_blockchain():
-        """Blockchain configuration step."""
-        if request.method == 'POST':
-            # Get deployer key based on wallet mode
-            wallet_mode = request.form.get('wallet_mode')
-            if wallet_mode == 'import':
-                deployer_key = request.form.get('import_key')
-            else:
-                deployer_key = request.form.get('deployer_key')
-
-            # Store blockchain configuration in session
-            session['blockchain'] = {
-                'chain_id': request.form.get('chain_id'),
-                'rpc_url': request.form.get('rpc_url'),
-                'wallet_mode': wallet_mode,
-                'deployer_key': deployer_key,
-                'contract_mode': request.form.get('contract_mode'),
-                'nft_contract': request.form.get('nft_contract'),
-                'subscription_contract': request.form.get('subscription_contract'),
-                'plan_name': request.form.get('plan_name', 'Basic VM'),
-                'plan_price_cents': int(request.form.get('plan_price_cents', 50)),
-                'revenue_share_enabled': request.form.get('revenue_share_enabled') == 'on',
-                'revenue_share_percent': float(request.form.get('revenue_share_percent', 1)),
-                'revenue_share_dev': request.form.get('revenue_share_dev') == 'on',
-                'revenue_share_broker': request.form.get('revenue_share_broker') == 'on',
-            }
-            return redirect(url_for(_NEXT_STEP.get('blockchain', 'wizard_ipv6')))
-
-        return render_template('wizard/blockchain.html')
 
     @app.route('/wizard/ipv6', methods=['GET', 'POST'])
     @require_auth
     def wizard_ipv6():
         """IPv6 configuration step."""
-        # Get broker registry from blockchain config if available
-        blockchain = session.get('blockchain', {})
-        broker_registry = get_broker_registry(blockchain.get('chain_id'))
+        # Get broker registry from engine config if available
+        engine_data = session.get(_engine_session_key, {}) if _engine_session_key else {}
+        broker_registry = get_broker_registry(engine_data.get('chain_id'))
 
         if request.method == 'POST':
             mode = request.form.get('ipv6_mode')
@@ -640,7 +683,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return render_template('wizard/ipv6.html',
                              broker_registry=broker_registry,
-                             prev_step_url=url_for(_PREV_STEP.get('ipv6', 'wizard_blockchain')))
+                             prev_step_url=url_for(_PREV_STEP.get('ipv6', 'wizard_storage')))
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
@@ -679,15 +722,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def wizard_summary():
         """Summary and confirmation step."""
-        blockchain = session.get('blockchain', {})
         ipv6 = session.get('ipv6', {})
         admin_commands = session.get('admin_commands', {})
-
-        # Get deployer address from key
-        deployer_address = None
-        deployer_key = blockchain.get('deployer_key')
-        if deployer_key:
-            deployer_address = get_address_from_key(deployer_key)
 
         summary = {
             'network': {
@@ -695,21 +731,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'gateway': net_manager.get_current_gateway(),
             },
             'disk': session.get('selected_disk', 'Not selected'),
-            'blockchain': {
-                'chain_id': blockchain.get('chain_id'),
-                'network_name': CHAIN_NAMES.get(blockchain.get('chain_id'), 'Custom'),
-                'rpc_url': blockchain.get('rpc_url'),
-                'deployer_address': deployer_address or 'Not configured',
-                'deploy_contracts': blockchain.get('contract_mode') == 'deploy',
-                'nft_contract': blockchain.get('nft_contract'),
-                'subscription_contract': blockchain.get('subscription_contract'),
-                'plan_name': blockchain.get('plan_name', 'Basic VM'),
-                'plan_price_cents': blockchain.get('plan_price_cents', 50),
-                'revenue_share_enabled': blockchain.get('revenue_share_enabled', False),
-                'revenue_share_percent': blockchain.get('revenue_share_percent', 1),
-                'revenue_share_dev': blockchain.get('revenue_share_dev', False),
-                'revenue_share_broker': blockchain.get('revenue_share_broker', False),
-            },
             'ipv6': {
                 'mode': ipv6.get('mode'),
                 'prefix': ipv6.get('prefix'),
@@ -723,6 +744,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 'command_count': 1 if admin_commands.get('enabled') else 0,
             },
         }
+
+        # Get engine summary data (if engine plugin provides it)
+        engine_summary = None
+        engine_summary_template = None
+        if _engine and _engine.get('module'):
+            eng_mod = _engine['module']
+            if hasattr(eng_mod, 'get_summary_data'):
+                engine_summary = eng_mod.get_summary_data(dict(session))
+            if hasattr(eng_mod, 'get_summary_template'):
+                engine_summary_template = eng_mod.get_summary_template()
 
         # Get provisioner summary data (if provisioner plugin provides it)
         provisioner_summary = None
@@ -742,9 +773,19 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
-        finalization_step_ids = _get_finalization_step_ids()
+        all_finalization_steps = []
 
-        # Build provisioner step metadata for dynamic rendering in progress list
+        # Engine pre-steps
+        if _engine and _engine.get('module'):
+            eng_mod = _engine['module']
+            if hasattr(eng_mod, 'get_finalization_steps'):
+                for step in eng_mod.get_finalization_steps():
+                    meta = {'id': step[0], 'label': step[1]}
+                    if len(step) > 3:
+                        meta['hint'] = step[3]
+                    all_finalization_steps.append(meta)
+
+        # Provisioner steps
         provisioner_steps_meta = []
         if _provisioner and _provisioner.get('module'):
             prov_mod = _provisioner['module']
@@ -754,13 +795,39 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     if len(step) > 3:
                         meta['hint'] = step[3]
                     provisioner_steps_meta.append(meta)
+        all_finalization_steps.extend(provisioner_steps_meta)
+
+        # Installer post-steps
+        all_finalization_steps.extend([
+            {'id': 'ipv6', 'label': 'Configuring IPv6'},
+            {'id': 'https', 'label': 'Configuring HTTPS'},
+            {'id': 'signup', 'label': 'Generating signup page'},
+            {'id': 'nginx', 'label': 'Setting up nginx reverse proxy'},
+        ])
+
+        # Engine post-steps
+        if _engine and _engine.get('module'):
+            eng_mod = _engine['module']
+            if hasattr(eng_mod, 'get_post_finalization_steps'):
+                for step in eng_mod.get_post_finalization_steps():
+                    meta = {'id': step[0], 'label': step[1]}
+                    if len(step) > 3:
+                        meta['hint'] = step[3]
+                    all_finalization_steps.append(meta)
+
+        # Final steps
+        all_finalization_steps.extend([
+            {'id': 'finalize', 'label': 'Finalizing setup'},
+            {'id': 'validate', 'label': 'Validating system', 'hint': 'testing only'},
+        ])
 
         return render_template('wizard/summary.html',
                              summary=summary,
-                             provisioner=provisioner_summary,
+                             engine_summary=engine_summary,
+                             engine_summary_template=engine_summary_template,
                              provisioner_summary=provisioner_summary,
                              provisioner_summary_template=provisioner_summary_template,
-                             finalization_step_ids=finalization_step_ids,
+                             all_finalization_steps=all_finalization_steps,
                              provisioner_steps=provisioner_steps_meta)
 
     @app.route('/wizard/install')
@@ -812,116 +879,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
     def api_storage_disks():
         """List available disks."""
         return jsonify(detect_disks())
-
-    # Blockchain API endpoints
-    @app.route('/api/blockchain/generate-wallet', methods=['POST'])
-    @require_auth
-    def api_blockchain_generate_wallet():
-        """Generate a new secp256k1 keypair for deployer wallet."""
-        try:
-            private_key, address = generate_secp256k1_keypair()
-            return jsonify({
-                'success': True,
-                'private_key': private_key,
-                'address': address,
-            })
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)}), 500
-
-    @app.route('/api/blockchain/validate-key', methods=['POST'])
-    @require_auth
-    def api_blockchain_validate_key():
-        """Validate a private key and return its address."""
-        data = request.get_json()
-        private_key = data.get('private_key', '').strip()
-
-        address = get_address_from_key(private_key)
-        if address:
-            return jsonify({'valid': True, 'address': address})
-        else:
-            return jsonify({'valid': False, 'error': 'Invalid private key format'})
-
-    @app.route('/api/blockchain/balance')
-    @require_auth
-    def api_blockchain_balance():
-        """Check wallet balance via RPC."""
-        address = request.args.get('address', '').strip()
-
-        if not address or not is_valid_address(address):
-            return jsonify({'success': False, 'error': 'Invalid address'}), 400
-
-        # Get RPC URL from query param, then session, then default
-        rpc_url = request.args.get('rpc_url', '').strip()
-        if not rpc_url:
-            blockchain = session.get('blockchain', {})
-            rpc_url = blockchain.get('rpc_url', 'https://ethereum-sepolia-rpc.publicnode.com')
-
-        balance = get_wallet_balance(address, rpc_url)
-        if balance is not None:
-            # Convert wei to ETH
-            balance_eth = balance / 1e18
-            return jsonify({
-                'success': True,
-                'balance': str(balance_eth),
-                'balance_formatted': f"{balance_eth:.6f}",
-                'balance_wei': str(balance),
-            })
-        else:
-            return jsonify({'success': False, 'error': 'Failed to fetch balance'})
-
-    @app.route('/api/blockchain/deploy', methods=['POST'])
-    @require_auth
-    def api_blockchain_deploy():
-        """Start smart contract deployment (async)."""
-        blockchain = session.get('blockchain', {})
-        job_id = f"deploy-{secrets.token_hex(4)}"
-
-        # Start deployment in background
-        thread = threading.Thread(
-            target=_run_contract_deployment,
-            args=(job_id, blockchain)
-        )
-        thread.start()
-
-        _jobs[job_id] = {
-            'status': 'running',
-            'progress': 0,
-            'message': 'Starting deployment...',
-        }
-
-        return jsonify({'job_id': job_id})
-
-    @app.route('/api/blockchain/deploy-status/<job_id>')
-    @require_auth
-    def api_blockchain_deploy_status(job_id):
-        """Check contract deployment status."""
-        job = _jobs.get(job_id)
-        if not job:
-            return jsonify({'error': 'Job not found'}), 404
-        return jsonify(job)
-
-    @app.route('/api/blockchain/set-contracts', methods=['POST'])
-    @require_auth
-    def api_blockchain_set_contracts():
-        """Set existing contract addresses."""
-        data = request.get_json()
-        nft = data.get('nft_contract')
-        subscription = data.get('subscription_contract')
-
-        if not nft or not subscription:
-            return jsonify({'error': 'Both contract addresses required'}), 400
-
-        # Validate addresses
-        if not is_valid_address(nft) or not is_valid_address(subscription):
-            return jsonify({'error': 'Invalid contract address format'}), 400
-
-        # Store in session
-        blockchain = session.get('blockchain', {})
-        blockchain['nft_contract'] = nft
-        blockchain['subscription_contract'] = subscription
-        session['blockchain'] = blockchain
-
-        return jsonify({'success': True})
 
     # IPv6 API endpoints
     @app.route('/api/ipv6/broker-request', methods=['POST'])
@@ -1045,8 +1002,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
         session['admin_signature'] = data.get('admin_signature', '')
         session['admin_public_secret'] = data.get('admin_public_secret', 'blockhost-access')
 
-        # Blockchain config
-        session['blockchain'] = data.get('blockchain', {})
+        # Engine config — CI sends data under the engine's session key
+        if _engine_session_key:
+            session[_engine_session_key] = data.get(_engine_session_key, {})
 
         # Provisioner config — CI sends data under the provisioner's session key
         if _prov_session_key:
@@ -1077,7 +1035,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         thread = threading.Thread(
             target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner)
+            args=(setup_state, config, _provisioner, _engine)
         )
         thread.start()
 
@@ -1124,7 +1082,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         # Run in background thread
         thread = threading.Thread(
             target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner)
+            args=(setup_state, config, _provisioner, _engine)
         )
         thread.start()
 
@@ -1216,7 +1174,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         # Run in background thread
         thread = threading.Thread(
             target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner)
+            args=(setup_state, config, _provisioner, _engine)
         )
         thread.start()
 
@@ -1300,42 +1258,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
             })
 
     return app
-
-
-def _run_contract_deployment(job_id: str, blockchain: dict):
-    """Run smart contract deployment in background."""
-    try:
-        _jobs[job_id]['message'] = 'Compiling contracts...'
-        _jobs[job_id]['progress'] = 10
-
-        # Run hardhat deploy
-        engine_dir = Path('/opt/blockhost-engine')
-        result = subprocess.run(
-            ['npx', 'hardhat', 'deploy', '--network', 'sepolia'],
-            cwd=engine_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env={
-                **os.environ,
-                'DEPLOYER_PRIVATE_KEY': blockchain.get('deployer_key', ''),
-                'RPC_URL': blockchain.get('rpc_url', ''),
-            }
-        )
-
-        if result.returncode == 0:
-            _jobs[job_id]['progress'] = 100
-            _jobs[job_id]['status'] = 'completed'
-            _jobs[job_id]['message'] = 'Contracts deployed successfully'
-            # Parse output for contract addresses
-            # _jobs[job_id]['contracts'] = {...}
-        else:
-            _jobs[job_id]['status'] = 'failed'
-            _jobs[job_id]['error'] = result.stderr or 'Deployment failed'
-
-    except Exception as e:
-        _jobs[job_id]['status'] = 'failed'
-        _jobs[job_id]['error'] = str(e)
 
 
 def _build_vm_template(job_id: str):
