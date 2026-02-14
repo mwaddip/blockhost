@@ -713,8 +713,6 @@ User functions:
 Query functions:
   getSubscription(subscriptionId) → Subscription struct
   isSubscriptionActive(subscriptionId) → bool
-  getExpiredSubscriptions(offset, limit) → array
-  getSubscriptionsExpiringSoon(withinSeconds, offset, limit) → array
 
 Events (monitored by blockhost-monitor):
   SubscriptionCreated, SubscriptionExtended, SubscriptionCancelled
@@ -856,7 +854,7 @@ Runtime on-chain interactions (by submodule services, not this repo):
 | Action | Service | Contract | Events/Functions |
 |--------|---------|----------|-----------------|
 | Watch subscriptions | blockhost-monitor (TypeScript) | BlockhostSubscriptions | SubscriptionCreated, SubscriptionExtended, SubscriptionCancelled |
-| Query expired | blockhost-gc (Python) | BlockhostSubscriptions | getExpiredSubscriptions() |
+| Query expired | blockhost-gc (Python) | BlockhostSubscriptions | Off-chain expiry check via getSubscription() |
 | Admin commands | blockhost-engine src/admin/ | — | ECIES-encrypted on-chain commands |
 | NFT reconciliation | blockhost-engine src/reconcile/ | AccessCredentialNFT | Periodic ownership health check |
 
