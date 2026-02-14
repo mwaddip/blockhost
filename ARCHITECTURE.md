@@ -232,12 +232,18 @@ Subscription purchase flow:
 VM authentication flow (on each SSH login):
   1. SSH connect → PAM module (pam_web3.so) generates OTP
      OTP = HMAC-SHA3(machine_id + timestamp + secret_key), 6 chars
-  2. User sees OTP + signing page URL (https://{fqdn}:8080 if dns_zone, http://{ip}:8080 otherwise)
-  3. User signs: "Authenticate to {machine_id} with code: {otp}"
-  4. PAM recovers wallet via secp256k1 ecrecover
-  5. PAM queries web3-auth-svc (Unix socket: /run/web3-auth/web3-auth.sock) for wallet's NFT token IDs
-  6. Matches token ID against Linux user GECOS field (nft=TOKEN_ID)
-  7. Match → access granted as that Linux user
+  2. PAM writes session file to /run/libpam-web3/pending/<session_id>.json
+  3. User sees signing page URL with ?session=<id> (https://{ip}:8443, self-signed TLS)
+     Prompt shows "Press Enter after signing in browser (or paste signature):"
+  4. Two input paths (first one wins):
+     Path A (callback): User opens URL → signing page auto-fills OTP+machine → user signs →
+       page POSTs signature to /auth/callback/<session_id> → PAM detects .sig file → authenticates
+     Path B (manual): User copies OTP, signs offline, pastes signature in terminal
+  5. PAM recovers wallet via secp256k1 ecrecover
+  6. PAM queries web3-auth-svc (Unix socket: /run/web3-auth/web3-auth.sock) for wallet's NFT token IDs
+  7. Matches token ID against Linux user GECOS field (nft=TOKEN_ID)
+  8. Match → access granted as that Linux user
+  9. PAM cleans up session files
 
 Expiry flow:
   blockhost-gc.py (daily via systemd timer) checks expired subscriptions
@@ -513,7 +519,7 @@ gc_grace_days: 7
 ```yaml
 blockchain: {chain_id: 11155111, rpc_url: str, nft_contract: str, subscription_contract: str, usdc_address: str}
 auth: {otp_length: 6, otp_ttl_seconds: 300, public_secret: 'blockhost-access'}
-signing_page: {html_path: '/usr/share/libpam-web3-tools/signing-page/index.html'}
+signing_page: {html_path: '/usr/share/libpam-web3-tools/signing-page/index.html', port: 8443}
 deployer: {private_key_file: '/etc/blockhost/deployer.key'}
 server: {public_key: '0x04...'}
 ```
@@ -602,8 +608,11 @@ Two packages for different targets:
 - Used by provisioner to encrypt connection details into NFT
 
 **web3-auth-svc** (daemon in VMs):
-- Handles blockchain queries for PAM module
-- Communicates via Unix socket
+- Handles blockchain queries for PAM module via Unix socket
+- Serves signing page + callback API over HTTPS (port 8443, self-signed TLS)
+  - `GET /` — signing page HTML
+  - `GET /auth/pending/<session_id>` — session JSON (OTP + machine name)
+  - `POST /auth/callback/<session_id>` — delivers signature to PAM via file
 
 **Contract artifacts**: installed by .deb packages to `/usr/share/blockhost/contracts/`
 
@@ -867,13 +876,13 @@ Internet
   │   ├─ Host bridge IP (migrated from NIC; same subnet as VMs)
   │   └─ VM NICs (tap devices)
   │       ├─ VMs get IPv4 from ip_pool range
-  │       └─ Each VM serves signing page on port 8080 (HTTPS if dns_zone, HTTP fallback)
+  │       └─ Each VM serves signing page on port 8443 (HTTPS, self-signed TLS via web3-auth-svc)
   │
   └─ wg-broker (WireGuard, if broker mode)
       └─ IPv6 prefix from broker allocation
           ├─ VMs get /128 from ipv6_pool range (host routes added per VM)
           └─ DNS: {hex_offset}.{dns_zone} → prefix::{hex_offset} (broker authoritative DNS)
-              └─ Enables Let's Encrypt on VM signing pages (HTTPS on port 8080)
+              └─ Enables Let's Encrypt on VM signing pages (replaces self-signed cert)
 ```
 
 ## PRIVILEGE SEPARATION
