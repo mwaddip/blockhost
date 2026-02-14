@@ -277,7 +277,7 @@ Full interface specification: `facts/ADMIN_INTERFACE.md`
 ```
 admin/
 ├── app.py         → create_app() factory, session config, CLI (argparse --port/--host/--debug)
-├── auth.py        → Challenge generation, signature verification (cast wallet verify), session management, login_required decorator
+├── auth.py        → Challenge generation, signature verification (bw who + engine constraints), session management, login_required decorator
 ├── routes.py      → Blueprint "admin", auth routes + protected API + page routes
 ├── system.py      → Data collection (reads host files/commands), action wrappers
 ├── root-agent-actions/
@@ -305,8 +305,9 @@ Wallet-signing flow identical to libpam-web3 SSH login. Access is NFT-gated: onl
    Path B: Click "Sign with MetaMask" (inline personal_sign), auto-submits
 4. POST /api/auth/verify {code, signature}
 5. Backend: bw who admin → queries chain for NFT owner → 0x...
-6. Backend: cast wallet verify --address <nft_owner> "<message>" <signature>
-7. Exit 0 → session cookie → redirect to dashboard
+6. Backend: bw who "<message>" <signature> → recovers signer address
+7. Compare recovered address with NFT owner (case-insensitive)
+8. Match → session cookie → redirect to dashboard
 ```
 
 Message format: `"Authenticate to {hostname} with code: {code}"` — same as PAM module.
@@ -315,7 +316,8 @@ Auth state (module-level dicts in auth.py):
 - `_challenges`: code → expiry (TTL 300s, one-time use)
 - `_sessions`: token → (address, expiry) (TTL 3600s)
 - Admin wallet resolved via `bw who admin` → queries `ownerOf(credential_nft_id)` on-chain (cached 60s)
-- Signature verification: `cast wallet verify` subprocess (Foundry, already installed)
+- Signature verification: `bw who <message> <signature>` subprocess (blockhost-engine)
+- Format constraints (address/signature patterns): loaded from engine manifest `constraints` key at startup
 - If NFT #0 is transferred, the new holder becomes admin — no config changes needed
 
 Session config: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE=Lax`, `SESSION_COOKIE_SECURE=True`, `PERMANENT_SESSION_LIFETIME=1h`.
@@ -382,7 +384,15 @@ One active engine per host. Package installs manifest at well-known path.
     "finalization_steps": ["keypair", "wallet", "contracts", "chain_config"],
     "post_finalization_steps": ["mint_nft", "plan", "revenue_share"]
   },
-  "config_keys": { "session_key": "blockchain" }
+  "config_keys": { "session_key": "blockchain" },
+  "constraints": {
+    "address_pattern": "^0x[0-9a-fA-F]{40}$",
+    "signature_pattern": "^0x[0-9a-fA-F]{130}$",
+    "native_token": "eth",
+    "native_token_label": "ETH",
+    "token_pattern": "^0x[0-9a-fA-F]{40}$",
+    "address_placeholder": "0x..."
+  }
 }
 ```
 
@@ -400,6 +410,7 @@ Same pattern as provisioner discovery. Loads manifest JSON, imports wizard modul
 | Summary section | `get_summary_data()` + `get_summary_template()` | Engine .deb |
 | UI parameters | `get_ui_params(session)` → `eng_ui` context variable (optional) | Engine .deb |
 | Address validation | `validate_address(address)` → bool | Engine .deb |
+| Format constraints | `constraints` in manifest (address/signature/token patterns, native token) | Engine .deb |
 | Keypair generation | `generate_keypair()` → (private_key, address) | Engine .deb |
 | Progress step metadata | `get_progress_steps_meta()` → list[dict] | Engine .deb |
 
@@ -856,7 +867,7 @@ Events (monitored by blockhost-monitor):
 | Function | Purpose |
 |----------|---------|
 | detect_disks | List available disks (lsblk) |
-| is_valid_address | Validate 0x + 40 hex (abstraction debt — used by wallet page) |
+| is_valid_address | Validate 0x + 40 hex (fallback for _validate_address in app.py) |
 | is_valid_ipv6_prefix | Validate prefix/length format |
 | get_broker_registry | Look up broker registry by chain_id |
 | get_wallet_balance | eth_getBalance via JSON-RPC |
@@ -983,6 +994,7 @@ libvirt provisioner actions (from `virsh.py`):
 |-----------|-----------------|---------|
 | `terraform init/apply/destroy` | HTTP API auth, working dir owned by blockhost | provisioner |
 | `cast call/send` | HTTP RPC, reads deployer key via group perm (0640) | provisioner |
+| `bw who`, `is contract` | HTTP RPC, reads config via group perm | admin panel, installer validation |
 | `pam_web3_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
 | `pgrep` | No privilege needed | engine (reconcile) |
 | python3 db scripts | Writes to blockhost-owned `/var/lib/blockhost/` | engine |

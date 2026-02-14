@@ -123,6 +123,15 @@ if _engine and _engine.get('manifest'):
     _engine_session_key = _engine['manifest'].get('config_keys', {}).get('session_key')
 
 
+def _validate_address(address: str) -> bool:
+    """Validate address via engine module, falling back to basic check."""
+    if _engine and _engine.get('module'):
+        fn = getattr(_engine['module'], 'validate_address', None)
+        if fn:
+            return fn(address)
+    return is_valid_address(address)
+
+
 def _gather_session_config() -> dict:
     """Build config dict from session, using plugin session keys."""
     config = {
@@ -512,7 +521,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             admin_signature = request.form.get('admin_signature', '').strip()
             public_secret = request.form.get('public_secret', '').strip()
 
-            if not is_valid_address(admin_wallet):
+            if not _validate_address(admin_wallet):
                 flash('Invalid wallet address', 'error')
                 return redirect(url_for('wizard_wallet'))
 
@@ -526,6 +535,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return redirect(url_for('wizard_network'))
 
         # If wallet already connected, allow re-doing or skip
+        # TODO: engine.get_wallet_template() override — non-EVM engines need
+        # their own wallet connect page (different signing method, no MetaMask)
         return render_template('wizard/wallet.html')
 
     @app.route('/api/restore-config', methods=['POST'])
@@ -888,7 +899,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         data = request.get_json()
         registry = data.get('registry')
 
-        if not registry or not is_valid_address(registry):
+        if not registry or not _validate_address(registry):
             return jsonify({'success': False, 'error': 'Invalid registry address'}), 400
 
         # Call broker-client to request allocation

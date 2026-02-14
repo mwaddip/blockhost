@@ -1,3 +1,11 @@
+{#
+  Engine wallet template extension point:
+  This page uses EVM-specific MetaMask + personal_sign as the default wallet
+  connect flow. A non-EVM engine would need to provide get_wallet_template()
+  returning a path to its own wallet connect page (different signing method,
+  different wallet extension). The app.py wizard_wallet route would then
+  render that template instead of this one.
+#}
 {% extends "base.html" %}
 
 {% block title %}Admin Wallet - BlockHost Installer{% endblock %}
