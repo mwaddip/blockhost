@@ -5,6 +5,7 @@ build/
 
 # Session context (Claude working memory, not for git)
 SESSION_CONTEXT.md
+SESSION_ARCHIVE.md
 SETTINGS.md
 
 # Python

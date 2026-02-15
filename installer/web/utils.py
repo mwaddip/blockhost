@@ -3,7 +3,7 @@ BlockHost Web Installer - Utility Functions
 
 Pure utility functions with no Flask dependency:
 - Disk detection
-- Ethereum key generation and validation
+- Address validation
 - Broker registry lookups
 - YAML helpers
 - Certificate generation
@@ -12,7 +12,6 @@ Pure utility functions with no Flask dependency:
 import grp
 import json
 import os
-import secrets
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -51,109 +50,6 @@ def detect_disks() -> list[dict]:
     except Exception:
         pass
     return disks
-
-
-def _cast_wallet_address(private_hex: str) -> Optional[str]:
-    """Derive Ethereum address from private key using Foundry's cast."""
-    try:
-        result = subprocess.run(
-            ['cast', 'wallet', 'address', '--private-key', private_hex],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
-
-
-def generate_secp256k1_keypair() -> tuple[str, str]:
-    """Generate a secp256k1 keypair for Ethereum."""
-    try:
-        # Try using eth-keys library if available
-        from eth_keys import keys
-        private_key = keys.PrivateKey(secrets.token_bytes(32))
-        return private_key.to_hex(), private_key.public_key.to_checksum_address()
-    except ImportError:
-        pass
-
-    # Fallback: generate random key and use cast for address derivation
-    private_bytes = secrets.token_bytes(32)
-    private_hex = '0x' + private_bytes.hex()
-
-    address = _cast_wallet_address(private_hex)
-    if address:
-        return private_hex, address
-
-    raise RuntimeError("Failed to generate keypair: cast wallet address failed")
-
-
-def generate_secp256k1_keypair_with_pubkey() -> tuple[str, str, str]:
-    """Generate a secp256k1 keypair and return (private_key, address, public_key).
-
-    The public key is the uncompressed format (0x04 + x + y, 65 bytes hex)
-    needed for ECIES encryption.
-    """
-    try:
-        # Try using eth-keys library if available
-        from eth_keys import keys
-        private_key = keys.PrivateKey(secrets.token_bytes(32))
-        # public_key.to_bytes() gives 64 bytes (x + y), need to prepend 0x04 for uncompressed
-        public_key_bytes = b'\x04' + private_key.public_key.to_bytes()
-        public_key_hex = '0x' + public_key_bytes.hex()
-        return (
-            private_key.to_hex(),
-            private_key.public_key.to_checksum_address(),
-            public_key_hex
-        )
-    except ImportError:
-        pass
-
-    # Fallback: generate random key and use cast
-    private_bytes = secrets.token_bytes(32)
-    private_hex = '0x' + private_bytes.hex()
-
-    address = _cast_wallet_address(private_hex)
-    if not address:
-        raise RuntimeError("Failed to generate keypair: cast wallet address failed")
-
-    # Get public key — use python ecdsa as backup
-    try:
-        from ecdsa import SigningKey, SECP256k1
-        sk = SigningKey.from_string(private_bytes, curve=SECP256k1)
-        vk = sk.verifying_key
-        # to_string() gives 64 bytes (x + y)
-        public_key_hex = '0x04' + vk.to_string().hex()
-    except ImportError:
-        # Last resort: store empty and generate later
-        public_key_hex = ''
-
-    return private_hex, address, public_key_hex
-
-
-def get_address_from_key(private_key: str) -> Optional[str]:
-    """Derive Ethereum address from private key."""
-    if not private_key:
-        return None
-
-    # Clean up key format
-    key = private_key.strip()
-    if key.startswith('0x'):
-        key = key[2:]
-
-    if len(key) != 64:
-        return None
-
-    try:
-        # Try using eth-keys library if available
-        from eth_keys import keys
-        pk = keys.PrivateKey(bytes.fromhex(key))
-        return pk.public_key.to_checksum_address()
-    except ImportError:
-        pass
-
-    # Fallback: use Foundry's cast if available
-    return _cast_wallet_address('0x' + key)
 
 
 def is_valid_address(address: str) -> bool:

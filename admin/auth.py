@@ -1,13 +1,15 @@
 """Wallet-based authentication for the admin panel.
 
 Same flow as libpam-web3 SSH login: generate challenge code, admin signs
-with wallet, backend verifies via `cast wallet verify`.
+with wallet, backend recovers signer via `bw who <message> <signature>`.
 
 Admin identity resolved via NFT ownership: `bw who admin` queries the chain
 for the current holder of the admin credential NFT.
 """
 
+import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -18,6 +20,32 @@ from pathlib import Path
 from flask import current_app, redirect, request, session
 
 KNOCK_ACTIVE_PATH = Path("/run/blockhost/knock.active")
+ENGINE_MANIFEST_PATH = Path("/usr/share/blockhost/engine.json")
+
+# Engine-supplied format constraints (loaded once at startup)
+_address_re = None
+_signature_re = None
+
+
+def _load_engine_constraints():
+    """Load address/signature format patterns from engine manifest."""
+    global _address_re, _signature_re
+    if not ENGINE_MANIFEST_PATH.is_file():
+        return
+    try:
+        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
+        constraints = manifest.get('constraints', {})
+        ap = constraints.get('address_pattern')
+        if ap:
+            _address_re = re.compile(ap)
+        sp = constraints.get('signature_pattern')
+        if sp:
+            _signature_re = re.compile(sp)
+    except (json.JSONDecodeError, re.error, OSError):
+        pass
+
+
+_load_engine_constraints()
 
 CHALLENGE_TTL = 300  # 5 minutes
 SESSION_TTL = 3600  # 1 hour
@@ -66,7 +94,7 @@ def get_admin_wallet():
         )
         if result.returncode == 0:
             addr = result.stdout.strip()
-            if addr.startswith("0x") and len(addr) == 42:
+            if addr and (_address_re is None or _address_re.match(addr)):
                 _admin_wallet = addr
                 _admin_wallet_ts = now
                 return addr
@@ -105,30 +133,29 @@ def verify_signature(code, signature):
     if not admin_wallet:
         return False, "admin wallet not configured"
 
-    # Validate signature format before passing to subprocess
     sig = signature.strip()
-    if not sig.startswith("0x") or len(sig) != 132:
+    if not sig:
+        return False, "missing signature"
+    if _signature_re and not _signature_re.match(sig):
         return False, "invalid signature format"
 
     message = build_message(code)
 
     try:
         result = subprocess.run(
-            [
-                "cast", "wallet", "verify",
-                "--address", admin_wallet,
-                message,
-                sig,
-            ],
+            ["bw", "who", message, sig],
             capture_output=True,
             text=True,
             timeout=10,
         )
         if result.returncode == 0:
-            return True, admin_wallet
+            recovered = result.stdout.strip()
+            if recovered.lower() == admin_wallet.lower():
+                return True, admin_wallet
+            return False, "signature verification failed"
         return False, "signature verification failed"
     except FileNotFoundError:
-        return False, "cast not found — is Foundry installed?"
+        return False, "bw not found — is blockhost-engine installed?"
     except subprocess.TimeoutExpired:
         return False, "verification timed out"
 

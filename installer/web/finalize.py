@@ -3,9 +3,13 @@ BlockHost Web Installer - Finalization Pipeline
 
 The finalization pipeline: step functions, orchestration, and helpers.
 All step functions are private to this module. The public API is:
-- get_finalization_steps(provisioner) — returns step tuples
-- run_finalization_with_state(setup_state, config, provisioner) — orchestration loop
-- run_finalization(job_id, config, jobs, provisioner) — legacy wrapper
+- get_finalization_steps(provisioner, engine) — returns step tuples
+- run_finalization_with_state(setup_state, config, provisioner, engine) — orchestration loop
+- run_finalization(job_id, config, jobs, provisioner, engine) — legacy wrapper
+
+Chain-specific steps (wallet, contracts, config, mint_nft, plan,
+revenue_share) are provided by the engine wizard plugin. This module
+contains chain-agnostic infrastructure steps (keypair, ipv6, https, etc.).
 """
 
 import ipaddress
@@ -19,39 +23,36 @@ from typing import Optional
 
 from installer.web.utils import (
     set_blockhost_ownership,
-    generate_secp256k1_keypair_with_pubkey,
-    get_address_from_key,
-    is_valid_address,
     parse_pam_ciphertext,
     write_yaml,
     generate_self_signed_cert_for_finalization,
 )
 
-# USDC contract addresses by chain ID
-USDC_BY_CHAIN = {
-    11155111: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',  # Sepolia
-    1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',         # Mainnet
-    137: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',       # Polygon
-    42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',     # Arbitrum
-}
 
-
-def get_finalization_steps(provisioner) -> list[tuple]:
-    """Build the finalization step list, injecting provisioner steps dynamically.
+def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
+    """Build the finalization step list, injecting engine and provisioner steps.
 
     Step order:
-    1. Core steps (keypair, wallet, contracts, config)
-    2. Provisioner steps (from plugin: token, terraform, bridge, template)
-    3. Post steps (ipv6, https, signup, mint_nft, finalize, validate)
+    1. Infrastructure steps (keypair — chain-agnostic, needed before engine)
+    2. Engine pre-steps (from plugin: wallet, contracts, chain_config)
+    3. Provisioner steps (from plugin: token, terraform, bridge, template)
+    4. Post steps (ipv6, https, signup, nginx)
+    5. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
+    6. Final steps (finalize, validate)
     """
-    core_steps = [
+    # Infrastructure steps (chain-agnostic, run before engine)
+    infra_steps = [
         ('keypair', 'Generating server keypair', _finalize_keypair),
-        ('wallet', 'Configuring deployer wallet', _finalize_wallet),
-        ('contracts', 'Handling contracts', _finalize_contracts),
-        ('config', 'Writing configuration files', _finalize_config),
     ]
 
-    # Get provisioner finalization steps from plugin
+    # Engine pre-steps (chain-specific)
+    engine_steps = []
+    if engine and engine.get('module'):
+        eng_mod = engine['module']
+        if hasattr(eng_mod, 'get_finalization_steps'):
+            engine_steps = eng_mod.get_finalization_steps()
+
+    # Provisioner steps (from plugin)
     provisioner_steps = []
     if provisioner and provisioner.get('module'):
         prov_mod = provisioner['module']
@@ -63,17 +64,26 @@ def get_finalization_steps(provisioner) -> list[tuple]:
         ('https', 'Configuring HTTPS', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
         ('nginx', 'Setting up nginx reverse proxy', _finalize_nginx),
-        ('mint_nft', 'Minting admin NFT', _finalize_mint_nft),
+    ]
+
+    # Engine post-steps (need hostname from https step)
+    engine_post_steps = []
+    if engine and engine.get('module'):
+        eng_mod = engine['module']
+        if hasattr(eng_mod, 'get_post_finalization_steps'):
+            engine_post_steps = eng_mod.get_post_finalization_steps()
+
+    final_steps = [
         ('finalize', 'Finalizing setup', _finalize_complete),
         ('validate', 'Validating system (testing only)', _finalize_validate),
     ]
 
-    return core_steps + provisioner_steps + post_steps
+    return infra_steps + engine_steps + provisioner_steps + post_steps + engine_post_steps + final_steps
 
 
-def run_finalization_with_state(setup_state, config: dict, provisioner):
+def run_finalization_with_state(setup_state, config: dict, provisioner, engine=None):
     """Run the full finalization process with persistent state tracking."""
-    steps = get_finalization_steps(provisioner)
+    steps = get_finalization_steps(provisioner, engine)
 
     try:
         for step in steps:
@@ -92,34 +102,30 @@ def run_finalization_with_state(setup_state, config: dict, provisioner):
                 success, error = step_func(config)
 
                 if success:
-                    # Attach step data for UI display
-                    step_data = None
-                    if step_id == 'wallet':
-                        deployer_key = config.get('blockchain', {}).get('deployer_key')
-                        addr = get_address_from_key(deployer_key) if deployer_key else None
-                        if addr:
-                            step_data = {'deployer_address': addr}
-                    elif step_id == 'contracts' and config.get('contracts'):
-                        step_data = {'contracts': config['contracts']}
-                    elif step_id == 'ipv6':
-                        ipv6_cfg = config.get('ipv6', {})
-                        prefix = ipv6_cfg.get('prefix', '')
-                        if not prefix:
-                            alloc_file = Path('/etc/blockhost/broker-allocation.json')
-                            if alloc_file.exists():
-                                try:
-                                    alloc = json.loads(alloc_file.read_text())
-                                    prefix = alloc.get('prefix', '')
-                                except (json.JSONDecodeError, IOError):
-                                    pass
-                        if prefix:
-                            step_data = {'prefix': prefix, 'mode': ipv6_cfg.get('mode', '')}
-                    elif step_id == 'https':
-                        https_cfg = config.get('https', {})
-                        if https_cfg.get('hostname'):
-                            step_data = {'hostname': https_cfg['hostname']}
-                    elif step_id == 'mint_nft' and config.get('mint_nft_result'):
-                        step_data = config['mint_nft_result']
+                    # Step data convention: step functions set
+                    # config['_step_result_<step_id>'] for UI display data
+                    step_data = config.pop(f'_step_result_{step_id}', None)
+
+                    # Installer step data (stays here — these steps are ours)
+                    if not step_data:
+                        if step_id == 'ipv6':
+                            ipv6_cfg = config.get('ipv6', {})
+                            prefix = ipv6_cfg.get('prefix', '')
+                            if not prefix:
+                                alloc_file = Path('/etc/blockhost/broker-allocation.json')
+                                if alloc_file.exists():
+                                    try:
+                                        alloc = json.loads(alloc_file.read_text())
+                                        prefix = alloc.get('prefix', '')
+                                    except (json.JSONDecodeError, IOError):
+                                        pass
+                            if prefix:
+                                step_data = {'prefix': prefix, 'mode': ipv6_cfg.get('mode', '')}
+                        elif step_id == 'https':
+                            https_cfg = config.get('https', {})
+                            if https_cfg.get('hostname'):
+                                step_data = {'hostname': https_cfg['hostname']}
+
                     setup_state.mark_step_completed(step_id, data=step_data)
                 else:
                     setup_state.mark_step_failed(step_id, error or f'{step_name} failed')
@@ -142,14 +148,14 @@ def run_finalization_with_state(setup_state, config: dict, provisioner):
             setup_state.save()
 
 
-def run_finalization(job_id: str, config: dict, jobs: dict, provisioner):
+def run_finalization(job_id: str, config: dict, jobs: dict, provisioner, engine=None):
     """Legacy wrapper - run finalization with job-based tracking."""
     # Import SetupState here to avoid circular import at module level
     from installer.web.app import SetupState
 
     setup_state = SetupState()
     setup_state.start(config)
-    run_finalization_with_state(setup_state, config, provisioner)
+    run_finalization_with_state(setup_state, config, provisioner, engine)
 
     # Update job status from setup state
     if job_id in jobs:
@@ -174,380 +180,104 @@ def _discover_bridge() -> Optional[str]:
     return None
 
 
-def _parse_cast_int(raw: str) -> int:
-    """Parse integer from cast call/send output (handles both hex and decimal)."""
-    raw = raw.strip()
-    return int(raw, 16) if raw.startswith('0x') else int(raw)
-
-
 # ---------------------------------------------------------------------------
-# Step functions (private to this module)
+# Step functions (private to this module — chain-agnostic infrastructure)
 # ---------------------------------------------------------------------------
+
+CONFIG_DIR = Path('/etc/blockhost')
+
 
 def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
-    """Generate server keypair for ECIES encryption."""
+    """Generate server ECIES keypair (server.key + server.pubkey).
+
+    Uses pam_web3_tool (secp256k1) — not chain-specific, every engine
+    needs this for PAM authentication infrastructure.
+
+    Idempotent: skips if both files already exist.
+    No step result data — summary shows just "Completed".
+    """
     try:
-        config_dir = Path('/etc/blockhost')
-        config_dir.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        server_key = CONFIG_DIR / 'server.key'
+        server_pubkey = CONFIG_DIR / 'server.pubkey'
 
-        key_file = config_dir / 'server.key'
+        if server_key.exists() and server_pubkey.exists():
+            return True, None
 
-        private_key, address, public_key = generate_secp256k1_keypair_with_pubkey()
-
-        # Write private key without 0x prefix (pam_web3_tool expects raw hex)
-        private_key_raw = private_key[2:] if private_key.startswith('0x') else private_key
-        key_file.write_text(private_key_raw)
-        set_blockhost_ownership(key_file, 0o640)
-
-        # Write public key separately (for signup page ECIES encryption)
-        pubkey_file = config_dir / 'server.pubkey'
-        pubkey_file.write_text(public_key)
-        pubkey_file.chmod(0o644)
-
-        # Store in running config for later steps
-        config['server_address'] = address
-        config['server_public_key'] = public_key
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _finalize_wallet(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure deployer wallet."""
-    try:
-        blockchain = config.get('blockchain', {})
-        deployer_key = blockchain.get('deployer_key')
-
-        if not deployer_key:
-            return False, 'No deployer key configured'
-
-        key_file = Path('/etc/blockhost/deployer.key')
-        key_file.parent.mkdir(parents=True, exist_ok=True)
-
-        key_file.write_text(deployer_key)
-        set_blockhost_ownership(key_file, 0o640)
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _finalize_contracts(config: dict) -> tuple[bool, Optional[str]]:
-    """Deploy or verify contracts."""
-    try:
-        blockchain = config.get('blockchain', {})
-
-        if blockchain.get('contract_mode') == 'existing':
-            # Verify existing contracts are accessible
-            # For now, just check format
-            nft = blockchain.get('nft_contract')
-            sub = blockchain.get('subscription_contract')
-
-            if not is_valid_address(nft) or not is_valid_address(sub):
-                return False, 'Invalid contract addresses'
-
-            config['contracts'] = {
-                'nft': nft,
-                'subscription': sub,
-            }
-        else:
-            # Deploy new contracts using Foundry
-            rpc_url = blockchain.get('rpc_url')
-            deployer_key = blockchain.get('deployer_key')
-
-            if not rpc_url or not deployer_key:
-                return False, 'Missing RPC URL or deployer key'
-
-            # Ensure deployer key has 0x prefix
-            if not deployer_key.startswith('0x'):
-                deployer_key = '0x' + deployer_key
-
-            contracts_dir = Path('/usr/share/blockhost/contracts')
-
-            # Deploy NFT contract (AccessCredentialNFT)
-            # Constructor: (string name, string symbol, string defaultImageUri)
-            nft_address, err = _deploy_contract_with_forge(
-                contracts_dir / 'AccessCredentialNFT.json',
-                rpc_url,
-                deployer_key,
-                constructor_args=['BlockHost Access', 'BHAC', '']
-            )
-            if err:
-                return False, f'NFT contract deployment failed: {err}'
-
-            # Deploy Subscription/PoS contract (no constructor args)
-            sub_address, err = _deploy_contract_with_forge(
-                contracts_dir / 'BlockhostSubscriptions.json',
-                rpc_url,
-                deployer_key,
-                constructor_args=[]
-            )
-            if err:
-                return False, f'Subscription contract deployment failed: {err}'
-
-            config['contracts'] = {
-                'nft': nft_address,
-                'subscription': sub_address,
-            }
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _deploy_contract_with_forge(
-    artifact_path: Path,
-    rpc_url: str,
-    private_key: str,
-    constructor_args: list = None
-) -> tuple[Optional[str], Optional[str]]:
-    """Deploy a contract using cast send --create."""
-    import json as json_module
-
-    if not artifact_path.exists():
-        return None, f'Contract artifact not found: {artifact_path}'
-
-    try:
-        # Load contract artifact
-        with open(artifact_path) as f:
-            artifact = json_module.load(f)
-
-        # Get contract name from artifact
-        contract_name = artifact.get('contractName', artifact_path.stem)
-
-        # Check if we have bytecode - handle different artifact formats
-        bytecode = artifact.get('bytecode', artifact.get('bin', ''))
-        if isinstance(bytecode, dict):
-            bytecode = bytecode.get('object', '')
-        if not bytecode:
-            # Try Foundry output format
-            bytecode = artifact.get('bytecode', {}).get('object', '')
-
-        # Ensure 0x prefix
-        if bytecode and not bytecode.startswith('0x'):
-            bytecode = '0x' + bytecode
-
-        if not bytecode or bytecode == '0x':
-            return None, f'No bytecode found in artifact: {artifact_path}'
-
-        # If there are constructor args, we need to ABI-encode them and append to bytecode
-        if constructor_args:
-            abi = artifact.get('abi', [])
-            constructor = next((x for x in abi if x.get('type') == 'constructor'), None)
-            if constructor and constructor.get('inputs'):
-                # Build constructor signature for encoding
-                input_types = [inp['type'] for inp in constructor['inputs']]
-                sig = f"constructor({','.join(input_types)})"
-
-                # Use cast to encode constructor args
-                encode_cmd = ['cast', 'abi-encode', sig] + [str(a) for a in constructor_args]
-                encode_result = subprocess.run(encode_cmd, capture_output=True, text=True)
-
-                if encode_result.returncode == 0:
-                    encoded_args = encode_result.stdout.strip()
-                    # Remove 0x prefix from encoded args and append to bytecode
-                    if encoded_args.startswith('0x'):
-                        encoded_args = encoded_args[2:]
-                    bytecode = bytecode + encoded_args
-
-        # Use cast to deploy with raw bytecode
-        cmd = [
-            'cast', 'send',
-            '--rpc-url', rpc_url,
-            '--private-key', private_key,
-            '--create', bytecode,
-            '--json'
-        ]
-
+        # Generate keypair
         result = subprocess.run(
-            cmd,
+            ['pam_web3_tool', 'generate-keypair'],
             capture_output=True,
             text=True,
-            timeout=180  # 3 minutes for slow networks
+            timeout=30,
         )
 
         if result.returncode != 0:
-            return None, f'Deployment failed: {result.stderr}'
+            return False, f'Keypair generation failed: {result.stderr}'
 
-        # Parse the deployed address from JSON output
-        try:
-            output = json_module.loads(result.stdout)
-            contract_address = output.get('contractAddress')
-            if contract_address:
-                return contract_address, None
-        except json_module.JSONDecodeError:
-            pass
+        # Parse private key from output (bare hex, 64 chars, no 0x prefix)
+        # pam_web3_tool outputs lines like:
+        #   Private key (hex): abcdef1234...
+        #   Public key (hex): 04abcdef...
+        private_key = ''
+        public_key = ''
+        for line in result.stdout.strip().split('\n'):
+            lower = line.lower()
+            if 'private' in lower and ':' in line:
+                val = line.split(':', 1)[1].strip().replace('0x', '')
+                if len(val) == 64 and all(c in '0123456789abcdefABCDEF' for c in val):
+                    private_key = val
+            elif 'public' in lower and ':' in line:
+                val = line.split(':', 1)[1].strip()
+                val_clean = val.replace('0x', '')
+                if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
+                    public_key = f'0x{val_clean}'
 
-        # Try to parse from non-JSON output
-        # Look for "Deployed to: 0x..." pattern
-        import re
-        match = re.search(r'(?:contractAddress|Deployed to)[:\s]+([0-9a-fA-Fx]+)', result.stdout)
-        if match:
-            return match.group(1), None
+        # Fallback: try bare hex lines (two lines: private, public)
+        if not private_key:
+            for line in result.stdout.strip().split('\n'):
+                stripped = line.strip().replace('0x', '')
+                if len(stripped) == 64 and all(c in '0123456789abcdefABCDEF' for c in stripped):
+                    private_key = stripped
+                    break
 
-        return None, f'Could not parse deployed address from output: {result.stdout}'
+        if not private_key:
+            return False, 'Could not parse private key from keypair output'
 
-    except subprocess.TimeoutExpired:
-        return None, 'Contract deployment timed out (120s)'
-    except Exception as e:
-        return None, str(e)
+        # Write server.key (hex, 64 chars, no 0x prefix)
+        server_key.write_text(private_key)
+        set_blockhost_ownership(server_key, 0o640)
 
-
-def _finalize_config(config: dict) -> tuple[bool, Optional[str]]:
-    """Write configuration files."""
-    try:
-        config_dir = Path('/etc/blockhost')
-        config_dir.mkdir(parents=True, exist_ok=True)
-
-        blockchain = config.get('blockchain', {})
-        provisioner = config.get('provisioner', {})
-        ipv6 = config.get('ipv6', {})
-        contracts = config.get('contracts', {})
-        admin_commands = config.get('admin_commands', {})
-        admin_wallet = config.get('admin_wallet', '')
-
-        # Write db.yaml — shared keys always, provisioner-specific keys conditionally
-        db_config = {
-            'db_file': '/var/lib/blockhost/vms.json',
-            'ipv6_pool': {
-                'start': 1,  # First usable offset after network address
-                'end': 254,
-            },
-            'default_expiry_days': 30,
-            'gc_grace_days': provisioner.get('gc_grace_days', 7),
-        }
-
-        # IP pool (both provisioners provide these, possibly auto-detected)
-        ip_network = provisioner.get('ip_network')
-        if ip_network:
-            ip_start = provisioner.get('ip_start', '200')
-            ip_end = provisioner.get('ip_end', '250')
-            # Convert full IP strings to last-octet integers
-            if isinstance(ip_start, str) and '.' in ip_start:
-                ip_start = int(ip_start.split('.')[-1])
-            if isinstance(ip_end, str) and '.' in ip_end:
-                ip_end = int(ip_end.split('.')[-1])
-            db_config['ip_pool'] = {
-                'network': ip_network,
-                'start': ip_start,
-                'end': ip_end,
-                'gateway': provisioner.get('gateway', ''),
-            }
-
-        # Provisioner-specific keys (only written if present in session data)
-        if provisioner.get('vmid_start'):
-            db_config['vmid_range'] = {
-                'start': provisioner.get('vmid_start', 100),
-                'end': provisioner.get('vmid_end', 999),
-            }
-        if provisioner.get('terraform_dir'):
-            db_config['terraform_dir'] = provisioner['terraform_dir']
-
-        # Bridge name — discovered from first-boot or system scan
-        bridge_name = _discover_bridge()
-        if bridge_name:
-            db_config['bridge'] = bridge_name
-        write_yaml(config_dir / 'db.yaml', db_config)
-        set_blockhost_ownership(config_dir / 'db.yaml', 0o640)
-
-        chain_id = int(blockchain.get('chain_id', 11155111))
-
-        # Write web3-defaults.yaml (nested structure expected by provisioner)
-        web3_config = {
-            'blockchain': {
-                'chain_id': chain_id,
-                'rpc_url': blockchain.get('rpc_url'),
-                'nft_contract': contracts.get('nft'),
-                'subscription_contract': contracts.get('subscription'),
-                'usdc_address': USDC_BY_CHAIN.get(chain_id, ''),
-            },
-            'auth': {
-                'otp_length': 6,
-                'otp_ttl_seconds': 300,
-                'public_secret': config.get('admin_public_secret', 'blockhost-access'),
-            },
-            'signing_page': {
-                'html_path': '/usr/share/libpam-web3-tools/signing-page/index.html',
-            },
-            'deployer': {
-                'private_key_file': '/etc/blockhost/deployer.key',
-            },
-            'server': {
-                'public_key': config.get('server_public_key', ''),
-            },
-        }
-        write_yaml(config_dir / 'web3-defaults.yaml', web3_config)
-        set_blockhost_ownership(config_dir / 'web3-defaults.yaml', 0o640)
-
-        # Write blockhost.yaml (includes fields needed by generate-signup-page.py)
-        blockhost_config = {
-            'server': {
-                'address': config.get('server_address'),
-                'key_file': '/etc/blockhost/server.key',
-            },
-            'deployer': {
-                'key_file': '/etc/blockhost/deployer.key',
-            },
-            # Top-level fields for generate-signup-page.py
-            'server_public_key': config.get('server_public_key', ''),
-            'public_secret': config.get('admin_public_secret', 'blockhost-access'),
-        }
-
-        # Add admin section if admin commands are enabled
-        if admin_wallet:
-            admin_section = {
-                'wallet_address': admin_wallet,
-            }
-            if admin_commands.get('enabled'):
-                admin_section.update({
-                    'max_command_age': 300,
-                    'destination_mode': admin_commands.get('destination_mode', 'self'),
-                })
-            blockhost_config['admin'] = admin_section
-
-        write_yaml(config_dir / 'blockhost.yaml', blockhost_config)
-        set_blockhost_ownership(config_dir / 'blockhost.yaml', 0o640)
-
-        # Write admin-commands.json if admin commands are enabled
-        if admin_commands.get('enabled') and admin_commands.get('knock_command'):
-            commands_db = {
-                'commands': {
-                    admin_commands['knock_command']: {
-                        'action': 'knock',
-                        'description': 'Open configured ports temporarily',
-                        'params': {
-                            'allowed_ports': admin_commands.get('knock_ports', [22]),
-                            'default_duration': admin_commands.get('knock_timeout', 300),
-                        }
-                    }
-                }
-            }
-            (config_dir / 'admin-commands.json').write_text(
-                json.dumps(commands_db, indent=2) + '\n'
+        # Derive public key if not parsed from generate-keypair output
+        if not public_key:
+            result2 = subprocess.run(
+                ['pam_web3_tool', 'derive-pubkey', '--private-key', private_key],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
+            if result2.returncode == 0:
+                for line in result2.stdout.strip().split('\n'):
+                    if ':' in line:
+                        val = line.split(':', 1)[1].strip()
+                    else:
+                        val = line.strip()
+                    val_clean = val.replace('0x', '')
+                    if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
+                        public_key = f'0x{val_clean}'
+                        break
+            if not public_key:
+                return False, 'Could not derive public key from private key'
 
-        # Write admin signature for NFT #0 minting
-        admin_signature = config.get('admin_signature', '')
-        if admin_signature:
-            sig_file = config_dir / 'admin-signature.key'
-            sig_file.write_text(admin_signature)
-            set_blockhost_ownership(sig_file, 0o640)
-
-        # Write .env file for blockhost-monitor service
-        env_file = Path('/opt/blockhost/.env')
-        env_file.parent.mkdir(parents=True, exist_ok=True)
-
-        env_lines = [
-            f"RPC_URL={blockchain.get('rpc_url', '')}",
-            f"BLOCKHOST_CONTRACT={contracts.get('subscription', '')}",
-            f"NFT_CONTRACT={contracts.get('nft', '')}",
-            f"DEPLOYER_KEY_FILE=/etc/blockhost/deployer.key",
-        ]
-        env_file.write_text('\n'.join(env_lines) + '\n')
-        set_blockhost_ownership(env_file, 0o640)
+        # Write server.pubkey (hex with 0x prefix)
+        server_pubkey.write_text(public_key)
+        set_blockhost_ownership(server_pubkey, 0o644)
 
         return True, None
+    except FileNotFoundError:
+        return False, 'pam_web3_tool not installed'
+    except subprocess.TimeoutExpired:
+        return False, 'Keypair generation timed out'
     except Exception as e:
         return False, str(e)
 
@@ -577,8 +307,8 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
 
         if ipv6.get('mode') == 'broker':
             registry = ipv6.get('broker_registry')
-            contracts = config.get('contracts', {})
-            nft_contract = contracts.get('nft')
+            blockchain = config.get('blockchain', {})
+            nft_contract = blockchain.get('nft_contract', '')
 
             if not nft_contract:
                 return False, 'NFT contract address not available for broker request'
@@ -720,7 +450,7 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 )
 
                 # Persist via systemd oneshot (works on both Proxmox and standard Debian
-                # — Proxmox bypasses ifupdown, so interfaces.d is not reliable)
+                # — Proxmox bypasses ifupdown, so interfaces.d/ is not reliable)
                 service_content = f"""[Unit]
 Description=BlockHost host routable IPv6 (dummy interface)
 After=wg-quick@wg-broker.service
@@ -786,9 +516,17 @@ WantedBy=multi-user.target
                     str(network.network_address + 1),  # bridge gateway
                     str(network.network_address + 2),  # dummy0 host address
                 ]
-                vms_json = Path('/var/lib/blockhost/vms.json')
-                if vms_json.exists():
-                    db = json.loads(vms_json.read_text())
+                # Read db_file path from db.yaml (written by provisioner)
+                db_yaml = CONFIG_DIR / 'db.yaml'
+                db_file = Path('/var/lib/blockhost/vm-db.json')  # fallback
+                if db_yaml.exists():
+                    import yaml
+                    db_conf = yaml.safe_load(db_yaml.read_text()) or {}
+                    if db_conf.get('db_file'):
+                        db_file = Path(db_conf['db_file'])
+                db_file.parent.mkdir(parents=True, exist_ok=True)
+                if db_file.exists():
+                    db = json.loads(db_file.read_text())
                 else:
                     db = {"vms": {}, "next_vmid": 100, "allocated_ips": [],
                           "allocated_ipv6": [], "reserved_nft_tokens": {}}
@@ -796,9 +534,21 @@ WantedBy=multi-user.target
                 for addr in reserved:
                     if addr not in allocated:
                         allocated.append(addr)
-                vms_json.write_text(json.dumps(db, indent=2))
+                db_file.write_text(json.dumps(db, indent=2))
             except Exception as e:
                 print(f"Warning: Could not reserve host IPv6 in VM database: {e}")
+
+        # Append ipv6_pool to db.yaml (written by provisioner in an earlier step)
+        if prefix:
+            db_yaml = CONFIG_DIR / 'db.yaml'
+            if db_yaml.exists():
+                try:
+                    import yaml
+                    db_config = yaml.safe_load(db_yaml.read_text()) or {}
+                    db_config['ipv6_pool'] = {'prefix': prefix}
+                    write_yaml(db_yaml, db_config)
+                except Exception as e:
+                    print(f"Warning: Could not add ipv6_pool to db.yaml: {e}")
 
         return True, None
     except subprocess.TimeoutExpired:
@@ -1132,247 +882,48 @@ server {{
         return False, str(e)
 
 
-def _finalize_mint_nft(config: dict) -> tuple[bool, Optional[str]]:
-    """Mint NFT #0 (admin access credential) to the admin wallet.
-
-    This encrypts the connection details with the admin's signature-derived
-    key and mints an NFT containing the encrypted data.
-    """
-    try:
-        admin_wallet = config.get('admin_wallet')
-        admin_signature = config.get('admin_signature')
-        admin_public_secret = config.get('admin_public_secret', '')
-        https_config = config.get('https', {})
-        hostname = https_config.get('hostname', '')
-
-        if not admin_wallet:
-            return False, 'Admin wallet not configured'
-        if not admin_signature:
-            return False, 'Admin signature not available'
-
-        # Step 1: Encrypt connection details using pam_web3_tool
-        plaintext = json.dumps({
-            'hostname': hostname,
-            'port': 443,
-            'type': 'admin',
-        })
-
-        encrypt_result = subprocess.run(
-            [
-                'pam_web3_tool', 'encrypt-symmetric',
-                '--signature', admin_signature,
-                '--plaintext', plaintext,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if encrypt_result.returncode != 0:
-            return False, f'Encryption failed: {encrypt_result.stderr}'
-
-        ciphertext_hex = parse_pam_ciphertext(encrypt_result.stdout)
-        if not ciphertext_hex:
-            return False, f'Could not parse ciphertext from output: {encrypt_result.stdout}'
-
-        # Step 2: Mint or update NFT
-        try:
-            sys.path.insert(0, '/usr/lib/python3/dist-packages')
-            from blockhost.mint_nft import mint_nft
-            from blockhost.config import load_web3_config
-        except ImportError as e:
-            return False, f'Cannot import minting module: {e}'
-
-        web3_config = load_web3_config()
-        nft_contract = web3_config['blockchain']['nft_contract']
-        rpc_url = web3_config['blockchain']['rpc_url']
-
-        # Check if admin already owns an NFT
-        check_cmd = ['cast', 'call', nft_contract,
-                     'balanceOf(address)', admin_wallet,
-                     '--rpc-url', rpc_url]
-        check_result = subprocess.run(check_cmd, capture_output=True,
-                                      text=True, timeout=30)
-        if check_result.returncode == 0:
-            raw = check_result.stdout.strip()
-            balance = _parse_cast_int(raw)
-        else:
-            balance = 0
-
-        if balance > 0:
-            # UPDATE path: admin already has an NFT, update instead of re-minting
-            token_cmd = ['cast', 'call', nft_contract,
-                         'tokenOfOwnerByIndex(address,uint256)',
-                         admin_wallet, '0',
-                         '--rpc-url', rpc_url]
-            token_result = subprocess.run(token_cmd, capture_output=True,
-                                          text=True, timeout=30)
-            if token_result.returncode != 0:
-                return False, f'Cannot find admin token: {token_result.stderr}'
-
-            raw = token_result.stdout.strip()
-            token_id = str(_parse_cast_int(raw))
-
-            deployer_key = Path('/etc/blockhost/deployer.key').read_text().strip()
-
-            # Update userEncrypted on-chain
-            update_cmd = ['cast', 'send', nft_contract,
-                          'updateUserEncrypted(uint256,bytes)',
-                          token_id, ciphertext_hex,
-                          '--private-key', deployer_key,
-                          '--rpc-url', rpc_url, '--json']
-            update_result = subprocess.run(update_cmd, capture_output=True,
-                                           text=True, timeout=120)
-            if update_result.returncode != 0:
-                return False, f'updateUserEncrypted failed: {update_result.stderr}'
-
-            print(f"Updated existing NFT #{token_id} instead of minting")
-
-            config['mint_nft_result'] = {
-                'token_id': token_id,
-                'tx_hash': 'updated (existing NFT)',
-                'message': f'Existing NFT #{token_id} found, updated metadata',
-            }
-        else:
-            # MINT path: fresh install, no existing NFT
-            result = mint_nft(
-                owner_wallet=admin_wallet,
-                machine_id='blockhost-admin',
-                user_encrypted=ciphertext_hex,
-                public_secret=admin_public_secret,
-                config=web3_config,
-            )
-
-            config['mint_nft_result'] = {
-                'token_id': '0',
-                'tx_hash': result or '',
-            }
-
-        # Write credential_nft_id to blockhost.yaml so `bw who admin` can resolve it
-        token_id = int(config['mint_nft_result']['token_id'])
-        blockhost_yaml = Path('/etc/blockhost/blockhost.yaml')
-        try:
-            import yaml
-            bh_config = yaml.safe_load(blockhost_yaml.read_text()) or {}
-        except ImportError:
-            bh_config = {}
-        bh_config.setdefault('admin', {})['credential_nft_id'] = token_id
-        write_yaml(blockhost_yaml, bh_config)
-        set_blockhost_ownership(blockhost_yaml, 0o640)
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _write_revenue_share_config(config: dict):
-    """Write addressbook.json and revenue-share.json based on wizard settings."""
-    config_dir = Path('/etc/blockhost')
-    config_dir.mkdir(parents=True, exist_ok=True)
-    blockchain = config.get('blockchain', {})
-    share_dev = blockchain.get('revenue_share_dev', False) and blockchain.get('revenue_share_enabled', False)
-    share_broker = blockchain.get('revenue_share_broker', False) and blockchain.get('revenue_share_enabled', False)
-
-    # Build addressbook — always written, used beyond just revenue sharing
-    # Each entry is {address, keyfile?}. No "hot" entry — engine auto-generates it.
-    addressbook = {}
-
-    admin_wallet = config.get('admin_wallet', '')
-    if admin_wallet:
-        addressbook['admin'] = {'address': admin_wallet}
-
-    deployer_key = blockchain.get('deployer_key', '')
-    if deployer_key:
-        deployer_addr = get_address_from_key(deployer_key)
-        if deployer_addr:
-            addressbook['server'] = {
-                'address': deployer_addr,
-                'keyfile': '/etc/blockhost/deployer.key',
-            }
-
-    # dev and broker only included when their revenue sharing role is enabled
-    if share_dev:
-        addressbook['dev'] = {'address': '0xe35B5D114eFEA216E6BB5Ff15C261d25dB9E2cb9'}
-
-    broker_wallet = None
-    if share_broker:
-        broker_wallet = _resolve_broker_wallet(config)
-        if broker_wallet:
-            addressbook['broker'] = {'address': broker_wallet}
-        else:
-            print("Warning: Could not resolve broker wallet, skipping broker from revenue share")
-
-    (config_dir / 'addressbook.json').write_text(json.dumps(addressbook, indent=2))
-    set_blockhost_ownership(config_dir / 'addressbook.json', 0o640)
-
-    # Revenue share config
-    if not blockchain.get('revenue_share_enabled'):
-        (config_dir / 'revenue-share.json').write_text(json.dumps({
-            'enabled': False,
-            'total_percent': 0,
-            'recipients': [],
-        }, indent=2))
-        os.chmod(config_dir / 'revenue-share.json', 0o644)
-        return
-
-    total_percent = blockchain.get('revenue_share_percent', 1)
-
-    recipients = []
-    if share_dev:
-        recipients.append('dev')
-    if share_broker and broker_wallet:
-        recipients.append('broker')
-
-    per_recipient = round(total_percent / len(recipients), 4) if recipients else 0
-    (config_dir / 'revenue-share.json').write_text(json.dumps({
-        'enabled': True,
-        'total_percent': total_percent,
-        'recipients': [{'role': r, 'percent': per_recipient} for r in recipients],
-    }, indent=2))
-    os.chmod(config_dir / 'revenue-share.json', 0o644)
-
-
-def _resolve_broker_wallet(config: dict) -> Optional[str]:
-    """Read the broker's wallet address from broker-allocation.json.
-
-    The broker-client records the msg.sender of the broker's submitResponse
-    transaction as broker_wallet when saving the allocation config.
-    """
-    try:
-        alloc_file = Path('/etc/blockhost/broker-allocation.json')
-        if not alloc_file.exists():
-            return None
-
-        alloc = json.loads(alloc_file.read_text())
-        wallet = alloc.get('broker_wallet', '')
-        if wallet and wallet.startswith('0x') and len(wallet) == 42:
-            return wallet
-
-        return None
-    except Exception as e:
-        print(f"Warning: Failed to read broker wallet: {e}")
-        return None
-
-
 def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
-    """Finalize setup: enable services, create default plan, mark complete.
+    """Finalize setup: write admin config, enable services, mark complete.
 
-    Note: NFT #0 minting is NOT done here. It requires the wallet connection
-    step (after OTP auth) to be implemented first. NFT #0 should be minted
-    to the admin's connected wallet, not the deployer wallet.
+    Chain-specific operations (plan creation, revenue sharing, monitor service)
+    are handled by engine post-finalization steps. This step only handles
+    chain-agnostic admin config and system housekeeping.
     """
     try:
+        config_dir = Path('/etc/blockhost')
+        config_dir.mkdir(parents=True, exist_ok=True)
         marker_dir = Path('/var/lib/blockhost')
         marker_dir.mkdir(parents=True, exist_ok=True)
 
-        contracts = config.get('contracts', {})
+        admin_commands = config.get('admin_commands', {})
+        admin_signature = config.get('admin_signature', '')
 
-        # Enable blockhost services (will start on reboot)
-        subprocess.run(
-            ['systemctl', 'enable', 'blockhost-monitor'],
-            capture_output=True,
-            timeout=30
-        )
+        # Write admin-commands.json if admin commands are enabled
+        if admin_commands.get('enabled') and admin_commands.get('knock_command'):
+            commands_db = {
+                'commands': {
+                    admin_commands['knock_command']: {
+                        'action': 'knock',
+                        'description': 'Open configured ports temporarily',
+                        'params': {
+                            'allowed_ports': admin_commands.get('knock_ports', [22]),
+                            'default_duration': admin_commands.get('knock_timeout', 300),
+                        }
+                    }
+                }
+            }
+            (config_dir / 'admin-commands.json').write_text(
+                json.dumps(commands_db, indent=2) + '\n'
+            )
+
+        # Write admin signature for NFT #0 minting (used by engine mint step)
+        if admin_signature:
+            sig_file = config_dir / 'admin-signature.key'
+            sig_file.write_text(admin_signature)
+            set_blockhost_ownership(sig_file, 0o640)
+
+        # Enable chain-agnostic blockhost services (will start on reboot)
+        # Note: blockhost-monitor is engine-specific — enabled by engine post-step
         subprocess.run(
             ['systemctl', 'enable', 'blockhost-admin'],
             capture_output=True,
@@ -1383,21 +934,6 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
             capture_output=True,
             timeout=30
         )
-
-        # Create default plan if we deployed subscription contract
-        if contracts.get('subscription'):
-            try:
-                _create_default_plan(config)
-            except Exception as e:
-                # Non-fatal - admin can create plan manually
-                print(f"Warning: Failed to create default plan: {e}")
-
-        # Write revenue sharing config (addressbook + revenue-share)
-        try:
-            _write_revenue_share_config(config)
-        except Exception as e:
-            # Non-fatal
-            print(f"Warning: Failed to write revenue share config: {e}")
 
         # Ensure state dir is owned by blockhost user
         subprocess.run(
@@ -1467,99 +1003,3 @@ def _finalize_validate(config: dict) -> tuple[bool, Optional[str]]:
         return True, None
     except Exception as e:
         return False, f"Validation error: {str(e)}"
-
-
-def _create_default_plan(config: dict):
-    """Create a default hosting plan on the subscription contract."""
-    contracts = config.get('contracts', {})
-    blockchain = config.get('blockchain', {})
-
-    subscription_contract = contracts.get('subscription')
-    rpc_url = blockchain.get('rpc_url')
-
-    # Read deployer key
-    deployer_key_file = Path('/etc/blockhost/deployer.key')
-    if not deployer_key_file.exists():
-        raise FileNotFoundError("Deployer key not found")
-
-    deployer_key = deployer_key_file.read_text().strip()
-
-    # Use wizard-configured plan name and price, with sensible defaults
-    plan_name = blockchain.get('plan_name', 'Basic VM')
-    plan_price = str(blockchain.get('plan_price_cents', 50))
-
-    # Check if plans already exist (idempotency)
-    skip_plan = False
-    check_cmd = ['cast', 'call', subscription_contract,
-                 'nextPlanId()', '--rpc-url', rpc_url]
-    check_result = subprocess.run(check_cmd, capture_output=True,
-                                  text=True, timeout=30)
-    if check_result.returncode == 0:
-        raw = check_result.stdout.strip()
-        next_plan_id = _parse_cast_int(raw)
-        if next_plan_id > 1:
-            print(f"Plans already exist (nextPlanId={next_plan_id}), skipping plan creation")
-            skip_plan = True
-
-    if not skip_plan:
-        # createPlan(string name, uint256 pricePerDayUsdCents)
-        cmd = [
-            'cast', 'send',
-            subscription_contract,
-            'createPlan(string,uint256)',
-            plan_name,
-            plan_price,
-            '--private-key', deployer_key,
-            '--rpc-url', rpc_url,
-            '--json',
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Plan creation failed: {result.stderr}")
-
-        print(f"Plan '{plan_name}' created at {plan_price} cents/day")
-
-    # Set primary stablecoin (USDC) based on chain
-    chain_id = int(blockchain.get('chain_id', 11155111))
-    usdc_address = USDC_BY_CHAIN.get(chain_id)
-    if usdc_address:
-        # Check current stablecoin before writing (idempotency)
-        check_cmd = ['cast', 'call', subscription_contract,
-                     'primaryStablecoin()', '--rpc-url', rpc_url]
-        check_result = subprocess.run(check_cmd, capture_output=True,
-                                      text=True, timeout=30)
-        if check_result.returncode == 0:
-            raw = check_result.stdout.strip()
-            current = '0x' + raw[-40:] if len(raw) >= 40 else raw
-            if current.lower() == usdc_address.lower():
-                print(f"Primary stablecoin already set to {usdc_address}, skipping")
-                return
-
-        cmd = [
-            'cast', 'send',
-            subscription_contract,
-            'setPrimaryStablecoin(address)',
-            usdc_address,
-            '--private-key', deployer_key,
-            '--rpc-url', rpc_url,
-            '--json',
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        if result.returncode == 0:
-            print(f"Primary stablecoin set to USDC ({usdc_address})")
-        else:
-            print(f"Warning: Failed to set stablecoin: {result.stderr}")
