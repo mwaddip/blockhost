@@ -488,10 +488,9 @@ def run_full_validation() -> ValidationReport:
 
     # ========== YAML CONFIG FILES ==========
 
-    # db.yaml — shared keys always required, provisioner-specific keys conditional
-    db_yaml_keys = ['db_file', 'gc_grace_days']
-    if provisioner_name in (None, 'proxmox'):
-        db_yaml_keys.extend(['vmid_range.start', 'vmid_range.end', 'ip_pool.network'])
+    # db.yaml — ip_pool written by provisioner finalization
+    # 'bridge' is provisioner-specific (Proxmox has vmbr0, libvirt uses NAT network)
+    db_yaml_keys = ['ip_pool.network']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'db.yaml',
         "Config", "db.yaml",
@@ -503,11 +502,11 @@ def run_full_validation() -> ValidationReport:
         etc_blockhost / 'web3-defaults.yaml',
         "Config", "web3-defaults.yaml",
         required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract',
-                       'blockchain.subscription_contract', 'auth.public_secret', 'server.public_key']
+                       'blockchain.subscription_contract', 'blockchain.server_public_key']
     ))
 
     # blockhost.yaml
-    blockhost_yaml_keys = ['server.key_file', 'deployer.key_file',
+    blockhost_yaml_keys = ['server.key_file',
                            'admin.wallet_address', 'public_secret', 'server_public_key']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'blockhost.yaml',
@@ -566,7 +565,7 @@ def run_full_validation() -> ValidationReport:
     report.add(_check_json_syntax(revshare_file, "Config", "revenue-share.json",
                                   required_keys=['enabled', 'total_percent', 'recipients']))
     if revshare_file.exists():
-        report.add(_check_file_permissions(revshare_file, 0o644, "Permissions", "revenue-share.json"))
+        report.add(_check_file_permissions(revshare_file, 0o640, "Permissions", "revenue-share.json"))
         try:
             rs_data = json.loads(revshare_file.read_text())
             if rs_data.get('enabled'):

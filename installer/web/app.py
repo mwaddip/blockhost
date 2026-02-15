@@ -202,6 +202,9 @@ def _get_finalization_step_ids() -> list[str]:
 
     Used by SetupState at module load time to know what steps exist.
     """
+    # Infrastructure steps (chain-agnostic, run before engine)
+    infra_ids = ['keypair']
+
     # Engine pre-steps
     engine_ids = []
     if _engine and _engine.get('module'):
@@ -233,7 +236,7 @@ def _get_finalization_step_ids() -> list[str]:
 
     final_ids = ['finalize', 'validate']
 
-    return engine_ids + provisioner_ids + post_ids + engine_post_ids + final_ids
+    return infra_ids + engine_ids + provisioner_ids + post_ids + engine_post_ids + final_ids
 
 
 # Global job storage for async operations
@@ -784,7 +787,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
-        all_finalization_steps = []
+        all_finalization_steps = [
+            {'id': 'keypair', 'label': 'Generating server keypair'},
+        ]
 
         # Engine pre-steps
         if _engine and _engine.get('module'):
@@ -1331,11 +1336,14 @@ def run_server(host: str = '0.0.0.0', port: int = 80, use_https: bool = False):
             app.config['SESSION_COOKIE_SECURE'] = True
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(cert_path), str(key_path))
-            app.run(host=host, port=443, ssl_context=context)
+            testing_mode = Path('/etc/blockhost/.testing-mode').exists()
+            app.run(host=host, port=443, ssl_context=context,
+                    debug=testing_mode, use_reloader=False)
             return
 
     # HTTP mode
-    app.run(host=host, port=port)
+    testing_mode = Path('/etc/blockhost/.testing-mode').exists()
+    app.run(host=host, port=port, debug=testing_mode, use_reloader=False)
 
 
 def main():

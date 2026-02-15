@@ -7,9 +7,9 @@ All step functions are private to this module. The public API is:
 - run_finalization_with_state(setup_state, config, provisioner, engine) — orchestration loop
 - run_finalization(job_id, config, jobs, provisioner, engine) — legacy wrapper
 
-Chain-specific steps (keypair, wallet, contracts, config, mint_nft, plan,
-revenue_share) are provided by the engine wizard plugin. This module only
-contains chain-agnostic infrastructure steps.
+Chain-specific steps (wallet, contracts, config, mint_nft, plan,
+revenue_share) are provided by the engine wizard plugin. This module
+contains chain-agnostic infrastructure steps (keypair, ipv6, https, etc.).
 """
 
 import ipaddress
@@ -33,12 +33,18 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
     """Build the finalization step list, injecting engine and provisioner steps.
 
     Step order:
-    1. Engine pre-steps (from plugin: keypair, wallet, contracts, chain_config)
-    2. Provisioner steps (from plugin: token, terraform, bridge, template)
-    3. Post steps (ipv6, https, signup, nginx)
-    4. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
-    5. Final steps (finalize, validate)
+    1. Infrastructure steps (keypair — chain-agnostic, needed before engine)
+    2. Engine pre-steps (from plugin: wallet, contracts, chain_config)
+    3. Provisioner steps (from plugin: token, terraform, bridge, template)
+    4. Post steps (ipv6, https, signup, nginx)
+    5. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
+    6. Final steps (finalize, validate)
     """
+    # Infrastructure steps (chain-agnostic, run before engine)
+    infra_steps = [
+        ('keypair', 'Generating server keypair', _finalize_keypair),
+    ]
+
     # Engine pre-steps (chain-specific)
     engine_steps = []
     if engine and engine.get('module'):
@@ -72,7 +78,7 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
         ('validate', 'Validating system (testing only)', _finalize_validate),
     ]
 
-    return engine_steps + provisioner_steps + post_steps + engine_post_steps + final_steps
+    return infra_steps + engine_steps + provisioner_steps + post_steps + engine_post_steps + final_steps
 
 
 def run_finalization_with_state(setup_state, config: dict, provisioner, engine=None):
@@ -178,6 +184,104 @@ def _discover_bridge() -> Optional[str]:
 # Step functions (private to this module — chain-agnostic infrastructure)
 # ---------------------------------------------------------------------------
 
+CONFIG_DIR = Path('/etc/blockhost')
+
+
+def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
+    """Generate server ECIES keypair (server.key + server.pubkey).
+
+    Uses pam_web3_tool (secp256k1) — not chain-specific, every engine
+    needs this for PAM authentication infrastructure.
+
+    Idempotent: skips if both files already exist.
+    No step result data — summary shows just "Completed".
+    """
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        server_key = CONFIG_DIR / 'server.key'
+        server_pubkey = CONFIG_DIR / 'server.pubkey'
+
+        if server_key.exists() and server_pubkey.exists():
+            return True, None
+
+        # Generate keypair
+        result = subprocess.run(
+            ['pam_web3_tool', 'generate-keypair'],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            return False, f'Keypair generation failed: {result.stderr}'
+
+        # Parse private key from output (bare hex, 64 chars, no 0x prefix)
+        # pam_web3_tool outputs lines like:
+        #   Private key (hex): abcdef1234...
+        #   Public key (hex): 04abcdef...
+        private_key = ''
+        public_key = ''
+        for line in result.stdout.strip().split('\n'):
+            lower = line.lower()
+            if 'private' in lower and ':' in line:
+                val = line.split(':', 1)[1].strip().replace('0x', '')
+                if len(val) == 64 and all(c in '0123456789abcdefABCDEF' for c in val):
+                    private_key = val
+            elif 'public' in lower and ':' in line:
+                val = line.split(':', 1)[1].strip()
+                val_clean = val.replace('0x', '')
+                if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
+                    public_key = f'0x{val_clean}'
+
+        # Fallback: try bare hex lines (two lines: private, public)
+        if not private_key:
+            for line in result.stdout.strip().split('\n'):
+                stripped = line.strip().replace('0x', '')
+                if len(stripped) == 64 and all(c in '0123456789abcdefABCDEF' for c in stripped):
+                    private_key = stripped
+                    break
+
+        if not private_key:
+            return False, 'Could not parse private key from keypair output'
+
+        # Write server.key (hex, 64 chars, no 0x prefix)
+        server_key.write_text(private_key)
+        set_blockhost_ownership(server_key, 0o640)
+
+        # Derive public key if not parsed from generate-keypair output
+        if not public_key:
+            result2 = subprocess.run(
+                ['pam_web3_tool', 'derive-pubkey', '--private-key', private_key],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result2.returncode == 0:
+                for line in result2.stdout.strip().split('\n'):
+                    if ':' in line:
+                        val = line.split(':', 1)[1].strip()
+                    else:
+                        val = line.strip()
+                    val_clean = val.replace('0x', '')
+                    if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
+                        public_key = f'0x{val_clean}'
+                        break
+            if not public_key:
+                return False, 'Could not derive public key from private key'
+
+        # Write server.pubkey (hex with 0x prefix)
+        server_pubkey.write_text(public_key)
+        set_blockhost_ownership(server_pubkey, 0o644)
+
+        return True, None
+    except FileNotFoundError:
+        return False, 'pam_web3_tool not installed'
+    except subprocess.TimeoutExpired:
+        return False, 'Keypair generation timed out'
+    except Exception as e:
+        return False, str(e)
+
+
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
     """Configure IPv6 tunnel if using broker, or save manual prefix.
 
@@ -203,8 +307,8 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
 
         if ipv6.get('mode') == 'broker':
             registry = ipv6.get('broker_registry')
-            contracts = config.get('contracts', {})
-            nft_contract = contracts.get('nft')
+            blockchain = config.get('blockchain', {})
+            nft_contract = blockchain.get('nft_contract', '')
 
             if not nft_contract:
                 return False, 'NFT contract address not available for broker request'
@@ -412,9 +516,17 @@ WantedBy=multi-user.target
                     str(network.network_address + 1),  # bridge gateway
                     str(network.network_address + 2),  # dummy0 host address
                 ]
-                vms_json = Path('/var/lib/blockhost/vms.json')
-                if vms_json.exists():
-                    db = json.loads(vms_json.read_text())
+                # Read db_file path from db.yaml (written by provisioner)
+                db_yaml = CONFIG_DIR / 'db.yaml'
+                db_file = Path('/var/lib/blockhost/vm-db.json')  # fallback
+                if db_yaml.exists():
+                    import yaml
+                    db_conf = yaml.safe_load(db_yaml.read_text()) or {}
+                    if db_conf.get('db_file'):
+                        db_file = Path(db_conf['db_file'])
+                db_file.parent.mkdir(parents=True, exist_ok=True)
+                if db_file.exists():
+                    db = json.loads(db_file.read_text())
                 else:
                     db = {"vms": {}, "next_vmid": 100, "allocated_ips": [],
                           "allocated_ipv6": [], "reserved_nft_tokens": {}}
@@ -422,9 +534,21 @@ WantedBy=multi-user.target
                 for addr in reserved:
                     if addr not in allocated:
                         allocated.append(addr)
-                vms_json.write_text(json.dumps(db, indent=2))
+                db_file.write_text(json.dumps(db, indent=2))
             except Exception as e:
                 print(f"Warning: Could not reserve host IPv6 in VM database: {e}")
+
+        # Append ipv6_pool to db.yaml (written by provisioner in an earlier step)
+        if prefix:
+            db_yaml = CONFIG_DIR / 'db.yaml'
+            if db_yaml.exists():
+                try:
+                    import yaml
+                    db_config = yaml.safe_load(db_yaml.read_text()) or {}
+                    db_config['ipv6_pool'] = {'prefix': prefix}
+                    write_yaml(db_yaml, db_config)
+                except Exception as e:
+                    print(f"Warning: Could not add ipv6_pool to db.yaml: {e}")
 
         return True, None
     except subprocess.TimeoutExpired:
