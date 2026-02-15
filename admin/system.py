@@ -16,6 +16,72 @@ ADMIN_CONFIG_PATH = "/etc/blockhost/admin.json"
 ADMIN_COMMANDS_PATH = "/etc/blockhost/admin-commands.json"
 ADDRESSBOOK_PATH = "/etc/blockhost/addressbook.json"
 BW_ENV_PATH = "/opt/blockhost/.env"
+ENGINE_MANIFEST_PATH = "/usr/share/blockhost/engine.json"
+
+# Engine-supplied format constraints (loaded once at startup)
+_address_re = None
+_token_re = None
+_native_token = None
+
+
+def _load_engine_constraints():
+    """Load format patterns from engine manifest for input validation."""
+    global _address_re, _token_re, _native_token
+    try:
+        with open(ENGINE_MANIFEST_PATH) as f:
+            manifest = json.load(f)
+        constraints = manifest.get('constraints', {})
+        ap = constraints.get('address_pattern')
+        if ap:
+            _address_re = re.compile(ap)
+        tp = constraints.get('token_pattern')
+        if tp:
+            _token_re = re.compile(tp)
+        _native_token = constraints.get('native_token')
+    except (OSError, json.JSONDecodeError, re.error):
+        pass
+
+
+_load_engine_constraints()
+
+
+def _valid_token(token):
+    """Validate token identifier against engine constraints."""
+    if not token:
+        return False
+    # Chain-agnostic keywords (accepted by all bw implementations)
+    if token in ('native', 'stable', 'stablecoin'):
+        return True
+    # Engine native token keyword (e.g. 'eth' for EVM)
+    if _native_token and token == _native_token:
+        return True
+    # Token address matching engine pattern
+    if _token_re and _token_re.match(token):
+        return True
+    return False
+
+
+def _valid_destination(dest):
+    """Validate destination (addressbook role name or raw address)."""
+    if not dest:
+        return False
+    # Addressbook role name
+    if re.match(r'^[a-zA-Z0-9_-]{1,32}$', dest):
+        return True
+    # Raw address matching engine pattern
+    if _address_re and _address_re.match(dest):
+        return True
+    return False
+
+
+def _valid_address(addr):
+    """Validate a raw address against engine constraints."""
+    if not addr:
+        return False
+    if _address_re:
+        return bool(_address_re.match(addr))
+    # No engine constraints — accept non-empty, let CLI validate
+    return True
 
 
 def _run(cmd, timeout=10):
@@ -459,9 +525,9 @@ def wallet_send(amount, token, from_role, to):
     """Run `bw send <amount> <token> <from> <to>`. Returns (ok, output, error)."""
     if not re.match(r'^[a-zA-Z0-9_-]{1,32}$', from_role):
         return False, "", "invalid from role"
-    if not re.match(r'^(eth|native|stable|stablecoin|usdc|0x[0-9a-fA-F]{40})$', token):
+    if not _valid_token(token):
         return False, "", "invalid token"
-    if not re.match(r'^([a-zA-Z0-9_-]{1,32}|0x[0-9a-fA-F]{40})$', to):
+    if not _valid_destination(to):
         return False, "", "invalid destination"
     try:
         float(amount)
@@ -476,12 +542,12 @@ def wallet_send(amount, token, from_role, to):
 
 def wallet_withdraw(to, token=None):
     """Run `bw withdraw [token] <to>`. Returns (ok, output, error)."""
-    if not re.match(r'^([a-zA-Z0-9_-]{1,32}|0x[0-9a-fA-F]{40})$', to):
+    if not _valid_destination(to):
         return False, "", "invalid destination"
 
     args = ["withdraw"]
     if token:
-        if not re.match(r'^(eth|native|stable|stablecoin|usdc|0x[0-9a-fA-F]{40})$', token):
+        if not _valid_token(token):
             return False, "", "invalid token"
         args.append(token)
     args.append(to)
@@ -513,7 +579,7 @@ def addressbook_add(name, address):
     """Run `ab add <name> <address>`. Returns (ok, output, error)."""
     if not re.match(r'^[a-zA-Z0-9]{1,20}$', name):
         return False, "", "invalid name"
-    if not re.match(r'^0x[0-9a-fA-F]{40}$', address):
+    if not _valid_address(address):
         return False, "", "invalid address"
     ok, out, err = _run_ab(["add", name, address])
     if not ok:

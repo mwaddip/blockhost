@@ -224,7 +224,9 @@
             Open <a href="{{ admin_prefix }}/sign" target="_blank">{{ admin_prefix }}/sign</a> to sign with the signing page
         </div>
 
-        <!-- Path B: Inline MetaMask -->
+        <!-- Engine wallet signing extension point:
+             This button uses EVM-specific MetaMask + personal_sign. A non-EVM engine
+             would need to provide its own login template with a different signing flow. -->
         <button class="btn btn-metamask" id="btn-metamask" onclick="signWithMetaMask()">
             Sign with MetaMask
         </button>
@@ -233,8 +235,8 @@
 
         <!-- Path A: Manual paste -->
         <div class="form-group">
-            <label for="sig-input">Signature (0x...)</label>
-            <input type="text" id="sig-input" placeholder="0x..." autocomplete="off" spellcheck="false">
+            <label for="sig-input">Signature{% if engine_ui.address_placeholder %} ({{ engine_ui.address_placeholder }}){% endif %}</label>
+            <input type="text" id="sig-input" placeholder="{{ engine_ui.address_placeholder }}" autocomplete="off" spellcheck="false">
         </div>
 
         <button class="btn btn-primary" id="btn-verify" onclick="verifySignature()">

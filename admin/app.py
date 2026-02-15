@@ -12,6 +12,7 @@ from flask import Flask, redirect, session
 
 ADMIN_CONFIG_PATH = "/etc/blockhost/admin.json"
 PROVISIONER_MANIFEST_PATH = "/usr/share/blockhost/provisioner.json"
+ENGINE_MANIFEST_PATH = "/usr/share/blockhost/engine.json"
 DEFAULT_PATH_PREFIX = "/admin"
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,20 @@ def _load_path_prefix():
         return prefix
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return DEFAULT_PATH_PREFIX
+
+
+def _load_engine_ui():
+    """Load engine display hints from manifest for templates."""
+    try:
+        manifest = json.loads(Path(ENGINE_MANIFEST_PATH).read_text())
+        constraints = manifest.get('constraints', {})
+        return {
+            'native_token': constraints.get('native_token', ''),
+            'native_token_label': constraints.get('native_token_label', 'Native'),
+            'address_placeholder': constraints.get('address_placeholder', ''),
+        }
+    except (OSError, json.JSONDecodeError):
+        return {'native_token': '', 'native_token_label': 'Native', 'address_placeholder': ''}
 
 
 def _load_provisioner_admin():
@@ -93,11 +108,14 @@ def create_app():
         app.register_blueprint(prov_bp)
         nav_pages.extend(prov_pages)
 
+    engine_ui = _load_engine_ui()
+
     @app.context_processor
     def inject_globals():
         return {
             "admin_prefix": app.config["PATH_PREFIX"],
             "nav_pages": nav_pages,
+            "engine_ui": engine_ui,
         }
 
     return app

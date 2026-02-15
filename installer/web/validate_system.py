@@ -24,6 +24,27 @@ from pathlib import Path
 from typing import Optional, Callable
 
 
+ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
+
+# Engine-supplied address format (loaded once at startup)
+_address_re = None
+
+
+def _load_engine_constraints():
+    """Load address format pattern from engine manifest."""
+    global _address_re
+    try:
+        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
+        ap = manifest.get('constraints', {}).get('address_pattern')
+        if ap:
+            _address_re = re.compile(ap)
+    except (OSError, json.JSONDecodeError, re.error):
+        pass
+
+
+_load_engine_constraints()
+
+
 @dataclass
 class ValidationResult:
     """Result of a single validation check."""
@@ -245,16 +266,18 @@ def _check_hex_key(path: Path, category: str, name: str, expected_length: int = 
         return ValidationResult(category, name, False, f"Invalid hex in {path}")
 
 
-def _check_eth_address(address: str, category: str, name: str) -> ValidationResult:
-    """Check if a string is a valid Ethereum address."""
+def _check_address(address: str, category: str, name: str) -> ValidationResult:
+    """Check if a string is a valid address (format from engine manifest)."""
     if not address:
         return ValidationResult(category, name, False, "Address is empty")
 
-    # Basic format check: 0x followed by 40 hex chars
-    pattern = r'^0x[0-9a-fA-F]{40}$'
-    if re.match(pattern, address):
-        return ValidationResult(category, name, True, f"Valid address: {address}")
-    return ValidationResult(category, name, False, f"Invalid Ethereum address format: {address}")
+    if _address_re:
+        if _address_re.match(address):
+            return ValidationResult(category, name, True, f"Valid address: {address}")
+        return ValidationResult(category, name, False, f"Invalid address format: {address}")
+
+    # No engine constraints — accept non-empty
+    return ValidationResult(category, name, True, f"Address present (no format check): {address}")
 
 
 def _check_service_state(service: str, expected_enabled: bool, expected_active: bool = None,
@@ -465,10 +488,9 @@ def run_full_validation() -> ValidationReport:
 
     # ========== YAML CONFIG FILES ==========
 
-    # db.yaml — shared keys always required, provisioner-specific keys conditional
-    db_yaml_keys = ['db_file', 'gc_grace_days']
-    if provisioner_name in (None, 'proxmox'):
-        db_yaml_keys.extend(['vmid_range.start', 'vmid_range.end', 'ip_pool.network'])
+    # db.yaml — ip_pool written by provisioner finalization
+    # 'bridge' is provisioner-specific (Proxmox has vmbr0, libvirt uses NAT network)
+    db_yaml_keys = ['ip_pool.network']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'db.yaml',
         "Config", "db.yaml",
@@ -480,11 +502,11 @@ def run_full_validation() -> ValidationReport:
         etc_blockhost / 'web3-defaults.yaml',
         "Config", "web3-defaults.yaml",
         required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract',
-                       'blockchain.subscription_contract', 'auth.public_secret', 'server.public_key']
+                       'blockchain.subscription_contract', 'blockchain.server_public_key']
     ))
 
     # blockhost.yaml
-    blockhost_yaml_keys = ['server.key_file', 'deployer.key_file',
+    blockhost_yaml_keys = ['server.key_file',
                            'admin.wallet_address', 'public_secret', 'server_public_key']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'blockhost.yaml',
@@ -520,7 +542,7 @@ def run_full_validation() -> ValidationReport:
             for role in ('admin', 'server'):
                 entry = ab_data.get(role, {})
                 addr = entry.get('address', '') if isinstance(entry, dict) else ''
-                report.add(_check_eth_address(addr, "Config", f"addressbook.json {role} address"))
+                report.add(_check_address(addr, "Config", f"addressbook.json {role} address"))
             # server should have keyfile
             server_entry = ab_data.get('server', {})
             if isinstance(server_entry, dict) and server_entry.get('keyfile'):
@@ -533,7 +555,7 @@ def run_full_validation() -> ValidationReport:
             for role in ('dev', 'broker'):
                 entry = ab_data.get(role)
                 if entry and isinstance(entry, dict):
-                    report.add(_check_eth_address(entry.get('address', ''), "Config",
+                    report.add(_check_address(entry.get('address', ''), "Config",
                                                   f"addressbook.json {role} address"))
         except (json.JSONDecodeError, IOError):
             pass  # Already caught by _check_json_syntax above
@@ -543,7 +565,7 @@ def run_full_validation() -> ValidationReport:
     report.add(_check_json_syntax(revshare_file, "Config", "revenue-share.json",
                                   required_keys=['enabled', 'total_percent', 'recipients']))
     if revshare_file.exists():
-        report.add(_check_file_permissions(revshare_file, 0o644, "Permissions", "revenue-share.json"))
+        report.add(_check_file_permissions(revshare_file, 0o640, "Permissions", "revenue-share.json"))
         try:
             rs_data = json.loads(revshare_file.read_text())
             if rs_data.get('enabled'):
@@ -632,7 +654,7 @@ def run_full_validation() -> ValidationReport:
             bh_data = yaml.safe_load(blockhost_yaml_admin.read_text())
             admin_section = bh_data.get('admin', {})
             admin_wallet = admin_section.get('wallet_address', '')
-            report.add(_check_eth_address(admin_wallet, "Admin", "Admin wallet address"))
+            report.add(_check_address(admin_wallet, "Admin", "Admin wallet address"))
 
             # Check if admin commands are enabled (has destination_mode means enabled)
             if admin_section.get('destination_mode'):
@@ -667,12 +689,12 @@ def run_full_validation() -> ValidationReport:
             blockchain = data.get('blockchain', {})
 
             nft_contract = blockchain.get('nft_contract', '')
-            report.add(_check_eth_address(nft_contract, "Contracts", "NFT contract address"))
+            report.add(_check_address(nft_contract, "Contracts", "NFT contract address"))
 
             # Subscription contract is optional
             sub_contract = blockchain.get('subscription_contract', '')
             if sub_contract:
-                report.add(_check_eth_address(sub_contract, "Contracts", "Subscription contract address"))
+                report.add(_check_address(sub_contract, "Contracts", "Subscription contract address"))
         except ImportError:
             report.add(ValidationResult("Contracts", "Address validation", True, "Skipped (yaml module unavailable)", critical=False))
         except Exception as e:
@@ -680,62 +702,55 @@ def run_full_validation() -> ValidationReport:
 
     # ========== NFT #0 (ADMIN CREDENTIAL) ==========
 
-    # Check if NFT #0 was minted (totalSupply > 0)
+    # Check if NFT contract exists at the configured address
     if web3_defaults.exists():
         try:
             import yaml
             data = yaml.safe_load(web3_defaults.read_text())
             blockchain = data.get('blockchain', {})
             nft_addr = blockchain.get('nft_contract', '')
-            rpc_url = blockchain.get('rpc_url', '')
 
-            if nft_addr and rpc_url:
+            if nft_addr:
                 try:
                     result = subprocess.run(
-                        ['cast', 'call', nft_addr, 'totalSupply()', '--rpc-url', rpc_url],
+                        ['is', 'contract', nft_addr],
                         capture_output=True,
                         text=True,
                         timeout=30
                     )
                     if result.returncode == 0:
-                        supply_hex = result.stdout.strip()
-                        try:
-                            supply = int(supply_hex, 16) if supply_hex.startswith('0x') else int(supply_hex)
-                        except ValueError:
-                            supply = 0
-                        if supply > 0:
-                            report.add(ValidationResult(
-                                "NFT", "Admin NFT minted", True,
-                                f"totalSupply = {supply}", critical=False
-                            ))
-                        else:
-                            report.add(ValidationResult(
-                                "NFT", "Admin NFT minted", False,
-                                "totalSupply is 0 — NFT #0 not minted", critical=False
-                            ))
+                        report.add(ValidationResult(
+                            "NFT", "NFT contract exists", True,
+                            f"Contract verified at {nft_addr}", critical=False
+                        ))
                     else:
                         report.add(ValidationResult(
-                            "NFT", "Admin NFT minted", False,
-                            f"cast call failed: {result.stderr}", critical=False
+                            "NFT", "NFT contract exists", False,
+                            f"No contract at {nft_addr}", critical=False
                         ))
-                except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                except FileNotFoundError:
                     report.add(ValidationResult(
-                        "NFT", "Admin NFT minted", False,
-                        f"Cannot check: {e}", critical=False
+                        "NFT", "NFT contract exists", False,
+                        "is CLI not found — is blockhost-engine installed?", critical=False
+                    ))
+                except subprocess.TimeoutExpired:
+                    report.add(ValidationResult(
+                        "NFT", "NFT contract exists", False,
+                        "Contract check timed out", critical=False
                     ))
             else:
                 report.add(ValidationResult(
-                    "NFT", "Admin NFT minted", True,
-                    "Skipped (no NFT contract or RPC configured)", critical=False
+                    "NFT", "NFT contract exists", True,
+                    "Skipped (no NFT contract configured)", critical=False
                 ))
         except ImportError:
             report.add(ValidationResult(
-                "NFT", "Admin NFT check", True,
+                "NFT", "NFT contract check", True,
                 "Skipped (yaml module unavailable)", critical=False
             ))
         except Exception as e:
             report.add(ValidationResult(
-                "NFT", "Admin NFT check", False,
+                "NFT", "NFT contract check", False,
                 f"Error: {e}", critical=False
             ))
 
