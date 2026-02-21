@@ -58,11 +58,11 @@ cd blockhost
 # Check and install build dependencies
 ./scripts/check-build-deps.sh --install
 
-# Build packages for your chosen backend
-./scripts/build-packages.sh --backend proxmox    # or: libvirt
+# Build packages for your chosen backend and engine
+./scripts/build-packages.sh --backend libvirt --engine opnet
 
 # Build the ISO
-sudo ./scripts/build-iso.sh --backend proxmox
+sudo ./scripts/build-iso.sh --backend libvirt --engine opnet
 
 # Boot the ISO, follow the wizard, done.
 ```

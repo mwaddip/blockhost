@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 ISO_EXTRACT="${BUILD_DIR}/iso-extract"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.3.0}"
 
 # Source Debian ISO
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
@@ -24,6 +24,7 @@ OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 TESTING_MODE=false
 BUILD_DEBS=false
 BACKEND=""
+ENGINE=""
 APT_PROXY=""
 
 # Colors
@@ -37,10 +38,11 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 usage() {
-    echo "Usage: $0 --backend <name> [OPTIONS]"
+    echo "Usage: $0 --backend <name> --engine <name> [OPTIONS]"
     echo ""
     echo "Required:"
     echo "  --backend <name>  Provisioner backend (e.g., proxmox, libvirt)"
+    echo "  --engine <name>   Blockchain engine (e.g., evm, opnet)"
     echo ""
     echo "Options:"
     echo "  --build-deb       Build all .deb packages from submodules before ISO creation"
@@ -67,6 +69,14 @@ parse_args() {
                 ;;
             --backend=*)
                 BACKEND="${1#*=}"
+                shift
+                ;;
+            --engine)
+                ENGINE="$2"
+                shift 2
+                ;;
+            --engine=*)
+                ENGINE="${1#*=}"
                 shift
                 ;;
             --testing)
@@ -359,9 +369,14 @@ main() {
         error "--backend is required\nUse --help for usage"
     fi
 
+    if [ -z "$ENGINE" ]; then
+        error "--engine is required\nUse --help for usage"
+    fi
+
     log "BlockHost ISO Builder v${VERSION}"
     log "Building from Debian 12 base"
     log "Backend: $BACKEND"
+    log "Engine: $ENGINE"
 
     if [ "$TESTING_MODE" = "true" ]; then
         log "TESTING MODE ENABLED"
@@ -373,7 +388,7 @@ main() {
 
     if [ "$BUILD_DEBS" = "true" ]; then
         log "Building .deb packages from submodules..."
-        if ! "${SCRIPT_DIR}/build-packages.sh" --backend "$BACKEND"; then
+        if ! "${SCRIPT_DIR}/build-packages.sh" --backend "$BACKEND" --engine "$ENGINE"; then
             error "Package build failed. Fix errors above and retry."
         fi
         log "All packages built successfully"

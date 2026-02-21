@@ -13,7 +13,7 @@ from .auth import (
 
 bp = Blueprint("admin", __name__)
 
-SIGNING_PAGE_PATH = "/usr/share/libpam-web3-tools/signing-page/index.html"
+SIGNING_PAGE_PATH = "/usr/share/blockhost/signing-page/index.html"
 
 
 # --- Auth routes ---

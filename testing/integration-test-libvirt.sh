@@ -150,7 +150,7 @@ info "Deployer: $DEPLOYER_ADDR (${DEPLOYER_ETH} ETH)"
 # jq check
 command -v jq >/dev/null 2>&1 || fail "jq is not installed"
 command -v cast >/dev/null 2>&1 || fail "cast is not installed"
-command -v pam_web3_tool >/dev/null 2>&1 || fail "pam_web3_tool is not installed"
+command -v nft_tool >/dev/null 2>&1 || fail "nft_tool is not installed"
 
 pass "Pre-flight: services running, config valid"
 
@@ -385,7 +385,7 @@ pass "NFT minted: token #$TOKEN_ID, owner $TOKEN_SHORT"
 info "Phase 8: Verify decryption"
 
 # Decrypt userEncrypted using the same signature
-DECRYPT_OUTPUT=$(pam_web3_tool decrypt-symmetric \
+DECRYPT_OUTPUT=$(nft_tool decrypt-symmetric \
     --signature "$SIGNATURE" \
     --ciphertext "$USER_ENCRYPTED" 2>&1) || fail "Decryption failed: $DECRYPT_OUTPUT"
 

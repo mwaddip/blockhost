@@ -30,7 +30,7 @@ These do NOT need the root agent:
 
 - **Terraform** — runs in `/var/lib/blockhost/terraform/` (blockhost-owned)
 - **Foundry `cast`** — blockchain transactions, contract calls
-- **`pam_web3_tool`** — encryption/decryption (reads keys via group permission)
+- **`bhcrypt`** — encryption/decryption (reads keys via group permission)
 - **Config reads** — all `/etc/blockhost/` configs are group-readable
 - **Database operations** — `/var/lib/blockhost/vms.json` is blockhost-owned
 
@@ -95,7 +95,8 @@ Each submodule has a defined scope. Keep functionality in the right place.
 | **blockhost-common** | Shared libraries | Config loading, VM database, root agent Python client |
 | **blockhost-provisioner-proxmox** | VM lifecycle | Create, suspend, destroy, resume, template build, NFT mint |
 | **blockhost-engine** | Blockchain interaction | Event monitor, admin commands, fund manager, `bw`/`ab` CLIs, root agent TS client |
-| **libpam-web3** | Authentication + crypto | PAM module (in VMs), `pam_web3_tool` CLI, signing page, ECIES encryption |
+| **libpam-web3** | Authentication | PAM module (in VMs), GECOS-based wallet verification |
+| **blockhost-engine** | Blockchain + crypto | Event monitor, signup page generator, `bhcrypt` CLI, `bw`/`ab` CLIs |
 | **blockhost-broker** | IPv6 allocation | Broker client, on-chain registry interaction, WireGuard config |
 | **Main repo** (installer) | Setup-time only | First boot, web wizard, finalization, root agent daemon |
 

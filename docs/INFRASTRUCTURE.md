@@ -94,11 +94,10 @@ Installed to `/usr/lib/python3/dist-packages/blockhost/`. Provides:
 - `blockhost.vm_db` — `VMDatabase`, `MockVMDatabase`, `get_database()` (allocate VMIDs, reserve NFT token IDs, track VM state)
 - `blockhost.root_agent` — client library for the root agent daemon
 
-### libpam-web3-tools (host tools)
+### bhcrypt (shipped by blockhost-engine)
 
-Installed on the Proxmox host. Provides:
-- `pam_web3_tool` CLI — `encrypt-symmetric`, `decrypt`, `generate-keypair`
-- Signing page HTML — used by signup page generator
+Installed on the host via the engine package. Provides:
+- `bhcrypt` CLI — `decrypt`, `encrypt-symmetric`, `decrypt-symmetric`, `generate-keypair`, `derive-pubkey`
 - Contract artifacts — `AccessCredentialNFT.json`, `BlockhostSubscriptions.json`
 
 ---

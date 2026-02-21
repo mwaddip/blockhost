@@ -242,7 +242,7 @@ def dict_to_yaml(data: dict, lines: list, indent: int):
 
 
 def parse_pam_ciphertext(output: str) -> Optional[str]:
-    """Parse ciphertext hex from pam_web3_tool output."""
+    """Parse ciphertext hex from nft_tool output."""
     for line in output.split('\n'):
         if 'Ciphertext' in line and '0x' in line:
             return line[line.index('0x'):].strip()

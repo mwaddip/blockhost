@@ -202,8 +202,8 @@ def _get_finalization_step_ids() -> list[str]:
 
     Used by SetupState at module load time to know what steps exist.
     """
-    # Infrastructure steps (chain-agnostic, run before engine)
-    infra_ids = ['keypair']
+    # No installer-owned infra steps — keypair generation is engine-owned
+    infra_ids = []
 
     # Engine pre-steps
     engine_ids = []
@@ -528,48 +528,97 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 flash('Invalid wallet address', 'error')
                 return redirect(url_for('wizard_wallet'))
 
-            if not admin_signature or not admin_signature.startswith('0x'):
+            if not admin_signature:
                 flash('Missing signature', 'error')
                 return redirect(url_for('wizard_wallet'))
+
+            # Engine-specific signature format check
+            if _engine and _engine.get('module'):
+                validate_sig = getattr(_engine['module'], 'validate_signature', None)
+                if validate_sig and not validate_sig(admin_signature):
+                    flash('Invalid signature format', 'error')
+                    return redirect(url_for('wizard_wallet'))
 
             session['admin_wallet'] = admin_wallet
             session['admin_signature'] = admin_signature
             session['admin_public_secret'] = public_secret
             return redirect(url_for('wizard_network'))
 
-        # If wallet already connected, allow re-doing or skip
-        # TODO: engine.get_wallet_template() override — non-EVM engines need
-        # their own wallet connect page (different signing method, no MetaMask)
-        return render_template('wizard/wallet.html')
+        # Resolve wallet template: engine override or built-in fallback
+        wallet_template = 'wizard/wallet.html'
+        if _engine and _engine.get('module'):
+            eng_fn = getattr(_engine['module'], 'get_wallet_template', None)
+            if eng_fn:
+                custom = eng_fn()
+                if custom:
+                    wallet_template = custom
+
+        return render_template(wallet_template)
+
+    def _nft_tool_decrypt(signature: str, ciphertext: str) -> dict:
+        """Legacy fallback: decrypt config via nft_tool subprocess."""
+        import yaml
+        result = subprocess.run(
+            ['nft_tool', 'decrypt-symmetric',
+             '--signature', signature,
+             '--ciphertext', ciphertext],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise ValueError('Decryption failed — wrong wallet or corrupted file')
+
+        config = yaml.safe_load(result.stdout)
+        if not isinstance(config, dict):
+            raise ValueError('Decrypted content is not valid config')
+        return config
+
+    def _nft_tool_encrypt(signature: str, plaintext: str) -> str:
+        """Legacy fallback: encrypt config via nft_tool subprocess."""
+        result = subprocess.run(
+            ['nft_tool', 'encrypt-symmetric',
+             '--signature', signature,
+             '--plaintext', plaintext],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise ValueError(f'Encryption failed: {result.stderr}')
+
+        ciphertext_hex = parse_pam_ciphertext(result.stdout)
+        if not ciphertext_hex:
+            raise ValueError('Could not parse encrypted output')
+        return ciphertext_hex
 
     @app.route('/api/restore-config', methods=['POST'])
     @require_auth
     def api_restore_config():
         """Decrypt an uploaded config file and restore session data."""
         admin_signature = request.form.get('admin_signature', '').strip()
-        if not admin_signature or not admin_signature.startswith('0x'):
+
+        # Validate signature format (engine-specific)
+        if not admin_signature:
             return jsonify({'error': 'Missing admin signature'}), 400
+        if _engine and _engine.get('module'):
+            validate_sig = getattr(_engine['module'], 'validate_signature', None)
+            if validate_sig and not validate_sig(admin_signature):
+                return jsonify({'error': 'Invalid signature format'}), 400
 
         uploaded = request.files.get('config_file')
         if not uploaded:
             return jsonify({'error': 'No file uploaded'}), 400
 
         ciphertext = uploaded.read().decode('utf-8', errors='ignore').strip()
-        if not ciphertext.startswith('0x'):
-            return jsonify({'error': 'Invalid config file (expected hex ciphertext)'}), 400
 
         try:
-            result = subprocess.run(
-                ['pam_web3_tool', 'decrypt-symmetric',
-                 '--signature', admin_signature,
-                 '--ciphertext', ciphertext],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return jsonify({'error': 'Decryption failed — wrong wallet or corrupted file'}), 400
+            # Decrypt config (engine-specific or legacy fallback)
+            decrypt_fn = None
+            if _engine and _engine.get('module'):
+                decrypt_fn = getattr(_engine['module'], 'decrypt_config', None)
 
-            import yaml
-            config = yaml.safe_load(result.stdout)
+            if decrypt_fn:
+                config = decrypt_fn(admin_signature, ciphertext)
+            else:
+                config = _nft_tool_decrypt(admin_signature, ciphertext)
+
             if not isinstance(config, dict):
                 return jsonify({'error': 'Decrypted content is not valid config'}), 400
 
@@ -597,9 +646,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
             return jsonify({'status': 'ok', 'redirect': url_for('wizard_summary')})
         except FileNotFoundError:
-            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+            return jsonify({'error': 'nft_tool not installed'}), 500
         except subprocess.TimeoutExpired:
             return jsonify({'error': 'Decryption timed out'}), 500
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
@@ -787,11 +838,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
-        all_finalization_steps = [
-            {'id': 'keypair', 'label': 'Generating server keypair'},
-        ]
+        all_finalization_steps = []
 
-        # Engine pre-steps
+        # Engine pre-steps (includes keypair generation)
         if _engine and _engine.get('module'):
             eng_mod = _engine['module']
             if hasattr(eng_mod, 'get_finalization_steps'):
@@ -1131,18 +1180,15 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'error': 'No admin signature available for encryption'}), 500
 
         try:
-            result = subprocess.run(
-                ['pam_web3_tool', 'encrypt-symmetric',
-                 '--signature', admin_signature,
-                 '--plaintext', plaintext],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return jsonify({'error': f'Encryption failed: {result.stderr}'}), 500
+            # Encrypt config (engine-specific or legacy fallback)
+            encrypt_fn = None
+            if _engine and _engine.get('module'):
+                encrypt_fn = getattr(_engine['module'], 'encrypt_config', None)
 
-            ciphertext_hex = parse_pam_ciphertext(result.stdout)
-            if not ciphertext_hex:
-                return jsonify({'error': 'Could not parse encrypted output'}), 500
+            if encrypt_fn:
+                ciphertext_hex = encrypt_fn(admin_signature, plaintext)
+            else:
+                ciphertext_hex = _nft_tool_encrypt(admin_signature, plaintext)
 
             return Response(
                 ciphertext_hex,
@@ -1150,9 +1196,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 headers={'Content-Disposition': 'attachment; filename=blockhost-config.enc'},
             )
         except FileNotFoundError:
-            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+            return jsonify({'error': 'Encryption tool not installed'}), 500
         except subprocess.TimeoutExpired:
             return jsonify({'error': 'Encryption timed out'}), 500
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/api/finalize/retry', methods=['POST'])
     @require_auth

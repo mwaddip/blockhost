@@ -32,7 +32,7 @@ components:
 submodules:
   # These are separate repos - do not edit directly
   libpam-web3:
-    packages: [libpam-web3, libpam-web3-tools]
+    packages: [libpam-web3]
     purpose: PAM module for web3 wallet authentication
   blockhost-common:
     packages: [blockhost-common]

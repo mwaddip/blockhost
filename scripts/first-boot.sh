@@ -107,9 +107,17 @@ if [ ! -f "$STEP_PACKAGES" ]; then
             PROV_PKG=$(basename "$PROV_DEB" | sed 's/_.*$//')
         fi
 
-        FALLBACK_ORDER=(blockhost-common libpam-web3-tools)
+        # Auto-detect engine package in fallback path
+        FALLBACK_ENGINE_DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
+        FALLBACK_ENGINE_PKG=""
+        if [ -n "$FALLBACK_ENGINE_DEB" ]; then
+            FALLBACK_ENGINE_PKG=$(basename "$FALLBACK_ENGINE_DEB" | sed 's/_.*$//')
+        fi
+
+        FALLBACK_ORDER=(blockhost-common)
         [ -n "$PROV_PKG" ] && FALLBACK_ORDER+=("$PROV_PKG")
-        FALLBACK_ORDER+=(blockhost-engine blockhost-broker-client)
+        [ -n "$FALLBACK_ENGINE_PKG" ] && FALLBACK_ORDER+=("$FALLBACK_ENGINE_PKG")
+        FALLBACK_ORDER+=(blockhost-broker-client)
 
         for pkg in "${FALLBACK_ORDER[@]}"; do
             DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "${pkg}_*.deb" -type f 2>/dev/null | head -1)
@@ -337,53 +345,100 @@ else
 fi
 
 #
-# Step 3b: Install Foundry (for contract deployment)
+# Step 3b-pre: Install Node.js 22 LTS via NodeSource
+#
+# Required by the engine's monitor service and CLI tools.
+# NodeSource provides stable .deb packages for Node 22 LTS.
+#
+STEP_NODEJS="${STATE_DIR}/.step-nodejs"
+if [ ! -f "$STEP_NODEJS" ]; then
+    if command -v node >/dev/null 2>&1; then
+        NODE_MAJOR=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
+        if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+            log "Step 3b-pre: Node.js $(node --version) already installed, skipping."
+            touch "$STEP_NODEJS"
+        fi
+    fi
+
+    if [ ! -f "$STEP_NODEJS" ]; then
+        log "Step 3b-pre: Installing Node.js 22 LTS via NodeSource..."
+        if curl -fsSL https://deb.nodesource.com/setup_22.x | bash - 2>&1 | tee -a "$LOG_FILE"; then
+            apt-get install -y nodejs 2>&1 | tee -a "$LOG_FILE"
+            if command -v node >/dev/null 2>&1; then
+                log "Step 3b-pre complete - Node.js $(node --version) installed"
+            else
+                log "ERROR: Node.js installation failed"
+                exit 1
+            fi
+        else
+            log "ERROR: NodeSource setup failed"
+            exit 1
+        fi
+        touch "$STEP_NODEJS"
+    fi
+else
+    log "Step 3b-pre: Node.js already installed, skipping."
+fi
+
+#
+# Step 3b: Install Foundry (EVM engine only — for contract deployment via cast/forge)
 #
 STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
 if [ ! -f "$STEP_FOUNDRY" ]; then
-    log "Step 3b: Installing Foundry..."
+    # Check engine manifest — only EVM needs Foundry
+    ENGINE_NAME=""
+    if [ -f /usr/share/blockhost/engine.json ]; then
+        ENGINE_NAME=$(python3 -c "import json; print(json.load(open('/usr/share/blockhost/engine.json')).get('name',''))" 2>/dev/null || true)
+    fi
 
-    if ! command -v cast &> /dev/null; then
-        log "Downloading Foundry binaries..."
+    if [ "$ENGINE_NAME" = "evm" ] || [ -z "$ENGINE_NAME" ]; then
+        log "Step 3b: Installing Foundry..."
 
-        # Download pre-built binaries directly (non-interactive)
-        FOUNDRY_DIR="/usr/local/lib/foundry"
-        mkdir -p "$FOUNDRY_DIR"
+        if ! command -v cast &> /dev/null; then
+            log "Downloading Foundry binaries..."
 
-        # Get latest release from GitHub
-        FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [ -z "$FOUNDRY_VERSION" ]; then
-            FOUNDRY_VERSION="nightly"
-        fi
-        log "Installing Foundry version: $FOUNDRY_VERSION"
+            # Download pre-built binaries directly (non-interactive)
+            FOUNDRY_DIR="/usr/local/lib/foundry"
+            mkdir -p "$FOUNDRY_DIR"
 
-        # Download and extract
-        FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
-        log "Downloading from: $FOUNDRY_URL"
+            # Get latest release from GitHub
+            FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ -z "$FOUNDRY_VERSION" ]; then
+                FOUNDRY_VERSION="nightly"
+            fi
+            log "Installing Foundry version: $FOUNDRY_VERSION"
 
-        if curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz 2>&1; then
-            tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
-            rm /tmp/foundry.tar.gz
+            # Download and extract
+            FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
+            log "Downloading from: $FOUNDRY_URL"
 
-            # Create symlinks in /usr/local/bin
-            for tool in forge cast anvil chisel; do
-                if [ -f "$FOUNDRY_DIR/$tool" ]; then
-                    chmod +x "$FOUNDRY_DIR/$tool"
-                    ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
-                    log "Installed: $tool"
-                fi
-            done
+            if curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz 2>&1; then
+                tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
+                rm /tmp/foundry.tar.gz
+
+                # Create symlinks in /usr/local/bin
+                for tool in forge cast anvil chisel; do
+                    if [ -f "$FOUNDRY_DIR/$tool" ]; then
+                        chmod +x "$FOUNDRY_DIR/$tool"
+                        ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
+                        log "Installed: $tool"
+                    fi
+                done
+            else
+                log "WARNING: Failed to download Foundry, contract deployment may fail"
+            fi
         else
-            log "WARNING: Failed to download Foundry, contract deployment may fail"
+            log "Foundry already installed: $(cast --version 2>/dev/null || echo 'unknown version')"
         fi
+
+        log "Step 3b complete - Foundry installed!"
     else
-        log "Foundry already installed: $(cast --version 2>/dev/null || echo 'unknown version')"
+        log "Step 3b: Engine '$ENGINE_NAME' does not require Foundry, skipping."
     fi
 
     touch "$STEP_FOUNDRY"
-    log "Step 3b complete - Foundry installed!"
 else
-    log "Step 3b: Foundry already installed, skipping."
+    log "Step 3b: Already completed, skipping."
 fi
 
 #

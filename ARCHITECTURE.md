@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-20
+> Last updated: 2026-02-21
 
 ## FILE MAP
 
@@ -77,6 +77,7 @@ blockhost/
     ├── blockhost-provisioner-libvirt/
     ├── blockhost-engine/
     ├── blockhost-engine-opnet/
+    ├── blockhost-runner/              # Pipeline state machine (npm pkg, bundled into engine via esbuild)
     ├── blockhost-broker/
     └── facts/
 ```
@@ -94,7 +95,8 @@ build-packages.sh --backend <name> --engine <name>
   →                                              → packages/template/blockhost-auth-svc_*.deb (if engine produces one)
   → blockhost-broker/scripts/build-deb.sh     → packages/host/blockhost-broker-client_*.deb
   Note: --engine selects which engine submodule to build (e.g., evm, opnet).
-        nft_tool CLI is built and shipped inside the engine .deb (replaces former libpam-web3-tools).
+        bhcrypt CLI is built and shipped inside the engine .deb (replaces former nft_tool/libpam-web3-tools).
+        blockhost-runner is bundled into the engine .js via esbuild (npm dependency, no separate build step).
         OPNet engine also produces blockhost-auth-svc template package (auth-svc was formerly
         part of libpam-web3-tools which no longer exists). The provisioner's template build
         must install this package into VMs alongside libpam-web3. TODO: provisioner template
@@ -673,7 +675,7 @@ Each submodule is a separate git repo. This project consumes their .deb outputs 
 - Security: JSON path only accepted from `.sig` files (callback mode), never from terminal paste
 - PAM scope: guarded by `pam_succeed_if.so user = <provisioned_user>`, others get `pam_deny`
 
-**nft_tool** CLI and **auth-svc** are shipped by blockhost-engine (see engine components table).
+**bhcrypt** CLI and **auth-svc** are shipped by blockhost-engine (see engine components table).
 
 **Encryption schemes** (ecies.rs): secp256k1 ECIES, x25519, AES-256-GCM
 
@@ -731,7 +733,7 @@ Note: NFT token reservation, encryption, and minting are engine responsibilities
 
 **VM naming**: `blockhost-XXX` (3-digit zero-padded subscription ID)
 
-**Dependencies**: blockhost-common, blockhost-engine (nft_tool), Terraform (bpg/proxmox provider), libguestfs-tools
+**Dependencies**: blockhost-common, blockhost-engine (bhcrypt), Terraform (bpg/proxmox provider), libguestfs-tools
 
 ### blockhost-engine
 
@@ -748,7 +750,7 @@ Only one is installed per host. Both implement the same ENGINE_INTERFACE.md cont
 |-----------|----------|---------|
 | `contracts/` | Solidity / OPNet TS | Chain-specific smart contracts |
 | `src/monitor/` | TypeScript | Blockchain event polling (watches for subscription events) |
-| `src/handlers/` | TypeScript | Event handlers (reserves token ID, calls provisioner, encrypts, mints) |
+| `src/handlers/` | TypeScript | Event handlers (thin dispatch — enqueues to runner pipeline for create, inline for extend/cancel) |
 | `src/admin/` | TypeScript | On-chain admin commands (ECIES-encrypted, anti-replay nonce) |
 | `src/reconcile/` | TypeScript | Periodic NFT ownership reconciliation → GECOS sync via provisioner `update-gecos` |
 | `src/fund-manager/` | TypeScript | Automated fund withdrawal, revenue sharing, gas management |
@@ -756,7 +758,7 @@ Only one is installed per host. Both implement the same ENGINE_INTERFACE.md cont
 | `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`, `ab --init`) |
 | `src/is/` | TypeScript | identity predicate CLI (`is <wallet> <nft_id>`, `is contract <address>`) |
 | `src/auth-svc/` | TypeScript | Signing page HTTPS server + callback API (installed on VMs via blockhost-auth-svc template pkg, port 8443) |
-| `src/nft-tool.ts` | TypeScript | Crypto CLI (keypair gen, encrypt/decrypt-symmetric) — replaces former `pam_web3_tool` |
+| `src/bhcrypt/` | TypeScript | Crypto CLI (`bhcrypt` — keypair gen, ECIES decrypt, symmetric encrypt/decrypt, pubkey derivation) |
 | `scripts/generate-signup-page` | Python | Generates signup.html from template (extensionless) |
 | `scripts/mint_nft` | Python/TS | Mint access credential NFT (extensionless, `--owner-wallet`, `--user-encrypted`) |
 | `scripts/deploy-contracts` | Bash/TS | Deploy smart contracts (extensionless) |
@@ -792,6 +794,25 @@ Full spec: chain-specific (EVM: Solidity, OPNet: TypeScript contracts)
 - Maintenance scheduler — suspend/destroy lifecycle for expired subscriptions
 
 **Config reads**: `/etc/blockhost/web3-defaults.yaml`, `/etc/blockhost/blockhost.yaml`, `/etc/blockhost/admin-commands.json`, `/etc/blockhost/addressbook.json`, `/etc/blockhost/revenue-share.json`
+
+### blockhost-runner
+
+**npm package** (no .deb — bundled into engine .js via esbuild at build time).
+
+| Export | Purpose |
+|--------|---------|
+| `createPipeline(config)` | Factory for pipeline state machine |
+| `pipeline.enqueue(event)` | Queue subscription event for processing |
+| `pipeline.resumeOrDrain()` | Resume crashed pipeline or drain queue |
+| `pipeline.isPipelineBusy()` | Guard for background tasks |
+
+**Requires:** Node >= 22 LTS (via NodeSource APT repo). Zero runtime dependencies (Node built-ins only).
+
+Engine-agnostic subscription pipeline state machine. Executes stages via subprocess calls to CLIs (`bhcrypt`, provisioner commands, `blockhost-mint-nft`, Python DB scripts). Handles persistence (atomic temp+rename writes to `pipeline.json`), retry with exponential backoff, crash recovery (resume from last completed stage), and queue serialization.
+
+Engine provides config (command paths, timeouts, key path) and chain queries (`totalSupply()` → `setNextTokenId()`). Runner has zero chain awareness.
+
+**State file:** `/var/lib/blockhost/pipeline.json` (see ENGINE_INTERFACE.md §11)
 
 ### blockhost-broker
 
@@ -997,7 +1018,7 @@ libvirt provisioner actions (from `virsh.py`):
 |-----------|-----------------|---------|
 | `terraform init/apply/destroy` | HTTP API auth, working dir owned by blockhost | provisioner |
 | `bw who`, `is contract` | HTTP RPC, reads config via group perm | admin panel, installer validation |
-| `nft_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
+| `bhcrypt decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
 | `pgrep` | No privilege needed | engine (reconcile) |
 | python3 db scripts | Writes to blockhost-owned `/var/lib/blockhost/` | engine |
 

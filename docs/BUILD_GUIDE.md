@@ -21,13 +21,13 @@ BlockHost turns a bare-metal server into an autonomous VM hosting platform drive
 ./scripts/check-build-deps.sh --install
 
 # 2. Build all .deb packages from submodules
-./scripts/build-packages.sh
+./scripts/build-packages.sh --backend libvirt --engine opnet
 
 # 3. Build the ISO (with testing conveniences)
-./scripts/build-iso.sh --testing
+sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --testing
 
 # Or combine steps 2+3:
-./scripts/build-iso.sh --build-deb --testing
+sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --build-deb --testing
 ```
 
 Output: `build/blockhost_0.1.0.iso`
@@ -83,7 +83,7 @@ blockhost/
 
 | Submodule | Package(s) | Purpose |
 |-----------|------------|---------|
-| `libpam-web3/` | libpam-web3-tools (host), libpam-web3 (template) | PAM module, signing page, crypto tools |
+| `libpam-web3/` | libpam-web3 (template) | PAM module for web3 wallet authentication |
 | `blockhost-common/` | blockhost-common | Shared config loading, VM database |
 | `blockhost-provisioner-proxmox/` | blockhost-provisioner-proxmox | VM creation via Terraform, NFT minting |
 | `blockhost-engine/` | blockhost-engine | Blockchain event monitor, signup page generator |
@@ -104,7 +104,7 @@ xorriso cpio gzip dpkg isolinux coreutils findutils sed wget/curl
 | Tool | Required By | Install |
 |------|------------|---------|
 | cargo | libpam-web3 | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| forge | libpam-web3-tools, blockhost-engine | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
+| forge | blockhost-engine | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
 | node 18+ | blockhost-engine | https://nodejs.org/ or nvm |
 | npm | blockhost-engine | (comes with node) |
 | python3 | blockhost-provisioner-proxmox, blockhost-broker | `apt install python3` |
@@ -118,19 +118,18 @@ Run `./scripts/check-build-deps.sh` to verify, or `--install` to auto-install wh
 ## Package Build
 
 ```bash
-./scripts/build-packages.sh
+./scripts/build-packages.sh --backend <provisioner> --engine <engine>
 ```
 
-Builds 6 packages in dependency order:
+Builds packages in dependency order:
 
 | # | Package | Source | Build Command | Destination |
 |---|---------|--------|---------------|-------------|
-| 1 | libpam-web3-tools | libpam-web3/ | `packaging/build-deb-tools.sh` | packages/host/ |
-| 2 | libpam-web3 | libpam-web3/ | `packaging/build-deb.sh` | packages/template/ |
-| 3 | blockhost-common | blockhost-common/ | `build.sh` | packages/host/ |
-| 4 | blockhost-provisioner-proxmox | blockhost-provisioner-proxmox/ | `build-deb.sh` | packages/host/ |
-| 5 | blockhost-engine | blockhost-engine/ | `packaging/build.sh` | packages/host/ |
-| 6 | blockhost-broker-client | blockhost-broker/ | `scripts/build-deb.sh` | packages/host/ |
+| 1 | libpam-web3 | libpam-web3/ | `packaging/build-deb.sh` | packages/template/ |
+| 2 | blockhost-common | blockhost-common/ | `build.sh` | packages/host/ |
+| 3 | blockhost-provisioner-proxmox | blockhost-provisioner-proxmox/ | `build-deb.sh` | packages/host/ |
+| 4 | blockhost-engine | blockhost-engine/ | `packaging/build.sh` | packages/host/ |
+| 5 | blockhost-broker-client | blockhost-broker/ | `scripts/build-deb.sh` | packages/host/ |
 
 Packages must be rebuilt whenever a submodule changes. The ISO copies pre-built `.deb` files — it does not rebuild them.
 
@@ -139,11 +138,15 @@ Packages must be rebuilt whenever a submodule changes. The ISO copies pre-built 
 ## ISO Build
 
 ```bash
-./scripts/build-iso.sh [--build-deb] [--testing]
+sudo ./scripts/build-iso.sh --backend <provisioner> --engine <engine> [--build-deb] [--testing]
 ```
 
+**Required:**
+- `--backend <name>` — Provisioner backend (e.g., `proxmox`, `libvirt`)
+- `--engine <name>` — Blockchain engine (e.g., `evm`, `opnet`)
+
 **Flags:**
-- `--build-deb` — Run `build-packages.sh` first
+- `--build-deb` — Run `build-packages.sh` first (passes `--backend` and `--engine` through)
 - `--testing` — Enable apt proxy (`http://192.168.122.1:3142`), SSH root login, testing mode marker
 
 **What it does:**
@@ -192,10 +195,9 @@ Runs once via `blockhost-firstboot.service` (condition: `/var/lib/blockhost/.set
 
 Package install order (respects dependencies):
 1. blockhost-common
-2. libpam-web3-tools
-3. blockhost-provisioner-proxmox
-4. blockhost-engine
-5. blockhost-broker-client
+2. blockhost-provisioner-proxmox
+3. blockhost-engine
+4. blockhost-broker-client
 
 Template packages (libpam-web3) are copied to `/var/lib/blockhost/template-packages/`.
 
@@ -335,7 +337,7 @@ sudo virsh undefine blockhost-test --remove-all-storage
 sudo rm -f build/blockhost_0.1.0.iso
 
 # 3. Rebuild packages and ISO
-./scripts/build-iso.sh --build-deb --testing
+sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --build-deb --testing
 
 # 4. Launch a fresh test VM
 sudo virt-install \
@@ -411,7 +413,7 @@ sudo -u blockhost ./testing/integration-test-libvirt.sh [--cleanup]  # libvirt
 
 9 phases: pre-flight checks → wallet generation → funding from deployer → message signing → on-chain `buySubscription()` → wait for monitor to detect event + provision VM → verify VM running → verify NFT minted + decrypt `userEncrypted` → cleanup (optional: sweep test ETH, destroy VM, withdraw funds). Backend-specific scripts handle VM verification and cleanup differently (Proxmox uses PVE API + Terraform, libvirt uses `blockhost-vm-status` + `blockhost-vm-destroy`).
 
-Requires: finalized system, `blockhost-engine` running, deployer key, Foundry (`cast`), `pam_web3_tool`.
+Requires: finalized system, `blockhost-engine` running, deployer key, Foundry (`cast`), `bhcrypt`.
 
 ### IPv6 Login Test
 

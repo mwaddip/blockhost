@@ -3,7 +3,7 @@
 # Verify all BlockHost .deb packages exist with non-zero size.
 # Used by CI after build-packages.sh to confirm build output.
 #
-# Usage: ./scripts/ci-verify-packages.sh --backend <name>
+# Usage: ./scripts/ci-verify-packages.sh --backend <name> [--engine <name>]
 #
 # Exit 1 if any package is missing or empty.
 #
@@ -13,6 +13,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BACKEND=""
+ENGINE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -25,9 +26,17 @@ while [[ $# -gt 0 ]]; do
             BACKEND="${1#*=}"
             shift
             ;;
+        --engine)
+            ENGINE="$2"
+            shift 2
+            ;;
+        --engine=*)
+            ENGINE="${1#*=}"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --backend <provisioner-name>"
+            echo "Usage: $0 --backend <provisioner-name> [--engine <engine-name>]"
             exit 1
             ;;
     esac
@@ -35,7 +44,7 @@ done
 
 if [ -z "$BACKEND" ]; then
     echo "Error: --backend is required"
-    echo "Usage: $0 --backend <provisioner-name>"
+    echo "Usage: $0 --backend <provisioner-name> [--engine <engine-name>]"
     exit 1
 fi
 
@@ -69,11 +78,15 @@ check_package() {
 echo "Verifying BlockHost packages..."
 echo ""
 
-# Host packages (5)
+# Host packages (4)
 check_package "$HOST_DIR" "blockhost-common_*.deb"        "blockhost-common"
-check_package "$HOST_DIR" "libpam-web3-tools_*.deb"       "libpam-web3-tools"
 check_package "$HOST_DIR" "blockhost-provisioner-${BACKEND}_*.deb" "blockhost-provisioner-${BACKEND}"
-check_package "$HOST_DIR" "blockhost-engine_*.deb"         "blockhost-engine"
+# Use specific engine name if provided, wildcard otherwise
+if [ -n "$ENGINE" ]; then
+    check_package "$HOST_DIR" "blockhost-engine-${ENGINE}_*.deb" "blockhost-engine-${ENGINE}"
+else
+    check_package "$HOST_DIR" "blockhost-engine-*_*.deb"         "blockhost-engine"
+fi
 check_package "$HOST_DIR" "blockhost-broker-client_*.deb"  "blockhost-broker-client"
 
 # Template packages (1)
@@ -85,4 +98,4 @@ if [ "$ERRORS" -gt 0 ]; then
     exit 1
 fi
 
-echo "All 6 packages verified."
+echo "All packages verified."

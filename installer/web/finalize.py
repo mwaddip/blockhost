@@ -23,7 +23,6 @@ from typing import Optional
 
 from installer.web.utils import (
     set_blockhost_ownership,
-    parse_pam_ciphertext,
     write_yaml,
     generate_self_signed_cert_for_finalization,
 )
@@ -40,10 +39,10 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
     5. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
     6. Final steps (finalize, validate)
     """
-    # Infrastructure steps (chain-agnostic, run before engine)
-    infra_steps = [
-        ('keypair', 'Generating server keypair', _finalize_keypair),
-    ]
+    # Infrastructure steps (run before engine)
+    # NOTE: keypair generation moved to engine — the key type is chain-specific
+    # (secp256k1 for EVM, ML-DSA for OPNet). No installer-owned infra steps remain.
+    infra_steps = []
 
     # Engine pre-steps (chain-specific)
     engine_steps = []
@@ -186,100 +185,6 @@ def _discover_bridge() -> Optional[str]:
 
 CONFIG_DIR = Path('/etc/blockhost')
 
-
-def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
-    """Generate server ECIES keypair (server.key + server.pubkey).
-
-    Uses pam_web3_tool (secp256k1) — not chain-specific, every engine
-    needs this for PAM authentication infrastructure.
-
-    Idempotent: skips if both files already exist.
-    No step result data — summary shows just "Completed".
-    """
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        server_key = CONFIG_DIR / 'server.key'
-        server_pubkey = CONFIG_DIR / 'server.pubkey'
-
-        if server_key.exists() and server_pubkey.exists():
-            return True, None
-
-        # Generate keypair
-        result = subprocess.run(
-            ['pam_web3_tool', 'generate-keypair'],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            return False, f'Keypair generation failed: {result.stderr}'
-
-        # Parse private key from output (bare hex, 64 chars, no 0x prefix)
-        # pam_web3_tool outputs lines like:
-        #   Private key (hex): abcdef1234...
-        #   Public key (hex): 04abcdef...
-        private_key = ''
-        public_key = ''
-        for line in result.stdout.strip().split('\n'):
-            lower = line.lower()
-            if 'private' in lower and ':' in line:
-                val = line.split(':', 1)[1].strip().replace('0x', '')
-                if len(val) == 64 and all(c in '0123456789abcdefABCDEF' for c in val):
-                    private_key = val
-            elif 'public' in lower and ':' in line:
-                val = line.split(':', 1)[1].strip()
-                val_clean = val.replace('0x', '')
-                if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
-                    public_key = f'0x{val_clean}'
-
-        # Fallback: try bare hex lines (two lines: private, public)
-        if not private_key:
-            for line in result.stdout.strip().split('\n'):
-                stripped = line.strip().replace('0x', '')
-                if len(stripped) == 64 and all(c in '0123456789abcdefABCDEF' for c in stripped):
-                    private_key = stripped
-                    break
-
-        if not private_key:
-            return False, 'Could not parse private key from keypair output'
-
-        # Write server.key (hex, 64 chars, no 0x prefix)
-        server_key.write_text(private_key)
-        set_blockhost_ownership(server_key, 0o640)
-
-        # Derive public key if not parsed from generate-keypair output
-        if not public_key:
-            result2 = subprocess.run(
-                ['pam_web3_tool', 'derive-pubkey', '--private-key', private_key],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result2.returncode == 0:
-                for line in result2.stdout.strip().split('\n'):
-                    if ':' in line:
-                        val = line.split(':', 1)[1].strip()
-                    else:
-                        val = line.strip()
-                    val_clean = val.replace('0x', '')
-                    if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
-                        public_key = f'0x{val_clean}'
-                        break
-            if not public_key:
-                return False, 'Could not derive public key from private key'
-
-        # Write server.pubkey (hex with 0x prefix)
-        server_pubkey.write_text(public_key)
-        set_blockhost_ownership(server_pubkey, 0o644)
-
-        return True, None
-    except FileNotFoundError:
-        return False, 'pam_web3_tool not installed'
-    except subprocess.TimeoutExpired:
-        return False, 'Keypair generation timed out'
-    except Exception as e:
-        return False, str(e)
 
 
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
