@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-14
+> Last updated: 2026-02-20
 
 ## FILE MAP
 
@@ -39,7 +39,6 @@ blockhost/
 │           ├── login.html
 │           ├── macros/wizard_steps.html
 │           └── wizard/
-│               ├── wallet.html       # Admin wallet connect (pre-wizard)
 │               ├── network.html
 │               ├── storage.html
 │               ├── ipv6.html
@@ -56,13 +55,13 @@ blockhost/
 │   ├── __init__.py
 │   ├── __main__.py                   # python3 -m admin entry
 │   ├── app.py                        # Flask app factory, session config, CLI
-│   ├── auth.py                       # Wallet auth: challenge, verify (cast), sessions, login_required
+│   ├── auth.py                       # Wallet auth: challenge, verify (bw who), sessions, login_required
 │   ├── routes.py                     # Auth routes + protected API endpoints + dashboard
 │   ├── system.py                     # Data collection + system actions (~200 lines)
 │   ├── templates/
 │   │   ├── base.html                 # Dark theme, sidebar nav, topbar wallet + logout
 │   │   ├── dashboard.html            # Single-page dashboard, all sections
-│   │   └── login.html                # Standalone login: challenge code, MetaMask + paste signature
+│   │   └── login.html                # Standalone login: challenge code, wallet signing + paste signature
 │   └── static/css/admin.css          # Style overrides (base styles in template)
 ├── .github/workflows/
 │   ├── ci.yml                         # Push/PR: tests + package build
@@ -77,6 +76,7 @@ blockhost/
     ├── blockhost-provisioner-proxmox/
     ├── blockhost-provisioner-libvirt/
     ├── blockhost-engine/
+    ├── blockhost-engine-opnet/
     ├── blockhost-broker/
     └── facts/
 ```
@@ -86,22 +86,28 @@ blockhost/
 ### Phase 1: ISO Build (dev machine)
 
 ```
-build-packages.sh
-  → libpam-web3/packaging/build-deb-tools.sh  → packages/host/libpam-web3-tools_*.deb
+build-packages.sh --backend <name> --engine <name>
   → libpam-web3/packaging/build-deb.sh        → packages/template/libpam-web3_*.deb
   → blockhost-common/build.sh                 → packages/host/blockhost-common_*.deb
   → blockhost-provisioner-<backend>/build-deb.sh → packages/host/blockhost-provisioner-<backend>_*.deb
-  → blockhost-engine/packaging/build.sh       → packages/host/blockhost-engine_*.deb
+  → blockhost-engine-<engine>/packaging/build.sh → packages/host/blockhost-engine-<engine>_*.deb
+  →                                              → packages/template/blockhost-auth-svc_*.deb (if engine produces one)
   → blockhost-broker/scripts/build-deb.sh     → packages/host/blockhost-broker-client_*.deb
+  Note: --engine selects which engine submodule to build (e.g., evm, opnet).
+        nft_tool CLI is built and shipped inside the engine .deb (replaces former libpam-web3-tools).
+        OPNet engine also produces blockhost-auth-svc template package (auth-svc was formerly
+        part of libpam-web3-tools which no longer exists). The provisioner's template build
+        must install this package into VMs alongside libpam-web3. TODO: provisioner template
+        build does not yet know about engine-supplied template packages.
 
-build-iso.sh [--testing] [--build-deb]
+build-iso.sh --backend <name> --engine <name> [--testing] [--build-deb]
   → extract Debian 12 netinst ISO
   → inject preseed/blockhost.preseed into GRUB + isolinux
   → copy installer/, scripts/first-boot.sh, systemd unit
   → copy packages/host/*.deb, packages/template/*.deb
   → extract contract JSON from .deb artifacts → /blockhost/contracts/
   → [--testing]: apt proxy 192.168.122.1:3142, SSH root login, testing marker
-  → rebuild ISO with xorriso → build/blockhost_0.1.0.iso (root-owned)
+  → rebuild ISO with xorriso → build/blockhost_0.3.0.iso (root-owned)
 ```
 
 ### Phase 2: Preseed Install (target machine, automatic)
@@ -143,7 +149,7 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
     → Rollback on connectivity failure (restore IP to NIC, delete bridge)
     → Persist to /etc/network/interfaces (Proxmox will overwrite via pvesh — expected)
     → Store bridge name in /run/blockhost/bridge
-  Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/
+  Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/ (EVM engine only)
   Step 4 (.step-network):             Verify network connectivity (DHCP fallback)
   Step 5 (.step-otp):                 Generate OTP → /run/blockhost/otp.json, display on /etc/issue
   Step 6:                              Start Flask wizard on :80 (private) or :443 (public)
@@ -156,7 +162,7 @@ Entry: PYTHONPATH=/opt/blockhost python3 -m installer.web.app --host 0.0.0.0 --p
 
 Pre-wizard:
   /login                  → OTP verification (6 chars, A-Z2-9, 4hr timeout, 10 attempts)
-  /wizard/wallet          → Admin MetaMask wallet connect + signature
+  /wizard/wallet          → Admin wallet connect + signature (template provided by engine via get_wallet_template())
 
 Wizard steps (WIZARD_STEPS in app.py, dynamically built):
   Core:
@@ -217,32 +223,38 @@ Subscription purchase flow:
   2. Signup page calls BlockhostSubscriptions.buySubscription(planId, days, paymentMethodId, userEncrypted)
      - userEncrypted = ECIES-encrypted data blob (wallet-derived key)
   3. Contract emits SubscriptionCreated event with encrypted user data
-  4. blockhost-monitor detects event → calls vm-generator.py:
-     - Reserves NFT token ID (sequential, tracked in vms.json)
-     - Allocates VMID + IPv4 from pool + IPv6 /128 from prefix
-     - Generates .tf.json with cloud-init (nft-auth template, GECOS: nft=TOKEN_ID)
-     - Runs provisioner create command → VM created
-     - Encrypts connection details: pam_web3_tool encrypt-symmetric
-       Key derivation: keccak256(user_signature_bytes) → AES-256-GCM key
-     - Mints NFT via cast send → mint(to, userEncrypted, publicSecret, description, imageUri, animationUrlBase64, expiresAt)
-  5. User retrieves NFT → re-signs publicSecret → derives AES key → decrypts connection details
+  4. blockhost-monitor detects event → enqueues to subscription pipeline (pipeline.json):
+     Pipeline stages (each persisted, resumable on crash):
+     a. received     — event parsed, entry created
+     b. decrypted    — userEncrypted decrypted to user signature via server.key
+     c. token_reserved — local next_token_id counter incremented, reserved in vms.json
+     d. vm_created   — provisioner create called, JSON summary parsed (ip, vmid, username)
+     e. encrypted    — connection details encrypted with user's signature (symmetric AES-GCM)
+     f. nft_minted   — blockhost-mint-nft called, actual token ID verified against reserved
+     g. db_updated   — markNftMinted() awaited; if token ID mismatch: reservation fixed + GECOS updated
+     h. complete     — moved to history, queue drained
+     Concurrency: one active pipeline at a time. Additional events queued. Reconciler, fund manager,
+     and gas check are blocked (isPipelineBusy) and awaited (not fire-and-forget).
+     Retry: exponential backoff (5s base, max 3 retries per stage). Per-stage timeouts.
+  5. User retrieves NFT → re-signs publicSecret → derives key → decrypts connection details
   6. VM named: blockhost-XXX (3-digit zero-padded subscription ID)
 
 VM authentication flow (on each SSH login):
   1. SSH connect → PAM module (pam_web3.so) generates OTP
      OTP = HMAC-SHA3(machine_id + timestamp + secret_key), 6 chars
   2. PAM writes session file to /run/libpam-web3/pending/<session_id>.json
+     (callback mode detected by directory existence — auth-svc creates the dir via tmpfiles.d)
   3. User sees signing page URL with ?session=<id> (https://{ip}:8443, self-signed TLS)
      Prompt shows "Press Enter after signing in browser (or paste signature):"
   4. Two input paths (first one wins):
      Path A (callback): User opens URL → signing page auto-fills OTP+machine → user signs →
        page POSTs signature to /auth/callback/<session_id> → PAM detects .sig file → authenticates
-     Path B (manual): User copies OTP, signs offline, pastes signature in terminal
-  5. PAM recovers wallet via secp256k1 ecrecover
-  6. PAM queries web3-auth-svc (Unix socket: /run/web3-auth/web3-auth.sock) for wallet's NFT token IDs
-  7. Matches token ID against Linux user GECOS field (nft=TOKEN_ID)
-  8. Match → access granted as that Linux user
-  9. PAM cleans up session files
+     Path B (manual): User copies OTP, signs offline, pastes raw hex signature in terminal
+  5. PAM verifies identity: EVM = secp256k1 ecrecover, OPNet = Schnorr sig + OTP validation via .sig file
+  6. PAM checks wallet=ADDRESS in Linux user GECOS field (no blockchain query)
+  7. Match → access granted as that Linux user
+  8. PAM cleans up session files
+  Note: PAM is scoped to provisioned user only via pam_succeed_if.so guard. Other users get pam_deny.
 
 Expiry flow:
   blockhost-gc.py (daily via systemd timer) checks expired subscriptions
@@ -288,7 +300,7 @@ admin/
 │   ├── network.html   → Network & Security page (IPv4, broker, knock settings, admin path)
 │   ├── wallet.html    → Wallet & Addressbook page (balances, transfer, withdraw, addressbook CRUD)
 │   ├── vms.html       → VMs & Accounts page (VM table with actions, accounts placeholder)
-│   └── login.html     → Standalone login page: challenge code, MetaMask + paste-signature paths
+│   └── login.html     → Standalone login page: challenge code, wallet signing + paste-signature paths
 └── static/css/    → Style overrides
 ```
 
@@ -301,8 +313,8 @@ Wallet-signing flow identical to libpam-web3 SSH login. Access is NFT-gated: onl
 2. Login page generates random 6-char OTP (A-Z2-9, no ambiguous chars), shows:
    "Code: A3B7K2  |  Machine: blockhost  |  Sign at: /sign"
 3. Two signing paths:
-   Path A: Open /sign (serves existing signing page), sign, paste 0x... signature
-   Path B: Click "Sign with MetaMask" (inline personal_sign), auto-submits
+   Path A: Open /sign (serves engine signing page), sign, paste signature
+   Path B: Engine-specific inline signing (e.g. MetaMask for EVM), auto-submits
 4. POST /api/auth/verify {code, signature}
 5. Backend: bw who admin → queries chain for NFT owner → 0x...
 6. Backend: bw who "<message>" <signature> → recovers signer address
@@ -374,10 +386,13 @@ One active engine per host. Package installs manifest at well-known path.
 
 ### Manifest (`/usr/share/blockhost/engine.json`)
 
+Example (EVM). OPNet uses `name: "opnet"`, `wizard_module: "blockhost.engine_opnet.wizard"`,
+32-byte addresses (`^0x[0-9a-fA-F]{64}$`), `native_token: "btc"`. Structure identical.
+
 ```json
 {
   "name": "evm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "display_name": "EVM (Ethereum/Polygon)",
   "setup": {
     "wizard_module": "blockhost.engine_evm.wizard",
@@ -428,6 +443,10 @@ The module at `blockhost.engine_<name>.wizard` must export:
 | `get_ui_params(session_data)` | `-> dict` | Chain-specific template variables |
 | `get_progress_steps_meta()` | `-> list[dict]` | Step metadata for progress UI (id, label, hint) |
 | `validate_address(address)` | `-> bool` | Chain-specific address validation |
+| `get_wallet_template()` | `-> Optional[str]` | Custom wallet connect template path |
+| `validate_signature(sig)` | `-> bool` | Signature format validation |
+| `decrypt_config(sig, ciphertext)` | `-> dict` | Decrypt config backup (chain-specific key derivation) |
+| `encrypt_config(sig, plaintext)` | `-> str` | Encrypt config backup (chain-specific key derivation) |
 
 ## PROVISIONER CONTRACT
 
@@ -443,7 +462,7 @@ and config_keys vary. See `facts/PROVISIONER_INTERFACE.md` for the full schema.
 ```json
 {
   "name": "proxmox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "display_name": "Proxmox VE + Terraform",
   "commands": { "create": "blockhost-vm-create", "destroy": "blockhost-vm-destroy", "..." : "..." },
   "setup": {
@@ -483,7 +502,7 @@ hardcoded paths when no manifest exists (transition period).
 ### CLI Command Contract
 
 All provisioner commands use `vm_name` (string) as the VM identifier:
-- `create <name> --owner-wallet <0x> [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
+- `create <name> --owner-wallet <addr> --nft-token-id <int> [--expiry-days N] [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
 - `destroy <name>`, `start <name>`, `stop <name>`, `kill <name>`
 - `status <name>` → stdout: `active`, `suspended`, `destroyed`, `unknown`
 - `list [--format json]` → stdout: list of VMs
@@ -495,9 +514,9 @@ Flask session populated across wizard steps:
 ```python
 session = {
     'authenticated': bool,
-    'admin_wallet': '0x...',           # from /wizard/wallet
-    'admin_signature': '0x...',        # MetaMask signature
-    'admin_public_secret': str,        # ECIES shared secret
+    'admin_wallet': str,                # from /wizard/wallet (format: engine-specific)
+    'admin_signature': str,             # wallet signature
+    'admin_public_secret': str,        # signing message (e.g. 'blockhost-access')
     'selected_disk': '/dev/sda',       # from /wizard/storage
 
     '<engine_session_key>': {             # from /wizard/<engine> (key from engine manifest config_keys.session_key)
@@ -541,8 +560,8 @@ Directory: `/etc/blockhost/`
 |------|--------|-------------|-------------|-----------------|---------|
 | server.key | hex 64 chars | root:blockhost | 0640 | engine:keypair | blockhost-engine, provisioner |
 | server.pubkey | hex 0x04+... | root:blockhost | 0644 | engine:keypair | signup page, NFT mint |
-| deployer.key | hex 64 chars | root:blockhost | 0640 | engine:wallet | contract calls (cast send) |
-| db.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-provisioner-proxmox, blockhost-gc |
+| deployer.key | hex / mnemonic (engine-specific) | root:blockhost | 0640 | engine:wallet | engine contract calls |
+| db.yaml | YAML | root:blockhost | 0644 | provisioner:db_config, installer:ipv6 appends ipv6_pool | blockhost-provisioner, blockhost-gc |
 | web3-defaults.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-engine, blockhost-provisioner-proxmox |
 | blockhost.yaml | YAML | root:blockhost | 0644 | engine:chain_config | blockhost-engine, signup generator |
 | https.json | JSON | root:blockhost | 0644 | https | nginx config generation |
@@ -572,7 +591,7 @@ gc_grace_days: 7
 ```yaml
 blockchain: {chain_id: 11155111, rpc_url: str, nft_contract: str, subscription_contract: str, usdc_address: str}
 auth: {otp_length: 6, otp_ttl_seconds: 300, public_secret: 'blockhost-access'}
-signing_page: {html_path: '/usr/share/libpam-web3-tools/signing-page/index.html', port: 8443}
+signing_page: {html_path: '/usr/share/blockhost/signing-page/index.html', port: 8443}
 deployer: {private_key_file: '/etc/blockhost/deployer.key'}
 server: {public_key: '0x04...'}
 ```
@@ -625,8 +644,10 @@ Directory: `/var/lib/blockhost/`
 | .setup-complete | empty | Marker: setup finished (prevents re-run) |
 | setup-state.json | JSON | Finalization progress (steps, status, config) |
 | vms.json | JSON | VM database (vmid → metadata, IP, NFT token, subscription, expiry) |
+| vms.json.lock | empty | Lockfile for atomic DB updates (separate from data file) |
+| pipeline.json | JSON | Subscription pipeline state: active entry, queue, token counter, history (see §11 in ENGINE_INTERFACE.md) |
 | terraform/ | dir | Terraform state, provider config, .tfvars, per-VM .tf.json |
-| template-packages/ | dir | libpam-web3_*.deb for VM template builds |
+| template-packages/ | dir | .debs for VM template builds: libpam-web3_*.deb, blockhost-auth-svc_*.deb (OPNet) |
 | validation-output.txt | text | Validation report (testing mode only) |
 | fund-manager-state.json | JSON | Fund manager last-run timestamps (auto-created by engine) |
 
@@ -639,35 +660,20 @@ Each submodule is a separate git repo. This project consumes their .deb outputs 
 
 ### libpam-web3
 
-Two packages for different targets:
-
 | Package | Build | Install target | Contents |
 |---------|-------|----------------|----------|
-| libpam-web3-tools | packaging/build-deb-tools.sh | Host | `pam_web3_tool` CLI, signing-page HTML, contract artifacts (AccessCredentialNFT.json, BlockhostSubscriptions.json) |
-| libpam-web3 | packaging/build-deb.sh | VM template-packages/ | PAM module (`pam_web3.so`), `web3-auth-svc` daemon |
+| libpam-web3 | packaging/build-deb.sh | VM template-packages/ | PAM module (`pam_web3.so`) |
 
 **PAM module** (Rust, installed in VMs):
-- Config: `/etc/pam_web3/config.toml` (machine.id, machine.secret_key, auth.mode, blockchain.*)
-- Wallet mode: file-based wallet→username mapping (`/etc/pam_web3/wallets`)
-- NFT mode (v0.4.0+): ownership-based auth, no server private key needed
-  - Queries `web3-auth-svc` via Unix socket `/run/web3-auth/web3-auth.sock`
-  - Matches wallet's NFT token IDs against GECOS field (`nft=TOKEN_ID`)
+- Config: `/etc/pam_web3/config.toml` (machine.id, machine.secret_key, auth settings)
+- Auth: verify identity → check `wallet=ADDRESS` in GECOS field (no blockchain query)
+- Input detection: raw hex = EVM (ecrecover), JSON `.sig` file = OPNet (OTP + wallet assertion)
 - OTP: HMAC-SHA3(machine_id + timestamp + secret_key), 6 chars, 5min TTL
-- Signature: secp256k1 ecrecover of `"Authenticate to {machine_id} with code: {otp}"`
+- Callback: detects auth-svc via `/run/libpam-web3/pending/` directory presence (no config flag)
+- Security: JSON path only accepted from `.sig` files (callback mode), never from terminal paste
+- PAM scope: guarded by `pam_succeed_if.so user = <provisioned_user>`, others get `pam_deny`
 
-**pam_web3_tool** CLI (on host):
-- `generate-keypair` — secp256k1 keypair for ECIES
-- `encrypt-symmetric` — AES-256-GCM encryption, key = keccak256(signature_bytes)
-- Used by provisioner to encrypt connection details into NFT
-
-**web3-auth-svc** (daemon in VMs):
-- Handles blockchain queries for PAM module via Unix socket
-- Serves signing page + callback API over HTTPS (port 8443, self-signed TLS)
-  - `GET /` — signing page HTML
-  - `GET /auth/pending/<session_id>` — session JSON (OTP + machine name)
-  - `POST /auth/callback/<session_id>` — delivers signature to PAM via file
-
-**Contract artifacts**: installed by .deb packages to `/usr/share/blockhost/contracts/`
+**nft_tool** CLI and **auth-svc** are shipped by blockhost-engine (see engine components table).
 
 **Encryption schemes** (ecies.rs): secp256k1 ECIES, x25519, AES-256-GCM
 
@@ -705,19 +711,18 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
 | Script | Purpose | Key args |
 |--------|---------|----------|
-| `vm-generator.py` | Create VM + mint NFT | `<name> --owner-wallet <0x> [--user-signature <0x> --public-secret <str>] [--apply] [--cpu N --memory N --disk N]` |
+| `vm-generator.py` | Create VM | `<name> --owner-wallet <addr> --nft-token-id <int> [--expiry-days N] [--apply] [--cpu N --memory N --disk N]` |
 | `vm-gc.py` | Garbage collect expired VMs | `[--execute] [--suspend-only] [--grace-days N]` |
 | `build-template.sh` | Build Debian 12 VM template | `[PROXMOX_HOST=root@ix TEMPLATE_VMID=9001]` |
 
 **vm-generator.py workflow**:
-1. Reserve sequential NFT token ID in vms.json
-2. Allocate VMID + IPv4 from pool + IPv6 /128 from prefix
-3. Derive FQDN from `dns_zone` if available: `f"{offset:x}.{dns_zone}"` (hex offset of IPv6 within prefix)
-4. Render cloud-init from `nft-auth.yaml` template (GECOS: `nft=TOKEN_ID`, SIGNING_DOMAIN for HTTPS)
-5. Generate `.tf.json` in terraform_dir
-6. `terraform apply` (if --apply)
-7. On success: encrypt connection details via `pam_web3_tool encrypt-symmetric`
-8. Mint NFT: `cast send <nft_contract> "mint(address,bytes,string,string,string,string,uint256)" <to> <userEncrypted> <publicSecret> <description> <imageUri> <animationUrlBase64> <expiresAt>`
+1. Allocate VMID + IPv4 from pool + IPv6 /128 from prefix
+2. Derive FQDN from `dns_zone` if available: `f"{offset:x}.{dns_zone}"` (hex offset of IPv6 within prefix)
+3. Render cloud-init from `nft-auth.yaml` template (GECOS: `wallet=ADDR,nft=TOKEN_ID`, SIGNING_DOMAIN for HTTPS)
+4. Generate `.tf.json` in terraform_dir
+5. `terraform apply` (if --apply)
+6. Return JSON summary with connection details (ip, vmid, nft_token_id)
+Note: NFT token reservation, encryption, and minting are engine responsibilities (see subscription flow).
 
 **Cloud-init templates** (`cloud-init/templates/`):
 - `nft-auth.yaml` — Default: web3 NFT auth, GECOS nft=TOKEN_ID
@@ -726,7 +731,7 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
 **VM naming**: `blockhost-XXX` (3-digit zero-padded subscription ID)
 
-**Dependencies**: blockhost-common, libpam-web3-tools, Terraform (bpg/proxmox provider), Foundry (cast), libguestfs-tools
+**Dependencies**: blockhost-common, blockhost-engine (nft_tool), Terraform (bpg/proxmox provider), libguestfs-tools
 
 ### blockhost-engine
 
@@ -734,48 +739,46 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 |---------|-------|----------------|
 | blockhost-engine | packaging/build.sh | Host |
 
-**Components** (TypeScript + Solidity):
+**Components** (TypeScript, language-specific contracts):
+
+Two engine packages exist: `blockhost-engine` (EVM) and `blockhost-engine-opnet` (OPNet/Bitcoin L1).
+Only one is installed per host. Both implement the same ENGINE_INTERFACE.md contract.
 
 | Directory | Language | Purpose |
 |-----------|----------|---------|
-| `contracts/` | Solidity | BlockhostSubscriptions.sol — plans, subscriptions, payments |
+| `contracts/` | Solidity / OPNet TS | Chain-specific smart contracts |
 | `src/monitor/` | TypeScript | Blockchain event polling (watches for subscription events) |
-| `src/handlers/` | TypeScript | Event handlers (calls vm-generator.py, vm-gc.py) |
+| `src/handlers/` | TypeScript | Event handlers (reserves token ID, calls provisioner, encrypts, mints) |
 | `src/admin/` | TypeScript | On-chain admin commands (ECIES-encrypted, anti-replay nonce) |
-| `src/reconcile/` | TypeScript | Periodic NFT state reconciliation (health check) |
+| `src/reconcile/` | TypeScript | Periodic NFT ownership reconciliation → GECOS sync via provisioner `update-gecos` |
 | `src/fund-manager/` | TypeScript | Automated fund withdrawal, revenue sharing, gas management |
-| `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`, `bw who`) |
-| `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`) |
-| `scripts/generate-signup-page.py` | Python | Generates signup.html from template |
-| `scripts/mint_nft.py` | Python | Mint access credential NFT via Foundry cast |
-| `scripts/init-server.sh` | Bash | Generate server keys + config |
+| `src/bw/` | TypeScript | blockwallet CLI (`bw send`, `bw balance`, `bw withdraw`, `bw swap`, `bw split`, `bw who`, `bw plan create`, `bw config stable`, `bw set encrypt`) |
+| `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`, `ab --init`) |
+| `src/is/` | TypeScript | identity predicate CLI (`is <wallet> <nft_id>`, `is contract <address>`) |
+| `src/auth-svc/` | TypeScript | Signing page HTTPS server + callback API (installed on VMs via blockhost-auth-svc template pkg, port 8443) |
+| `src/nft-tool.ts` | TypeScript | Crypto CLI (keypair gen, encrypt/decrypt-symmetric) — replaces former `pam_web3_tool` |
+| `scripts/generate-signup-page` | Python | Generates signup.html from template (extensionless) |
+| `scripts/mint_nft` | Python/TS | Mint access credential NFT (extensionless, `--owner-wallet`, `--user-encrypted`) |
+| `scripts/deploy-contracts` | Bash/TS | Deploy smart contracts (extensionless) |
 
-**Smart contract — BlockhostSubscriptions.sol**:
+**Smart contracts**:
 
+AccessCredentialNFT (ERC721, stripped):
 ```
-Admin functions:
-  createPlan(string name, uint256 pricePerDayUsdCents)
-  setPrimaryStablecoin(address tokenAddress)
-  addPaymentMethod(address token, address uniswapPair, address stablecoin)
+mint(address to, bytes userEncrypted)              — owner-only, 2 params
+updateUserEncrypted(uint256 tokenId, bytes data)   — owner-only
+getUserEncrypted(uint256 tokenId) → bytes           — view
+Standard ERC721/Enumerable/Ownable                 — transfer, burn, ownerOf, totalSupply
+```
+Full spec: `facts/NFT_CONTRACT_INTERFACE.md`
 
-User functions:
-  buySubscription(uint256 planId, uint256 days, uint256 paymentMethodId, bytes userEncrypted)
-  extendSubscription(uint256 subscriptionId, uint256 days, uint256 paymentMethodId)
-  cancelSubscription(uint256 subscriptionId)
-
-Query functions:
-  getSubscription(subscriptionId) → Subscription struct
-  isSubscriptionActive(subscriptionId) → bool
-
+BlockhostSubscriptions:
+```
 Events (monitored by blockhost-monitor):
   SubscriptionCreated, SubscriptionExtended, SubscriptionCancelled
-  PlanCreated, PlanUpdated
-  PaymentMethodAdded, PaymentMethodUpdated
+  PlanCreated, PlanUpdated, PaymentMethodAdded, PaymentMethodUpdated
 ```
-
-**Payment methods**:
-- ID 1 (primary stablecoin): Direct USD, no conversion. `amount = priceUsdCents * days * 10^decimals / 100`
-- ID 2+ (other tokens): Uniswap V2 constant product pricing with 1% slippage buffer, $10k minimum liquidity
+Full spec: chain-specific (EVM: Solidity, OPNet: TypeScript contracts)
 
 **Fund manager** (integrated into monitor polling loop):
 - Runs fund cycle (every 24h default): withdraw contract funds → hot wallet gas top-up → server stablecoin buffer → revenue shares → remainder to admin
@@ -867,7 +870,7 @@ Events (monitored by blockhost-monitor):
 | Function | Purpose |
 |----------|---------|
 | detect_disks | List available disks (lsblk) |
-| is_valid_address | Validate 0x + 40 hex (fallback for _validate_address in app.py) |
+| is_valid_address | Basic address validation (fallback when no engine loaded) |
 | is_valid_ipv6_prefix | Validate prefix/length format |
 | get_broker_registry | Look up broker registry by chain_id |
 | get_wallet_balance | eth_getBalance via JSON-RPC |
@@ -893,7 +896,7 @@ On-chain calls from the engine wizard plugin (chain-specific, e.g. EVM):
 | Deploy contracts | blockhost-deploy-contracts CLI | — | — | engine:contracts step |
 | Create plan | bw plan create CLI | BlockhostSubscriptions | createPlan(string,uint256) | engine:plan step |
 | Set stablecoin | bw config stable CLI | BlockhostSubscriptions | setPrimaryStablecoin(address) | engine:plan step |
-| Mint NFT | blockhost-mint-credential CLI | AccessCredentialNFT | mint(...) | engine:mint_nft step |
+| Mint NFT | blockhost-mint-nft CLI | AccessCredentialNFT | mint(address, bytes) | engine:mint_nft step |
 | Init addressbook | ab --init CLI | — | — | engine:revenue_share step |
 
 Runtime on-chain interactions (by submodule services, not this repo):
@@ -903,7 +906,7 @@ Runtime on-chain interactions (by submodule services, not this repo):
 | Watch subscriptions | blockhost-monitor (TypeScript) | BlockhostSubscriptions | SubscriptionCreated, SubscriptionExtended, SubscriptionCancelled |
 | Query expired | blockhost-gc (Python) | BlockhostSubscriptions | Off-chain expiry check via getSubscription() |
 | Admin commands | blockhost-engine src/admin/ | — | ECIES-encrypted on-chain commands |
-| NFT reconciliation | blockhost-engine src/reconcile/ | AccessCredentialNFT | Periodic ownership health check |
+| NFT reconciliation | blockhost-engine src/reconcile/ | AccessCredentialNFT | Periodic ownership check → GECOS sync via provisioner `update-gecos` |
 
 ## NETWORK TOPOLOGY
 
@@ -921,7 +924,7 @@ Internet
   │   ├─ Host bridge IP (migrated from NIC; same subnet as VMs)
   │   └─ VM NICs (tap devices)
   │       ├─ VMs get IPv4 from ip_pool range
-  │       └─ Each VM serves signing page on port 8443 (HTTPS, self-signed TLS via web3-auth-svc)
+  │       └─ Each VM serves signing page on port 8443 (HTTPS, self-signed TLS via engine auth-svc)
   │
   └─ wg-broker (WireGuard, if broker mode)
       └─ IPv6 prefix from broker allocation
@@ -993,9 +996,8 @@ libvirt provisioner actions (from `virsh.py`):
 | Operation | Why unprivileged | Service |
 |-----------|-----------------|---------|
 | `terraform init/apply/destroy` | HTTP API auth, working dir owned by blockhost | provisioner |
-| `cast call/send` | HTTP RPC, reads deployer key via group perm (0640) | provisioner |
 | `bw who`, `is contract` | HTTP RPC, reads config via group perm | admin panel, installer validation |
-| `pam_web3_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
+| `nft_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
 | `pgrep` | No privilege needed | engine (reconcile) |
 | python3 db scripts | Writes to blockhost-owned `/var/lib/blockhost/` | engine |
 
@@ -1027,12 +1029,12 @@ Three distinct encryption contexts:
 
 | Context | Scheme | Key source | Purpose |
 |---------|--------|------------|---------|
-| NFT user data (userEncrypted) | AES-256-GCM | keccak256(user's wallet signature of publicSecret) | Connection details (hostname, port, username) only decryptable by NFT holder |
+| NFT user data (userEncrypted) | AES-256-GCM | Chain-specific key derivation from wallet signature of publicSecret | Connection details (hostname, port, username) only decryptable by NFT holder |
 | Broker allocation | secp256k1 ECIES | Broker's published public key / client's ephemeral key | Request/response payloads between client and broker |
 | Admin commands | ECIES | Admin wallet | On-chain admin commands with anti-replay nonce |
 
 **NFT userEncrypted format**: IV[12 bytes] || ciphertext || authTag[16 bytes] (hex-encoded)
-**publicSecret format**: `"libpam-web3:<checksumAddress>:<nonce>"`
+**publicSecret**: Host config value (e.g. `"blockhost-access"`), stored in `blockhost.yaml` → `auth.public_secret`. Not an NFT field.
 
 ## TEMPLATE VARIABLES REFERENCE
 
