@@ -149,6 +149,7 @@ blockhost-firstboot.service → /opt/blockhost/first-boot.sh
     → Rollback on connectivity failure (restore IP to NIC, delete bridge)
     → Persist to /etc/network/interfaces (Proxmox will overwrite via pvesh — expected)
     → Store bridge name in /run/blockhost/bridge
+  Step 3b-pre (.step-nodejs):         Install Node.js 22 LTS via NodeSource (required by engine)
   Step 3b (.step-foundry):            Install Foundry (cast, forge, anvil) → /usr/local/bin/ (EVM engine only)
   Step 4 (.step-network):             Verify network connectivity (DHCP fallback)
   Step 5 (.step-otp):                 Generate OTP → /run/blockhost/otp.json, display on /etc/issue

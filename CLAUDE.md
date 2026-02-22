@@ -122,5 +122,5 @@ sudo ./scripts/build-iso.sh --backend proxmox --engine evm [--testing]
 
 ### ISO Build & Test Cycle
 
-1. **Rebuild .deb packages** whenever a submodule has changed: `./scripts/build-packages.sh --backend proxmox` — the ISO build copies pre-built .debs from `packages/host/` and `packages/template/`, it does NOT rebuild them automatically.
+1. **Rebuild .deb packages** whenever a submodule has changed: `./scripts/build-packages.sh --backend proxmox --engine evm` — the ISO build copies pre-built .debs from `packages/host/` and `packages/template/`, it does NOT rebuild them automatically.
 2. **Remove the old ISO with `sudo`**: `sudo rm build/blockhost_0.1.0.iso` — the ISO is created by a root process and is owned by root.

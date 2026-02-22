@@ -1,8 +1,8 @@
 # BlockHost Build Guide
 
-**Version**: 0.1.0
-**Last Updated**: 2026-02-07
-**Base**: Debian 12 (Bookworm) → Proxmox VE 8.4
+**Version**: 0.3.0
+**Last Updated**: 2026-02-22
+**Base**: Debian 12 (Bookworm) + pluggable backend (Proxmox VE or libvirt)
 
 ---
 
@@ -10,7 +10,7 @@
 
 BlockHost turns a bare-metal server into an autonomous VM hosting platform driven by blockchain events. Users purchase subscriptions on-chain; the system detects the event, provisions a VM, mints an NFT with encrypted connection details, and the user connects via IPv6 + web3 signature authentication.
 
-**What the ISO does**: Auto-installs Debian 12, runs a first-boot script that installs Proxmox VE and BlockHost packages, then launches a web wizard for configuration.
+**What the ISO does**: Auto-installs Debian 12, runs a first-boot script that installs the selected hypervisor backend and BlockHost packages, then launches a web wizard for configuration.
 
 ---
 
@@ -30,7 +30,7 @@ sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --testing
 sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --build-deb --testing
 ```
 
-Output: `build/blockhost_0.1.0.iso`
+Output: `build/blockhost_0.3.0.iso`
 
 ---
 
@@ -48,15 +48,12 @@ blockhost/
 │   │       ├── macros/
 │   │       │   └── wizard_steps.html  # Shared step bar macro
 │   │       └── wizard/
-│   │           ├── wallet.html        # Admin wallet gate (pre-wizard)
 │   │           ├── network.html       # Step 1
 │   │           ├── storage.html       # Step 2
-│   │           ├── blockchain.html    # Step 3
-│   │           ├── proxmox.html       # Step 4
 │   │           ├── ipv6.html          # Step 5
 │   │           ├── admin_commands.html # Step 6
 │   │           ├── summary.html       # Step 7 + finalization
-│   │           └── install.html       # Post-finalization reboot
+│   │           └── (engine/provisioner templates provided by their .deb packages)
 │   └── common/               # Shared logic (OTP, detection, config)
 ├── preseed/
 │   └── blockhost.preseed     # Debian auto-install config
@@ -70,7 +67,7 @@ blockhost/
 ├── systemd/
 │   └── blockhost-firstboot.service
 ├── packages/
-│   ├── host/                 # .deb packages for Proxmox host
+│   ├── host/                 # .deb packages for host
 │   └── template/             # .deb packages for VM templates
 ├── testing/
 │   ├── blockhost-test-key    # SSH key for test VMs
@@ -84,10 +81,13 @@ blockhost/
 | Submodule | Package(s) | Purpose |
 |-----------|------------|---------|
 | `libpam-web3/` | libpam-web3 (template) | PAM module for web3 wallet authentication |
-| `blockhost-common/` | blockhost-common | Shared config loading, VM database |
-| `blockhost-provisioner-proxmox/` | blockhost-provisioner-proxmox | VM creation via Terraform, NFT minting |
-| `blockhost-engine/` | blockhost-engine | Blockchain event monitor, signup page generator |
+| `blockhost-common/` | blockhost-common | Shared config loading, VM database, root agent daemon |
+| `blockhost-provisioner-proxmox/` | blockhost-provisioner-proxmox | VM lifecycle (Proxmox: Terraform + PVE API) |
+| `blockhost-provisioner-libvirt/` | blockhost-provisioner-libvirt | VM lifecycle (libvirt: virsh + libvirt API) |
+| `blockhost-engine/` | blockhost-engine | Blockchain engine (EVM): monitor, bhcrypt, bw/ab/is CLIs, auth-svc |
+| `blockhost-engine-opnet/` | blockhost-engine-opnet | Blockchain engine (OPNet): same interface for Bitcoin L1 |
 | `blockhost-broker/` | blockhost-broker-client | IPv6 tunnel broker client |
+| `facts/` | — | Shared interface contracts (not a package) |
 
 ---
 
@@ -104,10 +104,10 @@ xorriso cpio gzip dpkg isolinux coreutils findutils sed wget/curl
 | Tool | Required By | Install |
 |------|------------|---------|
 | cargo | libpam-web3 | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| forge | blockhost-engine | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
-| node 18+ | blockhost-engine | https://nodejs.org/ or nvm |
+| forge | blockhost-engine (EVM only) | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
+| node 22+ | blockhost-engine, blockhost-engine-opnet | NodeSource: `curl -fsSL https://deb.nodesource.com/setup_22.x \| bash -` |
 | npm | blockhost-engine | (comes with node) |
-| python3 | blockhost-provisioner-proxmox, blockhost-broker | `apt install python3` |
+| python3 | provisioners, blockhost-broker | `apt install python3` |
 | git | submodule operations | `apt install git` |
 | curl | various downloads | `apt install curl` |
 
@@ -121,15 +121,17 @@ Run `./scripts/check-build-deps.sh` to verify, or `--install` to auto-install wh
 ./scripts/build-packages.sh --backend <provisioner> --engine <engine>
 ```
 
-Builds packages in dependency order:
+Builds packages in dependency order. The `--backend` and `--engine` flags select which provisioner and engine submodules to build:
 
 | # | Package | Source | Build Command | Destination |
 |---|---------|--------|---------------|-------------|
 | 1 | libpam-web3 | libpam-web3/ | `packaging/build-deb.sh` | packages/template/ |
 | 2 | blockhost-common | blockhost-common/ | `build.sh` | packages/host/ |
-| 3 | blockhost-provisioner-proxmox | blockhost-provisioner-proxmox/ | `build-deb.sh` | packages/host/ |
-| 4 | blockhost-engine | blockhost-engine/ | `packaging/build.sh` | packages/host/ |
+| 3 | blockhost-provisioner-\<backend\> | blockhost-provisioner-\<backend\>/ | `build-deb.sh` | packages/host/ |
+| 4 | blockhost-engine-\<engine\> | blockhost-engine-\<engine\>/ | `packaging/build.sh` | packages/host/ + packages/template/ |
 | 5 | blockhost-broker-client | blockhost-broker/ | `scripts/build-deb.sh` | packages/host/ |
+
+Note: The engine build also produces template packages (e.g., `blockhost-auth-svc`) and bundles `bhcrypt` CLI inside the engine .deb.
 
 Packages must be rebuilt whenever a submodule changes. The ISO copies pre-built `.deb` files — it does not rebuild them.
 
@@ -182,21 +184,24 @@ The preseed configures:
 
 Runs once via `blockhost-firstboot.service` (condition: `/var/lib/blockhost/.setup-complete` must not exist). Each step is idempotent with marker files for crash recovery.
 
-| Step | Description |
-|------|-------------|
-| 1. Hostname | Fix `/etc/hosts` — hostname must resolve to real IP, not `127.0.1.1` (Proxmox requirement) |
-| 2. Proxmox | Add PVE repo, install `proxmox-ve postfix open-iscsi chrony python3-ecdsa` |
-| 2b. Packages | Install BlockHost `.deb` packages via `install-packages.sh` |
-| 2c. Foundry | Download pre-built Foundry binaries (forge, cast, anvil) to `/usr/local/lib/foundry` |
-| 2d. Terraform | Add HashiCorp repo, install `terraform libguestfs-tools` |
-| 3. Network | Wait for connectivity, run DHCP if needed |
-| 4. OTP | Generate 6-char access code (4hr timeout, 10 attempts max) |
-| 5. Web installer | Launch Flask wizard on port 80, display OTP on console |
+| Step | Marker | Description |
+|------|--------|-------------|
+| 1 | `.step-network-wait` | Wait for network (DHCP) |
+| 2 | `.step-packages` | Install host `.deb` packages, copy template `.debs` to template-packages/ |
+| 2b | — | Verify `blockhost` user exists (created by blockhost-common .deb) |
+| 2c | — | Verify root agent running (installed by blockhost-common .deb), wait for socket |
+| 3 | `.step-provisioner-hook` | Run provisioner first-boot hook (e.g. Proxmox: install PVE, Terraform, libguestfs) |
+| 3a | `.step-bridge` | Create Linux bridge (br0), migrate IP from NIC, verify connectivity |
+| 3b-pre | `.step-nodejs` | Install Node.js 22 LTS via NodeSource (required by engine) |
+| 3b | `.step-foundry` | Install Foundry (EVM engine only — for contract deployment via cast/forge) |
+| 4 | `.step-network` | Verify network connectivity (DHCP fallback) |
+| 5 | `.step-otp` | Generate OTP code, display on console |
+| 6 | — | Start Flask web wizard on port 80/443 |
 
 Package install order (respects dependencies):
 1. blockhost-common
-2. blockhost-provisioner-proxmox
-3. blockhost-engine
+2. blockhost-provisioner-\<backend\>
+3. blockhost-engine-\<engine\>
 4. blockhost-broker-client
 
 Template packages (libpam-web3) are copied to `/var/lib/blockhost/template-packages/`.
@@ -205,16 +210,16 @@ Template packages (libpam-web3) are copied to `/var/lib/blockhost/template-packa
 
 Access via browser at the IP shown on console. Enter OTP to authenticate.
 
-**Pre-wizard gate:** Admin connects MetaMask wallet and signs a message. This captures the admin wallet address and signature (used later for NFT #0 encryption).
+**Pre-wizard gate:** Admin connects wallet and signs a message (signing page template provided by engine). This captures the admin wallet address and signature (used later for NFT #0 encryption).
 
-**Wizard steps:**
+**Wizard steps** (dynamically built from `WIZARD_STEPS` in `app.py`):
 
 | # | Step | What it configures |
 |---|------|--------------------|
 | 1 | Network | DHCP or static IP (usually already configured) |
-| 2 | Storage | Disk selection for Proxmox |
-| 3 | Blockchain | Chain ID, RPC URL, deployer wallet (generate/import), contracts (deploy/existing) |
-| 4 | Proxmox | Storage pool, bridge, VMID range, IP pool, template VMID |
+| 2 | Storage | Disk selection for LVM |
+| 3 | Engine | Chain-specific config (chain_id, RPC, deployer wallet, contracts, plan, revenue sharing) |
+| 4 | Provisioner | Provisioner-specific config (IP pool, storage, VMID range, etc.) |
 | 5 | IPv6 | Broker allocation or manual prefix |
 | 6 | Admin | Admin commands, port knock config |
 | 7 | Summary | Review all settings, start finalization |
@@ -223,21 +228,15 @@ The step bar is data-driven from `WIZARD_STEPS` in `app.py` — add/remove steps
 
 ### Phase 4: Finalization
 
-Triggered from the summary page. 14 steps with persistent state in `/var/lib/blockhost/setup-state.json` — supports resume and retry on failure.
+Triggered from the summary page. Steps are dynamically assembled from engine and provisioner plugins, with persistent state in `/var/lib/blockhost/setup-state.json` — supports resume and retry on failure.
 
-| # | Step ID | Description |
-|---|---------|-------------|
-| 1 | `keypair` | Generate server secp256k1 keypair |
-| 2 | `wallet` | Save deployer private key |
-| 3 | `contracts` | Deploy contracts via `cast` or verify existing addresses |
-| 4 | `config` | Write config files incl. bridge name (see below) |
-| 5+ | *(provisioner)* | Provisioner-specific steps (e.g. Proxmox: token, terraform, template) |
-| — | `ipv6` | Request broker allocation + install WireGuard tunnel, or configure manual prefix |
-| — | `https` | Generate sslip.io hostname from IPv6, get Let's Encrypt cert |
-| — | `signup` | Generate signup page via `blockhost-generate-signup` |
-| — | `mint_nft` | Mint NFT #0 to admin wallet with encrypted connection details |
-| — | `finalize` | Create `.setup-complete` marker, enable services, disable first-boot |
-| — | `validate` | System validation (testing mode only) |
+| Phase | Steps | Source |
+|-------|-------|--------|
+| Engine pre | e.g. keypair, wallet, contracts, chain_config | Engine plugin: `get_finalization_steps()` |
+| Provisioner | e.g. token, terraform, template (Proxmox) or storage, network, template (libvirt) | Provisioner plugin: `get_finalization_steps()` |
+| Installer post | ipv6, https, signup, nginx | Hardcoded in `finalize.py` |
+| Engine post | e.g. mint_nft, plan, revenue_share | Engine plugin: `get_post_finalization_steps()` |
+| Final | finalize, validate | Hardcoded in `finalize.py` |
 
 ---
 
@@ -247,26 +246,21 @@ Created during finalization in `/etc/blockhost/`:
 
 | File | Contents |
 |------|----------|
-| `server.key` | Server private key (mode 600) |
-| `server.pubkey` | Server public key (uncompressed secp256k1) |
-| `deployer.key` | Deployer wallet private key (mode 600) |
-| `db.yaml` | VMID range, IP pool, IPv6 pool, terraform_dir |
+| `server.key` | Server private key (mode 0640, root:blockhost) |
+| `server.pubkey` | Server public key |
+| `deployer.key` | Deployer wallet private key (mode 0640) |
+| `db.yaml` | IP pool, IPv6 pool, bridge, provisioner-specific (VMID range, terraform_dir, etc.) |
 | `web3-defaults.yaml` | Chain ID, RPC URL, contract addresses, auth settings |
-| `blockhost.yaml` | Server keys, deployer ref, Proxmox settings, admin config |
+| `blockhost.yaml` | Server keys, deployer ref, provisioner settings, admin config |
+| `addressbook.json` | Wallet directory: role → address mappings (mode 0640) |
+| `revenue-share.json` | Revenue sharing config |
 | `broker-allocation.json` | IPv6 prefix, broker endpoint, WG keys (broker mode) |
-| `https.json` | Hostname, cert/key paths, sslip.io flag |
-| `admin-commands.json` | Secret command name → action mapping |
-| `admin-signature.key` | Admin's raw signature for NFT #0 (mode 600) |
-| `ssl/cert.pem` | TLS certificate |
-| `ssl/key.pem` | TLS private key (mode 600) |
-| `terraform_ssh_key` | Terraform SSH private key (mode 600) |
-| `terraform_ssh_key.pub` | Terraform SSH public key |
+| `https.json` | Hostname, cert/key paths |
+| `admin-commands.json` | Port knock configuration |
+| `admin-signature.key` | Admin's raw signature for NFT #0 (mode 0640) |
+| `ssl/cert.pem`, `ssl/key.pem` | TLS certificate + key |
 
-Terraform state lives in `/var/lib/blockhost/terraform/`:
-- `provider.tf.json` — bpg/proxmox provider config
-- `variables.tf.json` — Variable definitions
-- `terraform.tfvars` — API token credentials
-- `.terraform/` — Initialized providers
+All files owned `root:blockhost`. See `ARCHITECTURE.md` for full details.
 
 ---
 
@@ -275,15 +269,13 @@ Terraform state lives in `/var/lib/blockhost/terraform/`:
 ```
 User → Blockchain (purchase subscription)
               ↓
-       SubscriptionPurchased event
+       SubscriptionCreated event
               ↓
-       blockhost-engine (monitors events)
+       blockhost-monitor (detects event)
               ↓
-       blockhost-provisioner-proxmox (creates VM via Terraform)
+       Decrypt → Create VM → Encrypt → Mint NFT → Update GECOS → Mark DB
               ↓
-       Mints NFT with encrypted connection details
-              ↓
-       User decrypts from NFT on signup page
+       User decrypts connection details from NFT on signup page
               ↓
        User connects via IPv6 + web3 signature (libpam-web3)
 ```
@@ -309,14 +301,16 @@ Outside → Broker (NDP proxy) → WireGuard → BlockHost host
 | AccessCredentialNFT | Stores encrypted connection details per user |
 | BlockHostSubscription | Handles payments, emits events for the monitor |
 
-Compiled in submodules during `.deb` builds, deployed during wizard finalization via Foundry `cast`.
+Compiled in submodules during `.deb` builds, deployed during wizard finalization (EVM: Foundry `cast`, OPNet: engine-specific).
 
 ### Services
 
 | Service | Purpose |
 |---------|---------|
-| `blockhost-monitor` (blockhost-engine) | Watches blockchain for subscription events, provisions VMs |
-| `blockhost-signup` | Serves the signup/decrypt page |
+| `blockhost-root-agent` | Privileged operations daemon (runs as root) |
+| `blockhost-monitor` (blockhost-engine) | Watches blockchain for subscription events, provisions VMs, fund management |
+| `blockhost-admin` | Admin panel Flask app (behind nginx reverse proxy) |
+| `nginx` | TLS terminator: signup page (static) + admin panel reverse proxy |
 | `blockhost-gc.timer` | Periodic garbage collection of expired VMs |
 | `wg-quick@wg-broker` | WireGuard tunnel to IPv6 broker |
 
@@ -334,7 +328,7 @@ sudo virsh destroy blockhost-test 2>/dev/null
 sudo virsh undefine blockhost-test --remove-all-storage
 
 # 2. Remove the old ISO (root-owned from the build process)
-sudo rm -f build/blockhost_0.1.0.iso
+sudo rm -f build/blockhost_0.3.0.iso
 
 # 3. Rebuild packages and ISO
 sudo ./scripts/build-iso.sh --backend libvirt --engine opnet --build-deb --testing
@@ -345,7 +339,7 @@ sudo virt-install \
     --ram 4096 \
     --vcpus 2 \
     --disk size=32 \
-    --cdrom build/blockhost_0.1.0.iso \
+    --cdrom build/blockhost_0.3.0.iso \
     --network network=default \
     --graphics vnc
 ```
@@ -420,12 +414,12 @@ Requires: finalized system, `blockhost-engine` running, deployer key, Foundry (`
 Proves external users can reach and authenticate to a provisioned VM over carrier IPv6:
 
 ```bash
-./testing/ipv6-login-test.sh --host <proxmox-ip> --private-key <wallet-key>
+./testing/ipv6-login-test.sh --host <host-ip> --private-key <wallet-key>
 ```
 
 5 phases: pre-flight (ADB device, tools) → IPv6 ping from phone → SSH port reachability → full PAM login (capture prompt, sign message, feed signature, verify shell) → signing page HTTP check.
 
-Requires: ADB-connected Android phone with carrier IPv6, SSH key to Proxmox host, test wallet key from integration test.
+Requires: ADB-connected Android phone with carrier IPv6, SSH key to BlockHost host, test wallet key from integration test.
 
 ### CI/CD
 
@@ -453,7 +447,7 @@ Output saved to `/var/lib/blockhost/validation-output.txt`.
 
 ## Troubleshooting
 
-### Proxmox services failing after reboot
+### Proxmox services failing after reboot (Proxmox backend only)
 `/etc/hosts` has `127.0.1.1` entry. Fix: hostname must resolve to real IP.
 ```bash
 cat /etc/hosts
@@ -469,8 +463,8 @@ ss -tlnp | grep :80
 ```
 
 ### Contract deployment fails
-- Check deployer wallet has ETH for gas
-- Verify RPC endpoint: `cast block-number --rpc-url $RPC`
+- Check deployer wallet has funds for gas (ETH for EVM, BTC for OPNet)
+- Verify RPC endpoint is reachable
 - Check contract artifacts exist in `/usr/share/blockhost/contracts/`
 
 ### Template build fails
@@ -513,8 +507,8 @@ ip -6 route show | grep <vm-ipv6>
 
 ## Key Implementation Notes
 
-### /etc/hosts (Critical)
-Debian preseed creates `127.0.1.1 blockhost.local blockhost`. Proxmox requires the hostname to resolve to the real IP. `first-boot.sh` fixes this before Proxmox installation.
+### /etc/hosts (Critical for Proxmox)
+Debian preseed creates `127.0.1.1 blockhost.local blockhost`. Proxmox requires the hostname to resolve to the real IP. The provisioner first-boot hook fixes this before Proxmox installation.
 
 ### Systemd + TTY
 The first-boot service takes over tty1. Getty is stopped before the script and restarted after. Do NOT use `Conflicts=getty@tty1.service` — it prevents getty from starting even when the condition fails.
@@ -523,7 +517,7 @@ The first-boot service takes over tty1. Getty is stopped before the script and r
 Flask is started with `setsid` to survive the parent script exiting. Without `setsid`, the Flask process dies when `first-boot.sh` finishes.
 
 ### Bridge creation
-Uses PVE API (`pvesh`) exclusively — editing `/etc/network/interfaces` directly conflicts with PVE's management of that file. `pvesh set /nodes/<node>/network` applies staged changes.
+First-boot Step 3a creates a Linux bridge (br0) provisioner-agnostically. On Proxmox, this may be superseded by vmbr0 created during PVE installation. The bridge name is stored in `/run/blockhost/bridge` and later in `db.yaml`.
 
 ### sslip.io hostname
 Derived from the IPv6 gateway address using `ipaddress.IPv6Network`. The compressed IPv6 form with `:` replaced by `-` gives hostnames like `signup.2a11-6c7-f04-276--101.sslip.io`.

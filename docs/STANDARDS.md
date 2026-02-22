@@ -93,11 +93,13 @@ Each submodule has a defined scope. Keep functionality in the right place.
 | Submodule | Scope | Contains |
 |-----------|-------|----------|
 | **blockhost-common** | Shared libraries | Config loading, VM database, root agent Python client |
-| **blockhost-provisioner-proxmox** | VM lifecycle | Create, suspend, destroy, resume, template build, NFT mint |
-| **blockhost-engine** | Blockchain interaction | Event monitor, admin commands, fund manager, `bw`/`ab` CLIs, root agent TS client |
+| **blockhost-provisioner-proxmox** | VM lifecycle (Proxmox) | Create, suspend, destroy, resume, template build (Terraform + PVE API) |
+| **blockhost-provisioner-libvirt** | VM lifecycle (libvirt) | Create, suspend, destroy, resume, template build (virsh + libvirt API) |
+| **blockhost-engine** | Blockchain (EVM) | Event monitor, admin commands, fund manager, `bw`/`ab`/`is` CLIs, `bhcrypt` CLI, signup page, auth-svc |
+| **blockhost-engine-opnet** | Blockchain (OPNet) | Same as blockhost-engine but for OPNet/Bitcoin L1 |
 | **libpam-web3** | Authentication | PAM module (in VMs), GECOS-based wallet verification |
-| **blockhost-engine** | Blockchain + crypto | Event monitor, signup page generator, `bhcrypt` CLI, `bw`/`ab` CLIs |
 | **blockhost-broker** | IPv6 allocation | Broker client, on-chain registry interaction, WireGuard config |
+| **facts** | Interface contracts | Shared specs: provisioner, engine, common, wizard UI, admin, NFT interfaces |
 | **Main repo** (installer) | Setup-time only | First boot, web wizard, finalization, root agent daemon |
 
 ### Guidelines
