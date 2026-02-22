@@ -22,6 +22,3 @@
 [submodule "blockhost-engine-opnet"]
 	path = blockhost-engine-opnet
 	url = https://github.com/mwaddip/blockhost-engine-opnet
-[submodule "blockhost-runner"]
-	path = blockhost-runner
-	url = https://github.com/mwaddip/blockhost-runner
