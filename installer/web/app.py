@@ -555,11 +555,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return render_template(wallet_template)
 
-    def _nft_tool_decrypt(signature: str, ciphertext: str) -> dict:
-        """Legacy fallback: decrypt config via nft_tool subprocess."""
+    def _bhcrypt_decrypt(signature: str, ciphertext: str) -> dict:
+        """Fallback: decrypt config via bhcrypt subprocess."""
         import yaml
         result = subprocess.run(
-            ['nft_tool', 'decrypt-symmetric',
+            ['bhcrypt', 'decrypt-symmetric',
              '--signature', signature,
              '--ciphertext', ciphertext],
             capture_output=True, text=True, timeout=30,
@@ -572,10 +572,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
             raise ValueError('Decrypted content is not valid config')
         return config
 
-    def _nft_tool_encrypt(signature: str, plaintext: str) -> str:
-        """Legacy fallback: encrypt config via nft_tool subprocess."""
+    def _bhcrypt_encrypt(signature: str, plaintext: str) -> str:
+        """Fallback: encrypt config via bhcrypt subprocess."""
         result = subprocess.run(
-            ['nft_tool', 'encrypt-symmetric',
+            ['bhcrypt', 'encrypt-symmetric',
              '--signature', signature,
              '--plaintext', plaintext],
             capture_output=True, text=True, timeout=30,
@@ -617,7 +617,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if decrypt_fn:
                 config = decrypt_fn(admin_signature, ciphertext)
             else:
-                config = _nft_tool_decrypt(admin_signature, ciphertext)
+                config = _bhcrypt_decrypt(admin_signature, ciphertext)
 
             if not isinstance(config, dict):
                 return jsonify({'error': 'Decrypted content is not valid config'}), 400
@@ -646,7 +646,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
             return jsonify({'status': 'ok', 'redirect': url_for('wizard_summary')})
         except FileNotFoundError:
-            return jsonify({'error': 'nft_tool not installed'}), 500
+            return jsonify({'error': 'bhcrypt not installed'}), 500
         except subprocess.TimeoutExpired:
             return jsonify({'error': 'Decryption timed out'}), 500
         except ValueError as e:
@@ -1188,7 +1188,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if encrypt_fn:
                 ciphertext_hex = encrypt_fn(admin_signature, plaintext)
             else:
-                ciphertext_hex = _nft_tool_encrypt(admin_signature, plaintext)
+                ciphertext_hex = _bhcrypt_encrypt(admin_signature, plaintext)
 
             return Response(
                 ciphertext_hex,

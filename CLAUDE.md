@@ -44,6 +44,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `blockhost-provisioner-proxmox/`
 - `blockhost-provisioner-libvirt/`
 - `blockhost-engine/`
+- `blockhost-engine-opnet/`
 - `blockhost-broker/`
 
 **When changes to a submodule are needed:**
@@ -90,29 +91,30 @@ Packages built from submodules during first-boot:
 
 | Submodule | Build Command | Package(s) | Install Location |
 |-----------|---------------|------------|------------------|
-| libpam-web3 | `packaging/build-deb-tools.sh` | libpam-web3-tools | Proxmox host |
 | libpam-web3 | `packaging/build-deb.sh` | libpam-web3 | VM template dir |
-| blockhost-common | `build.sh` | blockhost-common | Proxmox host |
+| blockhost-common | `build.sh` | blockhost-common | Host |
 | blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Host (Proxmox) |
 | blockhost-provisioner-libvirt | `build-deb.sh` | blockhost-provisioner-libvirt | Host (libvirt) |
 | blockhost-engine | `packaging/build.sh` | blockhost-engine | Host |
-| blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Proxmox host |
+| blockhost-engine-opnet | `packaging/build.sh` | blockhost-engine-opnet | Host |
+| blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Host |
 
-**Note**: `libpam-web3` (the PAM module, not tools) is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the Proxmox host.
+**Note**: `libpam-web3` is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the host directly.
 
 ## Build Commands
 
-All build scripts require `--backend <name>` (e.g., `proxmox`, `libvirt`). The backend name maps to the submodule `blockhost-provisioner-<name>`.
+Build scripts require `--backend <name>` (e.g., `proxmox`, `libvirt`) and `--engine <name>` (e.g., `evm`, `opnet`). The backend maps to `blockhost-provisioner-<name>`, the engine maps to `blockhost-engine-<name>`.
 
 ```bash
-# Build all .deb packages for a backend
-./scripts/build-packages.sh --backend proxmox
+# Build all .deb packages
+./scripts/build-packages.sh --backend proxmox --engine evm
+./scripts/build-packages.sh --backend libvirt --engine opnet
 
 # Verify packages were built correctly
-./scripts/ci-verify-packages.sh --backend proxmox
+./scripts/ci-verify-packages.sh --backend proxmox --engine evm
 
 # Build the ISO (requires sudo, requires packages already built)
-sudo ./scripts/build-iso.sh --backend proxmox [--testing]
+sudo ./scripts/build-iso.sh --backend proxmox --engine evm [--testing]
 
 # Check build dependencies
 ./scripts/check-build-deps.sh

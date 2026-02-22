@@ -1,7 +1,7 @@
 # ARCHITECTURE — BlockHost
 
 > LLM-optimized reference. Dense, structured, minimal prose.
-> Last updated: 2026-02-20
+> Last updated: 2026-02-22
 
 ## FILE MAP
 
@@ -94,11 +94,11 @@ build-packages.sh --backend <name> --engine <name>
   →                                              → packages/template/blockhost-auth-svc_*.deb (if engine produces one)
   → blockhost-broker/scripts/build-deb.sh     → packages/host/blockhost-broker-client_*.deb
   Note: --engine selects which engine submodule to build (e.g., evm, opnet).
-        nft_tool CLI is built and shipped inside the engine .deb (replaces former libpam-web3-tools).
-        OPNet engine also produces blockhost-auth-svc template package (auth-svc was formerly
-        part of libpam-web3-tools which no longer exists). The provisioner's template build
-        must install this package into VMs alongside libpam-web3. TODO: provisioner template
-        build does not yet know about engine-supplied template packages.
+        bhcrypt CLI is built and shipped inside the engine .deb.
+        OPNet engine also produces blockhost-auth-svc template package.
+        The provisioner's template build must install this package into VMs alongside
+        libpam-web3. TODO: provisioner template build does not yet know about
+        engine-supplied template packages.
 
 build-iso.sh --backend <name> --engine <name> [--testing] [--build-deb]
   → extract Debian 12 netinst ISO
@@ -223,19 +223,13 @@ Subscription purchase flow:
   2. Signup page calls BlockhostSubscriptions.buySubscription(planId, days, paymentMethodId, userEncrypted)
      - userEncrypted = ECIES-encrypted data blob (wallet-derived key)
   3. Contract emits SubscriptionCreated event with encrypted user data
-  4. blockhost-monitor detects event → enqueues to subscription pipeline (pipeline.json):
-     Pipeline stages (each persisted, resumable on crash):
-     a. received     — event parsed, entry created
-     b. decrypted    — userEncrypted decrypted to user signature via server.key
-     c. token_reserved — local next_token_id counter incremented, reserved in vms.json
-     d. vm_created   — provisioner create called, JSON summary parsed (ip, vmid, username)
-     e. encrypted    — connection details encrypted with user's signature (symmetric AES-GCM)
-     f. nft_minted   — blockhost-mint-nft called, actual token ID verified against reserved
-     g. db_updated   — markNftMinted() awaited; if token ID mismatch: reservation fixed + GECOS updated
-     h. complete     — moved to history, queue drained
-     Concurrency: one active pipeline at a time. Additional events queued. Reconciler, fund manager,
-     and gas check are blocked (isPipelineBusy) and awaited (not fire-and-forget).
-     Retry: exponential backoff (5s base, max 3 retries per stage). Per-stage timeouts.
+  4. blockhost-monitor detects event → handleSubscriptionCreated:
+     a. Decrypt userEncrypted via bhcrypt (ECIES, server.key)
+     b. Call provisioner create (WITHOUT --nft-token-id) → parse JSON summary (ip, vmid, username)
+     c. Encrypt connection details via bhcrypt (symmetric AES-GCM, user signature as key)
+     d. Call blockhost-mint-nft → capture actual token ID from stdout
+     e. Call update-gecos with actual token ID
+     f. Mark NFT minted in database (awaited — never fire-and-forget)
   5. User retrieves NFT → re-signs publicSecret → derives key → decrypts connection details
   6. VM named: blockhost-XXX (3-digit zero-padded subscription ID)
 
@@ -502,7 +496,7 @@ hardcoded paths when no manifest exists (transition period).
 ### CLI Command Contract
 
 All provisioner commands use `vm_name` (string) as the VM identifier:
-- `create <name> --owner-wallet <addr> --nft-token-id <int> [--expiry-days N] [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
+- `create <name> --owner-wallet <addr> [--nft-token-id <int>] [--expiry-days N] [--cpu N] [--memory N] [--disk N] [--apply] [--cloud-init-content <path>]`
 - `destroy <name>`, `start <name>`, `stop <name>`, `kill <name>`
 - `status <name>` → stdout: `active`, `suspended`, `destroyed`, `unknown`
 - `list [--format json]` → stdout: list of VMs
@@ -645,7 +639,7 @@ Directory: `/var/lib/blockhost/`
 | setup-state.json | JSON | Finalization progress (steps, status, config) |
 | vms.json | JSON | VM database (vmid → metadata, IP, NFT token, subscription, expiry) |
 | vms.json.lock | empty | Lockfile for atomic DB updates (separate from data file) |
-| pipeline.json | JSON | Subscription pipeline state: active entry, queue, token counter, history (see §11 in ENGINE_INTERFACE.md) |
+| pipeline.json | JSON | Reserved for future use |
 | terraform/ | dir | Terraform state, provider config, .tfvars, per-VM .tf.json |
 | template-packages/ | dir | .debs for VM template builds: libpam-web3_*.deb, blockhost-auth-svc_*.deb (OPNet) |
 | validation-output.txt | text | Validation report (testing mode only) |
@@ -673,7 +667,7 @@ Each submodule is a separate git repo. This project consumes their .deb outputs 
 - Security: JSON path only accepted from `.sig` files (callback mode), never from terminal paste
 - PAM scope: guarded by `pam_succeed_if.so user = <provisioned_user>`, others get `pam_deny`
 
-**nft_tool** CLI and **auth-svc** are shipped by blockhost-engine (see engine components table).
+**bhcrypt** CLI and **auth-svc** are shipped by blockhost-engine (see engine components table).
 
 **Encryption schemes** (ecies.rs): secp256k1 ECIES, x25519, AES-256-GCM
 
@@ -711,27 +705,27 @@ Dev mode: `BLOCKHOST_DEV=1` falls back to `./config/` directory
 
 | Script | Purpose | Key args |
 |--------|---------|----------|
-| `vm-generator.py` | Create VM | `<name> --owner-wallet <addr> --nft-token-id <int> [--expiry-days N] [--apply] [--cpu N --memory N --disk N]` |
+| `vm-generator.py` | Create VM | `<name> --owner-wallet <addr> [--nft-token-id <int>] [--expiry-days N] [--apply] [--cpu N --memory N --disk N]` |
 | `vm-gc.py` | Garbage collect expired VMs | `[--execute] [--suspend-only] [--grace-days N]` |
 | `build-template.sh` | Build Debian 12 VM template | `[PROXMOX_HOST=root@ix TEMPLATE_VMID=9001]` |
 
 **vm-generator.py workflow**:
 1. Allocate VMID + IPv4 from pool + IPv6 /128 from prefix
 2. Derive FQDN from `dns_zone` if available: `f"{offset:x}.{dns_zone}"` (hex offset of IPv6 within prefix)
-3. Render cloud-init from `nft-auth.yaml` template (GECOS: `wallet=ADDR,nft=TOKEN_ID`, SIGNING_DOMAIN for HTTPS)
+3. Render cloud-init from `nft-auth.yaml` template (GECOS: `wallet=ADDR`, SIGNING_DOMAIN for HTTPS)
 4. Generate `.tf.json` in terraform_dir
 5. `terraform apply` (if --apply)
 6. Return JSON summary with connection details (ip, vmid, nft_token_id)
 Note: NFT token reservation, encryption, and minting are engine responsibilities (see subscription flow).
 
 **Cloud-init templates** (`cloud-init/templates/`):
-- `nft-auth.yaml` — Default: web3 NFT auth, GECOS nft=TOKEN_ID
+- `nft-auth.yaml` — Default: web3 NFT auth, GECOS wallet=ADDRESS
 - `webserver.yaml` — Basic webserver
 - `devbox.yaml` — Dev environment
 
 **VM naming**: `blockhost-XXX` (3-digit zero-padded subscription ID)
 
-**Dependencies**: blockhost-common, blockhost-engine (nft_tool), Terraform (bpg/proxmox provider), libguestfs-tools
+**Dependencies**: blockhost-common, blockhost-engine (bhcrypt), Terraform (bpg/proxmox provider), libguestfs-tools
 
 ### blockhost-engine
 
@@ -748,7 +742,7 @@ Only one is installed per host. Both implement the same ENGINE_INTERFACE.md cont
 |-----------|----------|---------|
 | `contracts/` | Solidity / OPNet TS | Chain-specific smart contracts |
 | `src/monitor/` | TypeScript | Blockchain event polling (watches for subscription events) |
-| `src/handlers/` | TypeScript | Event handlers (reserves token ID, calls provisioner, encrypts, mints) |
+| `src/handlers/` | TypeScript | Event handlers (calls provisioner, encrypts, mints, update-gecos) |
 | `src/admin/` | TypeScript | On-chain admin commands (ECIES-encrypted, anti-replay nonce) |
 | `src/reconcile/` | TypeScript | Periodic NFT ownership reconciliation → GECOS sync via provisioner `update-gecos` |
 | `src/fund-manager/` | TypeScript | Automated fund withdrawal, revenue sharing, gas management |
@@ -756,7 +750,7 @@ Only one is installed per host. Both implement the same ENGINE_INTERFACE.md cont
 | `src/ab/` | TypeScript | addressbook CLI (`ab add`, `ab del`, `ab up`, `ab new`, `ab list`, `ab --init`) |
 | `src/is/` | TypeScript | identity predicate CLI (`is <wallet> <nft_id>`, `is contract <address>`) |
 | `src/auth-svc/` | TypeScript | Signing page HTTPS server + callback API (installed on VMs via blockhost-auth-svc template pkg, port 8443) |
-| `src/nft-tool.ts` | TypeScript | Crypto CLI (keypair gen, encrypt/decrypt-symmetric) — replaces former `pam_web3_tool` |
+| `src/bhcrypt.ts` | TypeScript | Crypto CLI (keypair gen, ECIES decrypt, symmetric encrypt/decrypt) |
 | `scripts/generate-signup-page` | Python | Generates signup.html from template (extensionless) |
 | `scripts/mint_nft` | Python/TS | Mint access credential NFT (extensionless, `--owner-wallet`, `--user-encrypted`) |
 | `scripts/deploy-contracts` | Bash/TS | Deploy smart contracts (extensionless) |
@@ -997,7 +991,7 @@ libvirt provisioner actions (from `virsh.py`):
 |-----------|-----------------|---------|
 | `terraform init/apply/destroy` | HTTP API auth, working dir owned by blockhost | provisioner |
 | `bw who`, `is contract` | HTTP RPC, reads config via group perm | admin panel, installer validation |
-| `nft_tool decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
+| `bhcrypt decrypt/encrypt` | User-space binary, reads keys via group | provisioner, engine |
 | `pgrep` | No privilege needed | engine (reconcile) |
 | python3 db scripts | Writes to blockhost-owned `/var/lib/blockhost/` | engine |
 

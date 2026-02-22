@@ -228,7 +228,7 @@ main() {
         fi
     fi
 
-    # Node.js >= 22 LTS (blockhost-engine, blockhost-runner)
+    # Node.js >= 22 LTS (blockhost-engine)
     if command -v node >/dev/null 2>&1; then
         local node_ver
         node_ver=$(node --version 2>/dev/null)
