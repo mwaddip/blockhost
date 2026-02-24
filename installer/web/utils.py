@@ -52,8 +52,8 @@ def detect_disks() -> list[dict]:
     return disks
 
 
-def is_valid_address(address: str) -> bool:
-    """Check if string is a valid Ethereum address."""
+def is_valid_evm_address(address: str) -> bool:
+    """Check if string is a valid Ethereum address (used for broker registry)."""
     if not address:
         return False
     address = address.strip()
@@ -93,42 +93,6 @@ def get_broker_registry(chain_id: str) -> Optional[str]:
     }
     return registries.get(chain_id)
 
-
-def get_wallet_balance(address: str, rpc_url: str) -> Optional[int]:
-    """Get wallet balance via JSON-RPC."""
-    import urllib.request
-    import urllib.error
-
-    try:
-        # Prepare JSON-RPC request
-        payload = json.dumps({
-            'jsonrpc': '2.0',
-            'method': 'eth_getBalance',
-            'params': [address, 'latest'],
-            'id': 1,
-        }).encode('utf-8')
-
-        req = urllib.request.Request(
-            rpc_url,
-            data=payload,
-            headers={
-                'Content-Type': 'application/json',
-                'User-Agent': 'BlockHost-Installer/1.0',
-            },
-            method='POST'
-        )
-
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-
-            if 'result' in data:
-                # Result is hex string, convert to int
-                return int(data['result'], 16)
-
-        return None
-    except (urllib.error.URLError, json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"Balance check error: {e}")
-        return None
 
 
 def fetch_broker_registry_from_github(chain_id: str) -> Optional[str]:

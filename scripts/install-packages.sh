@@ -48,17 +48,18 @@ if [ -d "$HOST_PKG_DIR" ] && ls "$HOST_PKG_DIR"/*.deb >/dev/null 2>&1; then
 
     # Auto-detect engine package name
     ENGINE_PKG=""
-    ENGINE_DEB=$(find "$HOST_PKG_DIR" -maxdepth 1 -name "blockhost-engine-*_*.deb" -type f 2>/dev/null | head -1)
+    ENGINE_DEB=$(find "$HOST_PKG_DIR" -maxdepth 1 -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
     if [ -n "$ENGINE_DEB" ]; then
         ENGINE_PKG=$(basename "$ENGINE_DEB" | sed 's/_.*$//')
     fi
 
     # Install in order: common first (dependency), then others
+    # Engine is deferred — it depends on nodejs (>= 22) which isn't available
+    # until first-boot.sh installs NodeSource. Engine is installed in step 3b-post.
     INSTALL_ORDER=(
         "blockhost-common"
     )
     [ -n "$PROV_PKG" ] && INSTALL_ORDER+=("$PROV_PKG")
-    [ -n "$ENGINE_PKG" ] && INSTALL_ORDER+=("$ENGINE_PKG")
     INSTALL_ORDER+=(
         "blockhost-broker-client"
     )

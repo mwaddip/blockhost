@@ -265,7 +265,7 @@ configure_testing_mode() {
     # Set apt proxy in preseed if provided
     if [ -n "$APT_PROXY" ] && [ -f "$PRESEED_FILE" ]; then
         if grep -q "mirror/http/proxy" "$PRESEED_FILE"; then
-            sed -i "s|d-i mirror/http/proxy string.*|d-i mirror/http/proxy string ${APT_PROXY}|" "$PRESEED_FILE"
+            sed -i "s#d-i mirror/http/proxy string.*#d-i mirror/http/proxy string ${APT_PROXY}#" "$PRESEED_FILE"
         else
             echo "d-i mirror/http/proxy string ${APT_PROXY}" >> "$PRESEED_FILE"
         fi
@@ -377,6 +377,10 @@ main() {
     log "Building from Debian 12 base"
     log "Backend: $BACKEND"
     log "Engine: $ENGINE"
+
+    if [[ -n "$APT_PROXY" ]] && ! [[ "$APT_PROXY" =~ ^https?:// ]]; then
+        error "--apt-proxy must be an http:// or https:// URL"
+    fi
 
     if [ "$TESTING_MODE" = "true" ]; then
         log "TESTING MODE ENABLED"

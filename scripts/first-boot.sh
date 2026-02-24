@@ -114,9 +114,9 @@ if [ ! -f "$STEP_PACKAGES" ]; then
             FALLBACK_ENGINE_PKG=$(basename "$FALLBACK_ENGINE_DEB" | sed 's/_.*$//')
         fi
 
+        # Engine is deferred — depends on nodejs (>= 22) from step 3b-pre
         FALLBACK_ORDER=(blockhost-common)
         [ -n "$PROV_PKG" ] && FALLBACK_ORDER+=("$PROV_PKG")
-        [ -n "$FALLBACK_ENGINE_PKG" ] && FALLBACK_ORDER+=("$FALLBACK_ENGINE_PKG")
         FALLBACK_ORDER+=(blockhost-broker-client)
 
         for pkg in "${FALLBACK_ORDER[@]}"; do
@@ -381,64 +381,75 @@ else
 fi
 
 #
-# Step 3b: Install Foundry (EVM engine only — for contract deployment via cast/forge)
+# Step 3b-post: Install engine package (deferred from step 2)
 #
-STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
-if [ ! -f "$STEP_FOUNDRY" ]; then
-    # Check engine manifest — only EVM needs Foundry
-    ENGINE_NAME=""
-    if [ -f /usr/share/blockhost/engine.json ]; then
-        ENGINE_NAME=$(python3 -c "import json; print(json.load(open('/usr/share/blockhost/engine.json')).get('name',''))" 2>/dev/null || true)
-    fi
+# The engine depends on nodejs (>= 22), python3-pycryptodome, python3-ecdsa.
+# Node was just installed above; pycryptodome and ecdsa come from Debian repos.
+# We deferred the engine from install-packages.sh because dpkg -i fails when
+# dependencies are missing, and apt-get -f install "fixes" it by removing the package.
+#
+STEP_ENGINE="${STATE_DIR}/.step-engine"
+if [ ! -f "$STEP_ENGINE" ]; then
+    log "Step 3b-post: Installing engine package..."
 
-    if [ "$ENGINE_NAME" = "evm" ] || [ -z "$ENGINE_NAME" ]; then
-        log "Step 3b: Installing Foundry..."
-
-        if ! command -v cast &> /dev/null; then
-            log "Downloading Foundry binaries..."
-
-            # Download pre-built binaries directly (non-interactive)
-            FOUNDRY_DIR="/usr/local/lib/foundry"
-            mkdir -p "$FOUNDRY_DIR"
-
-            # Get latest release from GitHub
-            FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-            if [ -z "$FOUNDRY_VERSION" ]; then
-                FOUNDRY_VERSION="nightly"
-            fi
-            log "Installing Foundry version: $FOUNDRY_VERSION"
-
-            # Download and extract
-            FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
-            log "Downloading from: $FOUNDRY_URL"
-
-            if curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz 2>&1; then
-                tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
-                rm /tmp/foundry.tar.gz
-
-                # Create symlinks in /usr/local/bin
-                for tool in forge cast anvil chisel; do
-                    if [ -f "$FOUNDRY_DIR/$tool" ]; then
-                        chmod +x "$FOUNDRY_DIR/$tool"
-                        ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
-                        log "Installed: $tool"
-                    fi
-                done
-            else
-                log "WARNING: Failed to download Foundry, contract deployment may fail"
-            fi
+    ENGINE_DEB=$(find "$BLOCKHOST_DIR/packages/host" -maxdepth 1 -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$ENGINE_DEB" ] && [ -f "$ENGINE_DEB" ]; then
+        # Install APT dependencies first so dpkg -i succeeds
+        apt-get install -y python3-pycryptodome python3-ecdsa 2>&1 | tee -a "$LOG_FILE"
+        log "Installing: $(basename "$ENGINE_DEB")"
+        dpkg -i "$ENGINE_DEB" 2>&1 | tee -a "$LOG_FILE"
+        if dpkg -s blockhost-engine >/dev/null 2>&1; then
+            log "Step 3b-post complete - Engine installed"
         else
-            log "Foundry already installed: $(cast --version 2>/dev/null || echo 'unknown version')"
+            log "ERROR: Engine package installation failed"
+            exit 1
         fi
-
-        log "Step 3b complete - Foundry installed!"
     else
-        log "Step 3b: Engine '$ENGINE_NAME' does not require Foundry, skipping."
+        log "WARNING: No engine package found in $BLOCKHOST_DIR/packages/host"
     fi
 
-    touch "$STEP_FOUNDRY"
+    touch "$STEP_ENGINE"
 else
-    log "Step 3b: Already completed, skipping."
+    log "Step 3b-post: Engine already installed, skipping."
+fi
+
+#
+# Step 3c: Run engine first-boot hook
+#
+# The engine hook handles installing engine-specific host dependencies
+# (e.g. Foundry for EVM). Discovered from the engine manifest installed
+# by the engine .deb in step 3b-post.
+#
+STEP_ENGINE_HOOK="${STATE_DIR}/.step-engine-hook"
+if [ ! -f "$STEP_ENGINE_HOOK" ]; then
+    log "Step 3c: Running engine first-boot hook..."
+
+    ENGINE_HOOK=""
+    ENGINE_MANIFEST="/usr/share/blockhost/engine.json"
+
+    if [ -f "$ENGINE_MANIFEST" ]; then
+        ENGINE_HOOK=$(python3 -c "import json; print(json.load(open('$ENGINE_MANIFEST')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
+    fi
+
+    if [ -n "$ENGINE_HOOK" ] && [ -x "$ENGINE_HOOK" ]; then
+        log "Running engine hook: $ENGINE_HOOK"
+        export STATE_DIR LOG_FILE
+        "$ENGINE_HOOK" 2>&1 | tee -a "$LOG_FILE"
+        HOOK_RC=${PIPESTATUS[0]}
+        if [ "$HOOK_RC" -ne 0 ]; then
+            log "ERROR: Engine hook failed (exit $HOOK_RC)"
+            exit 1
+        fi
+    elif [ -n "$ENGINE_HOOK" ]; then
+        log "WARNING: Engine hook declared but not executable: $ENGINE_HOOK"
+    else
+        log "Step 3c: No engine hook declared, skipping."
+    fi
+
+    touch "$STEP_ENGINE_HOOK"
+    log "Step 3c complete!"
+else
+    log "Step 3c: Engine hook already completed, skipping."
 fi
 
 #

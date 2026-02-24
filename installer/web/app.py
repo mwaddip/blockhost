@@ -39,7 +39,7 @@ from installer.common.detection import detect_boot_medium, BootMedium
 # Import extracted modules
 from installer.web.utils import (
     detect_disks,
-    is_valid_address,
+    is_valid_evm_address,
     is_valid_ipv6_prefix,
     get_broker_registry,
     fetch_broker_registry_from_github,
@@ -124,12 +124,12 @@ if _engine and _engine.get('manifest'):
 
 
 def _validate_address(address: str) -> bool:
-    """Validate address via engine module, falling back to basic check."""
+    """Validate address via engine module. Returns False if no engine loaded."""
     if _engine and _engine.get('module'):
         fn = getattr(_engine['module'], 'validate_address', None)
         if fn:
             return fn(address)
-    return is_valid_address(address)
+    return False
 
 
 def _gather_session_config() -> dict:
@@ -635,9 +635,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 if eng_data:
                     session[_engine_session_key] = eng_data
 
-            # Restore provisioner data: new format uses 'provisioner',
-            # old Proxmox backups use 'proxmox' — map to the active session key
-            prov_data = config.get('provisioner') or config.get('proxmox', {})
+            prov_data = config.get('provisioner', {})
             if prov_data and _prov_session_key:
                 session[_prov_session_key] = prov_data
 
@@ -711,6 +709,10 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         if request.method == 'POST':
             selected_disk = request.form.get('disk')
+            valid_disk_paths = {d['path'] for d in disks}
+            if selected_disk not in valid_disk_paths:
+                flash('Invalid disk selection', 'error')
+                return redirect(url_for('wizard_storage'))
             session['selected_disk'] = selected_disk
             return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_ipv6')))
 
@@ -732,16 +734,29 @@ def create_app(config: Optional[dict] = None) -> Flask:
             }
 
             if mode == 'broker':
+                broker_reg = request.form.get('broker_registry', '')
+                if broker_reg and not is_valid_evm_address(broker_reg):
+                    flash('Invalid broker registry address', 'error')
+                    return redirect(url_for('wizard_ipv6'))
                 session['ipv6'].update({
-                    'broker_registry': request.form.get('broker_registry'),
+                    'broker_registry': broker_reg,
                     'prefix': request.form.get('broker_prefix'),
                     'broker_node': request.form.get('broker_node'),
                     'wg_config': request.form.get('broker_wg_config'),
                 })
             else:
+                manual_prefix = request.form.get('manual_prefix', '')
+                if manual_prefix and not is_valid_ipv6_prefix(manual_prefix):
+                    flash('Invalid IPv6 prefix format', 'error')
+                    return redirect(url_for('wizard_ipv6'))
+                try:
+                    alloc_size = int(request.form.get('allocation_size', 64))
+                except (ValueError, TypeError):
+                    alloc_size = 64
+                alloc_size = max(48, min(120, alloc_size))
                 session['ipv6'].update({
-                    'prefix': request.form.get('manual_prefix'),
-                    'allocation_size': request.form.get('allocation_size'),
+                    'prefix': manual_prefix,
+                    'allocation_size': alloc_size,
                 })
 
             return redirect(url_for('wizard_admin_commands'))
@@ -770,7 +785,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'destination_mode': request.form.get('destination_mode', 'self'),
                     'knock_command': request.form.get('knock_command', ''),
                     'knock_ports': ports,
-                    'knock_timeout': int(request.form.get('knock_timeout', 300)),
+                    'knock_timeout': max(30, min(3600, int(request.form.get('knock_timeout', 300)))),
                 })
 
             session['admin_commands'] = admin_commands
@@ -953,7 +968,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         data = request.get_json()
         registry = data.get('registry')
 
-        if not registry or not _validate_address(registry):
+        if not registry or not is_valid_evm_address(registry):
             return jsonify({'success': False, 'error': 'Invalid registry address'}), 400
 
         # Call broker-client to request allocation
@@ -1012,17 +1027,17 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """Start VM template build (async)."""
         job_id = f"template-{secrets.token_hex(4)}"
 
-        thread = threading.Thread(
-            target=_build_vm_template,
-            args=(job_id,)
-        )
-        thread.start()
-
         _jobs[job_id] = {
             'status': 'running',
             'progress': 0,
             'message': 'Starting template build...',
         }
+
+        thread = threading.Thread(
+            target=_build_vm_template,
+            args=(job_id,)
+        )
+        thread.start()
 
         return jsonify({'job_id': job_id})
 

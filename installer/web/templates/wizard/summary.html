@@ -578,8 +578,8 @@ function pollStatus() {
         }
     })
     .catch(error => {
-        console.error('Poll error:', error);
-        // Don't stop polling on transient errors
+        // Connection lost (e.g. iptables redirect during certbot).
+        // Keep polling but don't touch the UI — progress can't revert.
     });
 }
 
