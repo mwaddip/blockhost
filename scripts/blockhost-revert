@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# BlockHost Snapshot Revert Tool (testing only)
+#
+# Usage:
+#   revert                  List available snapshots
+#   revert <snapshot-name>  Revert to snapshot and reboot
+#
+# After revert, the VM reboots with first-boot held.
+# Upload new .debs and release the hold:
+#   scp new-pkg.deb root@host:/opt/blockhost/packages/host/
+#   ssh root@host resume
+#
+
+set -e
+
+SNAPSHOT="$1"
+ROOT_DEV=$(findmnt -no SOURCE / | sed 's/\[.*$//')
+# Detect the root subvolume name (e.g. "@rootfs") from mount options
+ROOT_SUBVOL=$(findmnt -no OPTIONS / | grep -oP 'subvol=/\K[^,]+')
+TOP="/mnt/btrfs-top"
+STATE_DIR="/var/lib/blockhost"
+
+# Verify btrfs
+if [ "$(stat -f -c %T /)" != "btrfs" ]; then
+    echo "Error: root filesystem is not btrfs (testing mode required)"
+    exit 1
+fi
+
+if [ -z "$ROOT_SUBVOL" ]; then
+    echo "Error: cannot detect root subvolume from mount options"
+    exit 1
+fi
+
+mkdir -p "$TOP"
+mount -o subvolid=5 "$ROOT_DEV" "$TOP" 2>/dev/null
+
+# List mode — no argument
+if [ -z "$SNAPSHOT" ]; then
+    echo "Available snapshots:"
+    if [ -d "$TOP/@snapshots" ]; then
+        ls "$TOP/@snapshots/" 2>/dev/null
+    else
+        echo "  (none — first-boot may not have completed)"
+    fi
+    echo ""
+    echo "Root subvolume: $ROOT_SUBVOL"
+    umount "$TOP"
+    exit 0
+fi
+
+# Validate snapshot exists
+if [ ! -d "$TOP/@snapshots/$SNAPSHOT" ]; then
+    echo "Not found: $SNAPSHOT"
+    echo "Available: $(ls "$TOP/@snapshots/" 2>/dev/null | tr '\n' ' ')"
+    umount "$TOP"
+    exit 1
+fi
+
+echo "Reverting $ROOT_SUBVOL to snapshot: $SNAPSHOT"
+
+# Stop BlockHost services gracefully
+systemctl stop blockhost-monitor blockhost-admin blockhost-root-agent 2>/dev/null || true
+
+# Clean up previous revert leftovers (Debian creates nested subvolumes
+# like var/lib/portables and var/lib/machines that must be deleted first)
+if [ -d "$TOP/@.old" ]; then
+    btrfs subvolume list -o "$TOP/@.old" 2>/dev/null \
+        | awk '{print $NF}' | sort -r \
+        | while read -r subvol; do
+            btrfs subvolume delete "$TOP/$subvol" 2>/dev/null || true
+        done
+    btrfs subvolume delete "$TOP/@.old" 2>/dev/null || true
+fi
+
+# Swap root subvolume with a fresh copy of the snapshot
+mv "$TOP/$ROOT_SUBVOL" "$TOP/@.old"
+btrfs subvolume snapshot "$TOP/@snapshots/$SNAPSHOT" "$TOP/$ROOT_SUBVOL"
+
+# fstab and grub stay correct — the subvolume name is unchanged
+
+# Hold first-boot so the user can swap .debs before it resumes
+touch "$TOP/$ROOT_SUBVOL${STATE_DIR}/.firstboot-hold"
+
+# Clear setup-complete so first-boot will run
+rm -f "$TOP/$ROOT_SUBVOL${STATE_DIR}/.setup-complete"
+
+umount "$TOP"
+
+echo ""
+echo "Rebooting. After boot:"
+echo "  1. SCP new .debs to /opt/blockhost/packages/host/"
+echo "  2. resume"
+echo ""
+sync
+reboot -f

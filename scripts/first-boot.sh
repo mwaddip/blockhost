@@ -46,6 +46,12 @@ if [ -f "$MARKER_FILE" ]; then
     exit 0
 fi
 
+# Check if held after a snapshot revert (testing mode)
+if [ -f "${STATE_DIR}/.firstboot-hold" ]; then
+    log "First-boot held (post-revert). Upload new .debs, then run: resume"
+    exit 0
+fi
+
 log "First-boot script starting..."
 
 # Stop getty on tty1 so we can use the console exclusively
@@ -61,6 +67,35 @@ log "=========================================="
 
 # Export Python path
 export PYTHONPATH="${BLOCKHOST_DIR}:${PYTHONPATH}"
+
+#
+# Snapshot helper — takes a read-only snapshot before each major step
+#
+snapshot_if_testing() {
+    local name="$1"
+    [ -f /etc/blockhost/.testing-mode ] || return 0
+    [ "$(stat -f -c %T /)" = "btrfs" ] || return 0
+
+    local root_dev root_subvol
+    root_dev=$(findmnt -no SOURCE / | sed 's/\[.*$//')
+    # Extract subvolume path from mount options (e.g. "subvol=/@rootfs" → "@rootfs")
+    root_subvol=$(findmnt -no OPTIONS / | grep -oP 'subvol=/\K[^,]+')
+
+    if [ -z "$root_subvol" ]; then
+        log "Snapshot: cannot detect root subvolume, skipping $name"
+        return 0
+    fi
+
+    mkdir -p /mnt/btrfs-top
+    mount -o subvolid=5 "$root_dev" /mnt/btrfs-top
+
+    if [ -d "/mnt/btrfs-top/@snapshots" ] && [ ! -d "/mnt/btrfs-top/@snapshots/$name" ]; then
+        btrfs subvolume snapshot "/mnt/btrfs-top/$root_subvol" "/mnt/btrfs-top/@snapshots/$name"
+        log "Snapshot: $name"
+    fi
+
+    umount /mnt/btrfs-top
+}
 
 #
 # Step 1: Wait for network
@@ -90,6 +125,8 @@ fi
 # Packages must be installed before the provisioner hook because the hook
 # script and manifest are shipped inside the provisioner .deb.
 #
+snapshot_if_testing "pre-packages"
+
 STEP_PACKAGES="${STATE_DIR}/.step-packages"
 if [ ! -f "$STEP_PACKAGES" ]; then
     log "Step 2: Installing BlockHost packages..."
@@ -182,6 +219,8 @@ fi
 # (e.g. Proxmox VE, Terraform). Discovered from the provisioner manifest
 # installed by the provisioner .deb in Step 2.
 #
+snapshot_if_testing "pre-provisioner-hook"
+
 STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
 if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then
     log "Step 3: Running provisioner first-boot hook..."
@@ -388,6 +427,8 @@ fi
 # We deferred the engine from install-packages.sh because dpkg -i fails when
 # dependencies are missing, and apt-get -f install "fixes" it by removing the package.
 #
+snapshot_if_testing "pre-engine"
+
 STEP_ENGINE="${STATE_DIR}/.step-engine"
 if [ ! -f "$STEP_ENGINE" ]; then
     log "Step 3b-post: Installing engine package..."
@@ -398,10 +439,11 @@ if [ ! -f "$STEP_ENGINE" ]; then
         apt-get install -y python3-pycryptodome python3-ecdsa 2>&1 | tee -a "$LOG_FILE"
         log "Installing: $(basename "$ENGINE_DEB")"
         dpkg -i "$ENGINE_DEB" 2>&1 | tee -a "$LOG_FILE"
-        if dpkg -s blockhost-engine >/dev/null 2>&1; then
-            log "Step 3b-post complete - Engine installed"
+        ENGINE_PKG_NAME=$(dpkg-deb -f "$ENGINE_DEB" Package)
+        if dpkg -s "$ENGINE_PKG_NAME" >/dev/null 2>&1; then
+            log "Step 3b-post complete - Engine installed ($ENGINE_PKG_NAME)"
         else
-            log "ERROR: Engine package installation failed"
+            log "ERROR: Engine package installation failed ($ENGINE_PKG_NAME)"
             exit 1
         fi
     else
@@ -420,6 +462,8 @@ fi
 # (e.g. Foundry for EVM). Discovered from the engine manifest installed
 # by the engine .deb in step 3b-post.
 #
+snapshot_if_testing "pre-engine-hook"
+
 STEP_ENGINE_HOOK="${STATE_DIR}/.step-engine-hook"
 if [ ! -f "$STEP_ENGINE_HOOK" ]; then
     log "Step 3c: Running engine first-boot hook..."
@@ -480,6 +524,8 @@ if [ ! -f "$STEP_NETWORK" ]; then
 else
     log "Step 4: Network already verified, skipping."
 fi
+
+snapshot_if_testing "pre-wizard"
 
 #
 # Step 5: Generate OTP
