@@ -205,7 +205,7 @@ if _provisioner and _provisioner.get('manifest'):
 
 # Post-provisioner steps (always present)
 _POST_STEPS = [
-    {'id': 'ipv6',           'label': 'IPv6',       'endpoint': 'wizard_ipv6'},
+    {'id': 'connectivity', 'label': 'Connectivity', 'endpoint': 'wizard_connectivity'},
     {'id': 'admin_commands', 'label': 'Admin',      'endpoint': 'wizard_admin_commands'},
     {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
 ]
@@ -746,14 +746,14 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 flash('Invalid disk selection', 'error')
                 return redirect(url_for('wizard_storage'))
             session['selected_disk'] = selected_disk
-            return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_ipv6')))
+            return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_connectivity')))
 
         return render_template('wizard/storage.html',
                              disks=disks)
 
-    @app.route('/wizard/ipv6', methods=['GET', 'POST'])
+    @app.route('/wizard/connectivity', methods=['GET', 'POST'])
     @require_auth
-    def wizard_ipv6():
+    def wizard_connectivity():
         """IPv6 configuration step."""
         # Get broker registry from engine config if available
         engine_data = session.get(_engine_session_key, {}) if _engine_session_key else {}
@@ -769,7 +769,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 broker_reg = request.form.get('broker_registry', '')
                 if broker_reg and not is_valid_evm_address(broker_reg):
                     flash('Invalid broker registry address', 'error')
-                    return redirect(url_for('wizard_ipv6'))
+                    return redirect(url_for('wizard_connectivity'))
                 session['ipv6'].update({
                     'broker_registry': broker_reg,
                     'prefix': request.form.get('broker_prefix'),
@@ -780,7 +780,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 manual_prefix = request.form.get('manual_prefix', '')
                 if manual_prefix and not is_valid_ipv6_prefix(manual_prefix):
                     flash('Invalid IPv6 prefix format', 'error')
-                    return redirect(url_for('wizard_ipv6'))
+                    return redirect(url_for('wizard_connectivity'))
                 try:
                     alloc_size = int(request.form.get('allocation_size', 64))
                 except (ValueError, TypeError):
@@ -795,7 +795,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         return render_template('wizard/ipv6.html',
                              broker_registry=broker_registry,
-                             prev_step_url=url_for(_PREV_STEP.get('ipv6', 'wizard_storage')))
+                             prev_step_url=url_for(_PREV_STEP.get('connectivity', 'wizard_storage')))
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
