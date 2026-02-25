@@ -797,6 +797,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 }
 
             if 'broker' in selected and _broker:
+                if not broker_chain:
+                    flash('No supported chain detected for broker mode', 'error')
+                    return redirect(url_for('wizard_connectivity'))
                 broker_reg = request.form.get('broker_registry', '')
                 # Validate using chain-specific pattern from manifest
                 if broker_reg and broker_chain:
