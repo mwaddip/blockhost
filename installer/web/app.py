@@ -13,6 +13,7 @@ Provides web-based installation wizard with:
 """
 
 import importlib
+import re
 import ssl
 import json
 import secrets
@@ -406,6 +407,20 @@ class SetupState:
         }
 
 
+def _resolve_broker_chain(broker: dict, wallet_address: str) -> Optional[dict]:
+    """Match wallet address against broker manifest chain patterns.
+
+    Returns the chain config dict (with 'chain_id' added) if a pattern matches,
+    else None.
+    """
+    chains = broker.get('manifest', {}).get('chains', {})
+    for chain_id, chain_config in chains.items():
+        pattern = chain_config.get('wallet_pattern', '')
+        if pattern and re.match(pattern, wallet_address):
+            return {**chain_config, 'chain_id': chain_id}
+    return None
+
+
 def create_app(config: Optional[dict] = None) -> Flask:
     """
     Create and configure the Flask application.
@@ -754,29 +769,19 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @app.route('/wizard/connectivity', methods=['GET', 'POST'])
     @require_auth
     def wizard_connectivity():
-        """IPv6 configuration step."""
-        # Get broker registry from engine config if available
-        engine_data = session.get(_engine_session_key, {}) if _engine_session_key else {}
-        broker_registry = get_broker_registry(engine_data.get('chain_id'))
+        """Connectivity options configuration step."""
+        wallet_address = session.get('admin_wallet', '')
+
+        # Resolve broker chain config from wallet address
+        broker_chain = None
+        if _broker and wallet_address:
+            broker_chain = _resolve_broker_chain(_broker, wallet_address)
 
         if request.method == 'POST':
-            mode = request.form.get('ipv6_mode')
-            session['ipv6'] = {
-                'mode': mode,
-            }
+            selected = request.form.getlist('connectivity_options')
+            connectivity = {'options': selected}
 
-            if mode == 'broker':
-                broker_reg = request.form.get('broker_registry', '')
-                if broker_reg and not is_valid_evm_address(broker_reg):
-                    flash('Invalid broker registry address', 'error')
-                    return redirect(url_for('wizard_connectivity'))
-                session['ipv6'].update({
-                    'broker_registry': broker_reg,
-                    'prefix': request.form.get('broker_prefix'),
-                    'broker_node': request.form.get('broker_node'),
-                    'wg_config': request.form.get('broker_wg_config'),
-                })
-            else:
+            if 'manual' in selected:
                 manual_prefix = request.form.get('manual_prefix', '')
                 if manual_prefix and not is_valid_ipv6_prefix(manual_prefix):
                     flash('Invalid IPv6 prefix format', 'error')
@@ -786,15 +791,51 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 except (ValueError, TypeError):
                     alloc_size = 64
                 alloc_size = max(48, min(120, alloc_size))
-                session['ipv6'].update({
+                connectivity['manual'] = {
                     'prefix': manual_prefix,
                     'allocation_size': alloc_size,
-                })
+                }
 
-            return redirect(url_for('wizard_admin_commands'))
+            if 'broker' in selected and _broker:
+                broker_reg = request.form.get('broker_registry', '')
+                # Validate using chain-specific pattern from manifest
+                if broker_reg and broker_chain:
+                    pattern = broker_chain.get('contract_validation', '')
+                    if pattern and not re.match(pattern, broker_reg):
+                        flash('Invalid broker registry address', 'error')
+                        return redirect(url_for('wizard_connectivity'))
+                connectivity['broker'] = {
+                    'broker_registry': broker_reg,
+                }
+
+            # Map to session['ipv6'] for backwards compat with finalize.py
+            if 'broker' in selected:
+                session['ipv6'] = {
+                    'mode': 'broker',
+                    'broker_registry': connectivity.get('broker', {}).get('broker_registry', ''),
+                }
+            elif 'manual' in selected:
+                session['ipv6'] = {
+                    'mode': 'manual',
+                    'prefix': connectivity.get('manual', {}).get('prefix', ''),
+                    'allocation_size': connectivity.get('manual', {}).get('allocation_size', 64),
+                }
+            else:
+                session['ipv6'] = {'mode': 'none'}
+
+            session['connectivity'] = connectivity
+            return redirect(url_for(_NEXT_STEP.get('connectivity', 'wizard_admin_commands')))
+
+        # Build exclusion map: manual and broker are mutually exclusive
+        exclusion_map = {'manual': ['broker'], 'broker': ['manual']}
+        if _broker:
+            manifest_excludes = _broker['manifest'].get('excludes', [])
+            if manifest_excludes:
+                exclusion_map['broker'] = manifest_excludes
 
         return render_template('wizard/ipv6.html',
-                             broker_registry=broker_registry,
+                             broker_chain=broker_chain,
+                             exclusion_map=json.dumps(exclusion_map),
                              prev_step_url=url_for(_PREV_STEP.get('connectivity', 'wizard_storage')))
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
