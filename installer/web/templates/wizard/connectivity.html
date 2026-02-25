@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% from "macros/wizard_steps.html" import step_bar %}
+
+{% block title %}Connectivity - BlockHost Installer{% endblock %}
+
+{% block content %}
+{{ step_bar('connectivity') }}
+
+<div class="card">
+    <h2>Connectivity</h2>
+    <p class="text-muted mb-2">Configure how VMs obtain routable IPv6 addresses and network connectivity.</p>
+
+    <form id="connectivity-form" method="POST" action="{{ url_for('wizard_connectivity') }}">
+
+        <!-- Manual Option (always available) -->
+        <label class="checkbox-group" id="label-manual" onclick="toggleOption(this, 'manual')">
+            <input type="checkbox" name="connectivity_options" value="manual" id="opt-manual">
+            <div class="checkbox-label">
+                <h4>Manual IPv6 Prefix</h4>
+                <p>Use an IPv6 prefix you already own or control</p>
+            </div>
+        </label>
+
+        <div id="section-manual" class="form-section hidden" style="margin-top: 0.5rem; margin-bottom: 1.5rem;">
+            <h3>Manual IPv6 Configuration</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                Enter an IPv6 prefix that you own or have been delegated.
+            </p>
+            <div class="form-group">
+                <label for="manual_prefix">IPv6 Prefix</label>
+                <input type="text" id="manual_prefix" name="manual_prefix"
+                       placeholder="2001:db8:1234::/48">
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">
+                    You must have control over this prefix for routing to work.
+                </p>
+            </div>
+            <div class="form-group">
+                <label for="allocation_size">Allocation Size Per VM</label>
+                <select id="allocation_size" name="allocation_size">
+                    <option value="64">/64 (recommended - standard subnet)</option>
+                    <option value="128">/128 (single address per VM)</option>
+                    <option value="56">/56 (larger subnet, fewer VMs)</option>
+                </select>
+            </div>
+            <div class="alert alert-warning">
+                <strong>Note:</strong> You are responsible for ensuring proper routing of this prefix to your server.
+            </div>
+        </div>
+
+        {% if broker_available %}
+        <!-- Broker Option (from broker package) -->
+        <label class="checkbox-group selected" id="label-broker" onclick="toggleOption(this, 'broker')">
+            <input type="checkbox" name="connectivity_options" value="broker" id="opt-broker" checked>
+            <div class="checkbox-label">
+                <h4>{{ broker_manifest.display_name if broker_manifest else 'IPv6 Tunnel Broker' }}</h4>
+                <p>{{ broker_manifest.description if broker_manifest else 'Obtain an IPv6 prefix via encrypted WireGuard tunnel' }}</p>
+            </div>
+        </label>
+
+        <div id="section-broker" class="form-section" style="margin-top: 0.5rem; margin-bottom: 1.5rem;">
+            <h3>Broker Configuration</h3>
+            {% if broker_chain %}
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                Detected chain: <strong>{{ broker_chain.chain_id }}</strong>
+            </p>
+            {% for field in broker_chain.get('fields', []) %}
+            <div class="form-group">
+                <label for="{{ field.name }}">{{ field.label }}</label>
+                {% if field.type == 'select' %}
+                <select id="{{ field.name }}" name="{{ field.name }}">
+                    {% for opt in field.get('options', []) %}
+                    <option value="{{ opt }}">{{ opt }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <input type="text" id="{{ field.name }}" name="{{ field.name }}"
+                       placeholder="{{ field.get('placeholder', '') }}">
+                {% endif %}
+                {% if field.get('hint') %}
+                <p class="text-muted mt-1" style="font-size: 0.75rem;">{{ field.hint }}</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% if broker_chain.get('has_auto_fetch') %}
+            <div class="flex items-center gap-1" style="margin-top: 0.5rem;">
+                <button type="button" class="btn btn-small btn-secondary" onclick="fetchRegistry()">
+                    Auto-fetch from GitHub
+                </button>
+                <div id="fetch-status"></div>
+            </div>
+            {% endif %}
+            {% else %}
+            <div class="alert alert-warning">
+                Could not determine chain from wallet address. Check your wallet connection.
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="flex justify-between" style="margin-top: 2rem;">
+            <a href="{{ prev_step_url }}" class="btn btn-secondary">Back</a>
+            <button type="submit" class="btn btn-primary">Continue</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const EXCLUSIONS = {{ exclusion_map | safe }};
+
+function toggleOption(element, optionId) {
+    const checkbox = element.querySelector('input[type="checkbox"]');
+    const section = document.getElementById('section-' + optionId);
+
+    if (checkbox.checked) {
+        element.classList.add('selected');
+        if (section) section.classList.remove('hidden');
+    } else {
+        element.classList.remove('selected');
+        if (section) section.classList.add('hidden');
+    }
+
+    // Enforce mutual exclusions
+    const excludes = EXCLUSIONS[optionId] || [];
+    excludes.forEach(function(exId) {
+        const exCheckbox = document.getElementById('opt-' + exId);
+        const exLabel = document.getElementById('label-' + exId);
+        const exSection = document.getElementById('section-' + exId);
+        if (checkbox.checked) {
+            if (exCheckbox) { exCheckbox.checked = false; exCheckbox.disabled = true; }
+            if (exLabel) { exLabel.classList.remove('selected'); exLabel.style.opacity = '0.5'; }
+            if (exSection) exSection.classList.add('hidden');
+        } else {
+            if (exCheckbox) exCheckbox.disabled = false;
+            if (exLabel) exLabel.style.opacity = '1';
+        }
+    });
+}
+
+{% if broker_available and broker_chain and broker_chain.get('has_auto_fetch') %}
+async function fetchRegistry() {
+    const statusEl = document.getElementById('fetch-status');
+    statusEl.innerHTML = '<div class="status-indicator loading"><div class="spinner"></div> Fetching...</div>';
+    try {
+        const response = await fetch('/api/connectivity/fetch-registry');
+        const data = await response.json();
+        if (data.success && data.registry) {
+            document.getElementById('broker_registry').value = data.registry;
+            statusEl.innerHTML = '<div class="status-indicator success">Fetched</div>';
+        } else {
+            statusEl.innerHTML = '<div class="status-indicator error">' + (data.error || 'Not found') + '</div>';
+        }
+    } catch (error) {
+        statusEl.innerHTML = '<div class="status-indicator error">' + error.message + '</div>';
+    }
+}
+{% endif %}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize exclusions for pre-checked options
+    document.querySelectorAll('input[name="connectivity_options"]:checked').forEach(function(cb) {
+        const label = document.getElementById('label-' + cb.value);
+        const section = document.getElementById('section-' + cb.value);
+        if (label) label.classList.add('selected');
+        if (section) section.classList.remove('hidden');
+
+        const excludes = EXCLUSIONS[cb.value] || [];
+        excludes.forEach(function(exId) {
+            const exCb = document.getElementById('opt-' + exId);
+            const exLabel = document.getElementById('label-' + exId);
+            if (exCb) exCb.disabled = true;
+            if (exLabel) exLabel.style.opacity = '0.5';
+        });
+    });
+
+    {% if broker_available and broker_chain and broker_chain.get('has_auto_fetch') %}
+    // Auto-fetch registry on load if broker is selected and registry field is empty
+    const brokerCb = document.getElementById('opt-broker');
+    const regInput = document.getElementById('broker_registry');
+    if (brokerCb && brokerCb.checked && regInput && !regInput.value.trim()) {
+        fetchRegistry();
+    }
+    {% endif %}
+});
+</script>
+{% endblock %}

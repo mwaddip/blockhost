@@ -836,7 +836,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if manifest_excludes:
                 exclusion_map['broker'] = manifest_excludes
 
-        return render_template('wizard/ipv6.html',
+        return render_template('wizard/connectivity.html',
                              broker_chain=broker_chain,
                              exclusion_map=json.dumps(exclusion_map),
                              prev_step_url=url_for(_PREV_STEP.get('connectivity', 'wizard_storage')))
