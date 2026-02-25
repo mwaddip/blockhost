@@ -81,7 +81,7 @@
                 {% endif %}
             </div>
             {% endfor %}
-            {% if broker_chain.get('has_auto_fetch') %}
+            {% if broker_chain.get('fields', [])|selectattr('has_auto_fetch')|list|length > 0 %}
             <div class="flex items-center gap-1" style="margin-top: 0.5rem;">
                 <button type="button" class="btn btn-small btn-secondary" onclick="fetchRegistry()">
                     Auto-fetch from GitHub
@@ -138,7 +138,7 @@ function toggleOption(element, optionId) {
     });
 }
 
-{% if broker_available and broker_chain and broker_chain.get('has_auto_fetch') %}
+{% if broker_available and broker_chain and broker_chain.get('fields', [])|selectattr('has_auto_fetch')|list|length > 0 %}
 async function fetchRegistry() {
     const statusEl = document.getElementById('fetch-status');
     statusEl.innerHTML = '<div class="status-indicator loading"><div class="spinner"></div> Fetching...</div>';
@@ -174,7 +174,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    {% if broker_available and broker_chain and broker_chain.get('has_auto_fetch') %}
+    {% if broker_available and broker_chain and broker_chain.get('fields', [])|selectattr('has_auto_fetch')|list|length > 0 %}
     // Auto-fetch registry on load if broker is selected and registry field is empty
     const brokerCb = document.getElementById('opt-broker');
     const regInput = document.getElementById('broker_registry');
