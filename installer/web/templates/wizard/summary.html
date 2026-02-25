@@ -53,19 +53,19 @@
     </div>
     {% endif %}
 
-    <!-- IPv6 Summary -->
+    <!-- Connectivity Summary -->
     <div class="summary-section">
-        <h3>IPv6</h3>
+        <h3>Connectivity</h3>
         <div class="summary-item">
             <span class="summary-label">Source</span>
-            <span class="summary-value">{{ 'Broker Network' if summary.ipv6.mode == 'broker' else 'Manual' }}</span>
+            <span class="summary-value">{{ 'Tunnel Broker' if summary.ipv6.mode == 'broker' else ('Manual' if summary.ipv6.mode == 'manual' else 'None') }}</span>
         </div>
         {% if summary.ipv6.mode == 'broker' %}
         <div class="summary-item">
-            <span class="summary-label">Broker Registry</span>
+            <span class="summary-label">Registry Contract</span>
             <span class="summary-value" style="font-size: 0.75rem;">{{ summary.ipv6.broker_registry or 'Will be fetched' }}</span>
         </div>
-        {% else %}
+        {% elif summary.ipv6.mode == 'manual' %}
         <div class="summary-item">
             <span class="summary-label">Prefix</span>
             <span class="summary-value">{{ summary.ipv6.prefix }}</span>
