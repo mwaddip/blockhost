@@ -839,6 +839,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
                              exclusion_map=json.dumps(exclusion_map),
                              prev_step_url=url_for(_PREV_STEP.get('connectivity', 'wizard_storage')))
 
+    @app.route('/wizard/ipv6', methods=['GET', 'POST'])
+    @require_auth
+    def wizard_ipv6():
+        """Backwards-compat redirect — provisioners may still reference this."""
+        return redirect(url_for('wizard_connectivity'))
+
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
     def wizard_admin_commands():
