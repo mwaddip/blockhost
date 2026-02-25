@@ -83,53 +83,6 @@ def is_valid_ipv6_prefix(prefix: str) -> bool:
     return True
 
 
-def get_broker_registry(chain_id: str) -> Optional[str]:
-    """Get broker registry contract address for chain."""
-    # Placeholder - in production, these would be the actual deployed addresses
-    registries = {
-        '11155111': '0x0E5b567E0000000000000000000000000000dead',  # Sepolia
-        '1': None,  # Mainnet - not deployed
-        '137': None,  # Polygon - not deployed
-    }
-    return registries.get(chain_id)
-
-
-
-def fetch_broker_registry_from_github(chain_id: str) -> Optional[str]:
-    """Fetch broker registry contract address from GitHub."""
-    import urllib.request
-    import urllib.error
-
-    # Use testnet registry when running from a testing ISO
-    testing_marker = Path('/etc/blockhost/.testing-mode')
-    registry_file = 'registry-testnet.json' if testing_marker.exists() else 'registry.json'
-    url = f'https://raw.githubusercontent.com/mwaddip/blockhost-broker/main/{registry_file}'
-
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'BlockHost-Installer'})
-
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-
-            # Handle flat format: {"registry_contract": "0x...", "chain_id": 11155111}
-            if 'registry_contract' in data:
-                # Check if chain_id matches (if specified in the JSON)
-                json_chain_id = data.get('chain_id')
-                if json_chain_id is None or str(json_chain_id) == str(chain_id):
-                    return data['registry_contract']
-
-            # Handle keyed format: {"11155111": {"registry": "0x..."}}
-            if chain_id in data:
-                return data[chain_id].get('registry') or data[chain_id].get('address')
-            elif str(chain_id) in data:
-                return data[str(chain_id)].get('registry') or data[str(chain_id)].get('address')
-
-        return None
-    except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
-        print(f"GitHub fetch error: {e}")
-        return None
-
-
 def request_broker_allocation(registry: str) -> dict:
     """Request IPv6 allocation from broker network."""
     try:

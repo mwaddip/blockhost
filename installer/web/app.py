@@ -42,8 +42,6 @@ from installer.web.utils import (
     detect_disks,
     is_valid_evm_address,
     is_valid_ipv6_prefix,
-    get_broker_registry,
-    fetch_broker_registry_from_github,
     parse_pam_ciphertext,
     request_broker_allocation,
     generate_self_signed_cert,
@@ -1036,20 +1034,31 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """List available disks."""
         return jsonify(detect_disks())
 
-    # IPv6 API endpoints
-    @app.route('/api/ipv6/broker-request', methods=['POST'])
+    # Connectivity / IPv6 API endpoints
+    @app.route('/api/connectivity/fetch-registry')
     @require_auth
-    def api_ipv6_broker_request():
-        """Request IPv6 allocation from broker network."""
-        data = request.get_json()
-        registry = data.get('registry')
+    def api_connectivity_fetch_registry():
+        """Fetch broker registry contract via broker's module."""
+        if not _broker or not _broker.get('module'):
+            return jsonify({'success': False, 'error': 'No broker installed'}), 404
 
-        if not registry or not is_valid_evm_address(registry):
-            return jsonify({'success': False, 'error': 'Invalid registry address'}), 400
+        wallet = session.get('admin_wallet', '')
+        if not wallet:
+            return jsonify({'success': False, 'error': 'No wallet connected'}), 400
 
-        # Call broker-client to request allocation
-        result = request_broker_allocation(registry)
-        return jsonify(result)
+        testing = Path('/etc/blockhost/.testing-mode').exists()
+        fetch_fn = getattr(_broker['module'], 'fetch_registry', None)
+        if not fetch_fn:
+            return jsonify({'success': False, 'error': 'Broker module has no fetch_registry'}), 500
+
+        try:
+            registry = fetch_fn(wallet, testing=testing)
+            if registry:
+                return jsonify({'success': True, 'registry': registry})
+            else:
+                return jsonify({'success': False, 'error': 'Registry not found for this wallet'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
 
     @app.route('/api/ipv6/manual', methods=['POST'])
     @require_auth
@@ -1079,22 +1088,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
             'mode': ipv6.get('mode'),
             'prefix': ipv6.get('prefix'),
         })
-
-    @app.route('/api/ipv6/broker-registry')
-    @require_auth
-    def api_ipv6_broker_registry():
-        """Fetch broker registry contract address from GitHub."""
-        chain_id = request.args.get('chain_id', '11155111')
-
-        registry = fetch_broker_registry_from_github(chain_id)
-        if registry:
-            return jsonify({'success': True, 'registry': registry, 'chain_id': chain_id})
-        else:
-            # Fallback to hardcoded values
-            fallback = get_broker_registry(chain_id)
-            if fallback:
-                return jsonify({'success': True, 'registry': fallback, 'chain_id': chain_id, 'source': 'fallback'})
-            return jsonify({'success': False, 'error': 'Registry not found for this chain'})
 
     # Template API endpoints
     @app.route('/api/template/build', methods=['POST'])
