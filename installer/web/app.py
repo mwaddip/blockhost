@@ -59,6 +59,9 @@ PROVISIONER_MANIFEST_PATH = Path('/usr/share/blockhost/provisioner.json')
 # Engine manifest path (installed by engine .deb package)
 ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
 
+# Broker manifest path (installed by broker .deb package)
+BROKER_MANIFEST_PATH = Path('/usr/share/blockhost/broker.json')
+
 
 def _discover_provisioner() -> Optional[dict]:
     """Discover the active provisioner from its manifest.
@@ -106,6 +109,28 @@ def _discover_engine() -> Optional[dict]:
         return None
 
 
+def _discover_broker() -> Optional[dict]:
+    """Discover the broker from its manifest.
+
+    Unlike engine/provisioner, the broker doesn't need a full Blueprint —
+    it provides a manifest with field definitions and an optional Python
+    module with helper functions (e.g. fetch_registry).
+    """
+    if not BROKER_MANIFEST_PATH.is_file():
+        return None
+
+    try:
+        manifest = json.loads(BROKER_MANIFEST_PATH.read_text())
+        module = None
+        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
+        if wizard_module_name:
+            module = importlib.import_module(wizard_module_name)
+        return {'manifest': manifest, 'module': module}
+    except (json.JSONDecodeError, ImportError, Exception) as e:
+        print(f"Warning: Failed to load broker: {e}")
+        return None
+
+
 # Discover active provisioner (if installed)
 _provisioner = _discover_provisioner()
 
@@ -116,6 +141,9 @@ if _provisioner and _provisioner.get('manifest'):
 
 # Discover active engine (if installed)
 _engine = _discover_engine()
+
+# Discover broker (if installed)
+_broker = _discover_broker()
 
 # Resolve engine session key from manifest (e.g. the value of config_keys.session_key)
 _engine_session_key = None
@@ -441,10 +469,14 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     eng_ui = eng_mod.get_ui_params(dict(session))
                 except Exception:
                     pass
+        broker_manifest = _broker['manifest'] if _broker else None
+
         return {
             'wizard_steps': WIZARD_STEPS,
             'prov_ui': prov_ui,
             'eng_ui': eng_ui,
+            'broker_available': _broker is not None,
+            'broker_manifest': broker_manifest,
         }
 
     @app.template_global()
