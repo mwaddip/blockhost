@@ -15,6 +15,7 @@ contains chain-agnostic infrastructure steps (keypair, ipv6, https, etc.).
 import ipaddress
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -40,9 +41,9 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
     6. Final steps (finalize, validate)
     """
     # Infrastructure steps (run before engine)
-    # NOTE: keypair generation moved to engine — the key type is chain-specific
-    # (secp256k1 for EVM, ML-DSA for OPNet). No installer-owned infra steps remain.
-    infra_steps = []
+    infra_steps = [
+        ('keypair', 'Generating server keypair', _finalize_keypair),
+    ]
 
     # Engine pre-steps (chain-specific)
     engine_steps = []
@@ -186,6 +187,44 @@ def _discover_bridge() -> Optional[str]:
 CONFIG_DIR = Path('/etc/blockhost')
 
 
+def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
+    """Generate secp256k1 ECIES server keypair.
+
+    Writes server.key (private, hex, 0640) and server.pubkey (uncompressed
+    public point, hex, 0640). Idempotent — skips if both already exist.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        key_file = CONFIG_DIR / 'server.key'
+        pub_file = CONFIG_DIR / 'server.pubkey'
+
+        if key_file.exists() and pub_file.exists():
+            return True, None
+
+        if key_file.exists():
+            priv_hex = key_file.read_text().strip()
+        else:
+            priv_hex = secrets.token_hex(32)
+            key_file.write_text(priv_hex + '\n')
+            set_blockhost_ownership(key_file, 0o640)
+
+        priv_int = int(priv_hex, 16)
+        priv_key = ec.derive_private_key(priv_int, ec.SECP256K1(), default_backend())
+        pub_hex = priv_key.public_key().public_bytes(
+            encoding=Encoding.X962,
+            format=PublicFormat.UncompressedPoint
+        ).hex()
+
+        pub_file.write_text(pub_hex + '\n')
+        set_blockhost_ownership(pub_file, 0o640)
+
+        return True, None
+    except Exception as e:
+        return False, f'Failed to generate server keypair: {e}'
+
 
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
     """Configure IPv6 tunnel if using broker, or save manual prefix.
@@ -229,14 +268,13 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 'request',
                 '--nft-contract', nft_contract,
                 '--wallet-key', '/etc/blockhost/deployer.key',
-                '--timeout', '120',
             ]
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=180
+                timeout=600
             )
 
             # Don't bail on non-zero if stdout contains allocation data

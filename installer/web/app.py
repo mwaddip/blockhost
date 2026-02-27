@@ -229,8 +229,8 @@ def _get_finalization_step_ids() -> list[str]:
 
     Used by SetupState at module load time to know what steps exist.
     """
-    # No installer-owned infra steps — keypair generation is engine-owned
-    infra_ids = []
+    # Infrastructure steps (chain-agnostic, run before engine)
+    infra_ids = ['keypair']
 
     # Engine pre-steps
     engine_ids = []
@@ -713,7 +713,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if method == 'dhcp':
                 # Check if we already have a working network
                 current_ip = net_manager.get_current_ip()
-                if current_ip and net_manager.test_connectivity():
+                if net_manager.test_connectivity():
                     flash(f'Network already configured: {current_ip}', 'success')
                     return redirect(url_for('wizard_storage'))
 
@@ -933,9 +933,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
-        all_finalization_steps = []
+        all_finalization_steps = [
+            {'id': 'keypair', 'label': 'Generating server keypair'},
+        ]
 
-        # Engine pre-steps (includes keypair generation)
+        # Engine pre-steps
         if _engine and _engine.get('module'):
             eng_mod = _engine['module']
             if hasattr(eng_mod, 'get_finalization_steps'):

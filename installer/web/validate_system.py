@@ -241,29 +241,37 @@ def _check_yaml_syntax(path: Path, category: str, name: str, required_keys: list
     return ValidationResult(category, name, True, f"Valid YAML: {path}")
 
 
-def _check_hex_key(path: Path, category: str, name: str, expected_length: int = None) -> ValidationResult:
-    """Check if a file contains a valid hex key."""
+def _check_private_key(path: Path, category: str, name: str, expected_hex_length: int = None) -> ValidationResult:
+    """Check if a file contains a valid private key (hex or BIP39 mnemonic)."""
     if not path.exists():
         return ValidationResult(category, name, False, f"Missing: {path}")
 
     try:
         content = path.read_text().strip()
-        # Remove 0x prefix if present
-        if content.startswith('0x'):
-            content = content[2:]
+        if not content:
+            return ValidationResult(category, name, False, f"Empty key file: {path}")
 
-        # Check if it's valid hex
-        int(content, 16)
+        # Check for BIP39 mnemonic (12 or 24 lowercase words)
+        words = content.split()
+        if len(words) in (12, 24) and all(w.isalpha() and w.islower() for w in words):
+            return ValidationResult(category, name, True, f"Valid mnemonic key: {path}")
 
-        if expected_length and len(content) != expected_length:
+        # Check for hex key
+        hex_content = content
+        if hex_content.startswith('0x'):
+            hex_content = hex_content[2:]
+
+        int(hex_content, 16)
+
+        if expected_hex_length and len(hex_content) != expected_hex_length:
             return ValidationResult(
                 category, name, False,
-                f"Invalid key length in {path}: expected {expected_length}, got {len(content)}"
+                f"Invalid key length in {path}: expected {expected_hex_length}, got {len(hex_content)}"
             )
 
         return ValidationResult(category, name, True, f"Valid hex key: {path}")
     except ValueError:
-        return ValidationResult(category, name, False, f"Invalid hex in {path}")
+        return ValidationResult(category, name, False, f"Invalid key format in {path}")
 
 
 def _check_address(address: str, category: str, name: str) -> ValidationResult:
@@ -630,12 +638,12 @@ def run_full_validation() -> ValidationReport:
 
     # ========== KEY CONTENT VALIDATION ==========
 
-    # Check keys are valid hex (64 chars = 32 bytes)
+    # Check keys are valid (hex or mnemonic)
     if (etc_blockhost / 'server.key').exists():
-        report.add(_check_hex_key(etc_blockhost / 'server.key', "Keys", "Server key format", expected_length=64))
+        report.add(_check_private_key(etc_blockhost / 'server.key', "Keys", "Server key format", expected_hex_length=64))
 
     if (etc_blockhost / 'deployer.key').exists():
-        report.add(_check_hex_key(etc_blockhost / 'deployer.key', "Keys", "Deployer key format", expected_length=64))
+        report.add(_check_private_key(etc_blockhost / 'deployer.key', "Keys", "Deployer key format", expected_hex_length=64))
 
     # ========== ADMIN CONFIG ==========
 
