@@ -34,7 +34,7 @@ jobs:
 
       - name: Run tests
         working-directory: libpam-web3
-        run: cargo test --features nft
+        run: cargo test
 
   engine-tests:
     name: Engine Tests (Hardhat)
@@ -42,18 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Init required submodules
-        run: git submodule update --init blockhost-engine
+        run: git submodule update --init blockhost-engine-evm
 
       - uses: actions/setup-node@v4
         with:
           node-version: 18
 
       - name: Install dependencies
-        working-directory: blockhost-engine
+        working-directory: blockhost-engine-evm
         run: npm install
 
       - name: Run tests
-        working-directory: blockhost-engine
+        working-directory: blockhost-engine-evm
         run: npm test
 
   forge-tests:
