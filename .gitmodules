@@ -4,9 +4,6 @@
 [submodule "blockhost-common"]
 	path = blockhost-common
 	url = https://github.com/mwaddip/blockhost-common
-[submodule "blockhost-engine"]
-	path = blockhost-engine
-	url = https://github.com/mwaddip/blockhost-engine
 [submodule "blockhost-broker"]
 	path = blockhost-broker
 	url = https://github.com/mwaddip/blockhost-broker
@@ -22,3 +19,6 @@
 [submodule "blockhost-engine-opnet"]
 	path = blockhost-engine-opnet
 	url = https://github.com/mwaddip/blockhost-engine-opnet
+[submodule "blockhost-engine-evm"]
+	path = blockhost-engine-evm
+	url = https://github.com/mwaddip/blockhost-engine-evm

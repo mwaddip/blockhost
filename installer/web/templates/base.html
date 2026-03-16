@@ -6,15 +6,15 @@
     <title>{% block title %}BlockHost Installer{% endblock %}</title>
     <style>
         :root {
-            --primary: #2563eb;
-            --primary-dark: #1d4ed8;
+            --primary: {{ engine_color or '#2563eb' }};
+            --primary-dark: color-mix(in srgb, var(--primary) 80%, black);
             --secondary: #64748b;
             --success: #22c55e;
             --error: #ef4444;
             --warning: #f59e0b;
-            --bg: #0f172a;
-            --bg-card: #1e293b;
-            --bg-input: #334155;
+            --bg: color-mix(in srgb, {{ provisioner_color or '#0f172a' }} 30%, #0f172a);
+            --bg-card: color-mix(in srgb, {{ provisioner_color or '#1e293b' }} 30%, #1e293b);
+            --bg-input: color-mix(in srgb, {{ provisioner_color or '#334155' }} 30%, #334155);
             --text: #f1f5f9;
             --text-muted: #94a3b8;
             --border: #475569;

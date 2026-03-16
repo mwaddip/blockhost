@@ -43,7 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `blockhost-common/`
 - `blockhost-provisioner-proxmox/`
 - `blockhost-provisioner-libvirt/`
-- `blockhost-engine/`
+- `blockhost-engine-evm/`
 - `blockhost-engine-opnet/`
 - `blockhost-broker/`
 
@@ -95,7 +95,7 @@ Packages built from submodules during first-boot:
 | blockhost-common | `build.sh` | blockhost-common | Host |
 | blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Host (Proxmox) |
 | blockhost-provisioner-libvirt | `build-deb.sh` | blockhost-provisioner-libvirt | Host (libvirt) |
-| blockhost-engine | `packaging/build.sh` | blockhost-engine | Host |
+| blockhost-engine-evm | `packaging/build.sh` | blockhost-engine-evm | Host |
 | blockhost-engine-opnet | `packaging/build.sh` | blockhost-engine-opnet | Host |
 | blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Host |
 

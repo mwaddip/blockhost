@@ -13,6 +13,7 @@ Provides web-based installation wizard with:
 """
 
 import importlib
+import os
 import re
 import ssl
 import json
@@ -313,11 +314,18 @@ class SetupState:
             'config': {},  # Stored configuration
         }
 
+    # Keys that must never persist after finalization completes
+    _SECRET_KEYS = frozenset({
+        'deployer_key', 'deployer_mnemonic',
+        'admin_signature', 'admin_public_secret',
+    })
+
     def save(self):
         """Save state to disk."""
         try:
             SETUP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             SETUP_STATE_FILE.write_text(json.dumps(self.state, indent=2, default=str))
+            os.chmod(SETUP_STATE_FILE, 0o640)
         except IOError as e:
             print(f"Warning: Could not save setup state: {e}")
 
@@ -385,7 +393,18 @@ class SetupState:
         self.state['status'] = 'completed'
         self.state['completed_at'] = datetime.datetime.now().isoformat()
         self.state['current_step'] = None
+        self._redact_secrets()
         self.save()
+
+    def _redact_secrets(self):
+        """Remove secret values from stored config after finalization."""
+        config = self.state.get('config', {})
+        for key in self._SECRET_KEYS:
+            config.pop(key, None)
+        for value in config.values():
+            if isinstance(value, dict):
+                for key in self._SECRET_KEYS:
+                    value.pop(key, None)
 
     def to_api_response(self) -> dict:
         """Convert state to API response format."""
@@ -484,12 +503,22 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     pass
         broker_manifest = _broker['manifest'] if _broker else None
 
+        # Accent colors from manifests (engine = foreground, provisioner = background)
+        engine_color = None
+        provisioner_color = None
+        if _engine and _engine.get('manifest'):
+            engine_color = _engine['manifest'].get('accent_color')
+        if _provisioner and _provisioner.get('manifest'):
+            provisioner_color = _provisioner['manifest'].get('accent_color')
+
         return {
             'wizard_steps': WIZARD_STEPS,
             'prov_ui': prov_ui,
             'eng_ui': eng_ui,
             'broker_available': _broker is not None,
             'broker_manifest': broker_manifest,
+            'engine_color': engine_color,
+            'provisioner_color': provisioner_color,
         }
 
     @app.template_global()

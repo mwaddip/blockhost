@@ -274,7 +274,7 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=3600
             )
 
             # Don't bail on non-zero if stdout contains allocation data
