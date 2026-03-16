@@ -49,9 +49,12 @@ BlockHost runs on a dedicated host with a pluggable provisioner backend (e.g., P
 The engine spawns provisioner scripts as subprocesses:
 
 ```
-blockhost-vm-create <name> --owner-wallet <0x> [--user-signature <0x> --public-secret <str>] [--apply]
-blockhost-vm-resume <name>
-blockhost-vm-gc [--execute] [--grace-days N]
+blockhost-vm-create <name> --owner-wallet <0x> [--nft-token-id <int>] [--expiry-days N] [--apply]
+blockhost-vm-start <name>
+blockhost-vm-stop <name>
+blockhost-vm-destroy <name>
+blockhost-vm-status <name>
+blockhost-vm-list [--format json]
 ```
 
 Both run as the `blockhost` user. The provisioner reads config from `/etc/blockhost/` and writes state to `/var/lib/blockhost/`.
@@ -73,6 +76,18 @@ Client libraries:
 
 ### Root Agent Action Catalog
 
+Common actions (from blockhost-common):
+
+| Action | Parameters | Used by |
+|--------|-----------|---------|
+| `ip6-route-add/del` | `address` (/128), `dev` | Provisioner (generator, GC) |
+| `iptables-open/close` | `port`, `proto`, `comment` | Engine (admin knock) |
+| `virt-customize` | `image_path`, `commands` | Provisioner (template build) |
+| `generate-wallet` | `name` | Engine (fund-manager, `ab new`) |
+| `addressbook-save` | `entries` | Engine (fund-manager, `ab` CLI) |
+
+Proxmox provisioner actions:
+
 | Action | Parameters | Used by |
 |--------|-----------|---------|
 | `qm-start/stop/shutdown/destroy` | `vmid` | Provisioner (GC, resume) |
@@ -80,11 +95,16 @@ Client libraries:
 | `qm-set` | `vmid`, `options` | Provisioner |
 | `qm-importdisk` | `vmid`, `disk_path`, `storage` | Provisioner |
 | `qm-template` | `vmid` | Provisioner |
-| `ip6-route-add/del` | `address` (/128), `dev` | Provisioner (generator, GC) |
-| `iptables-open/close` | `port`, `proto`, `comment` | Engine (admin knock) |
-| `virt-customize` | `image_path`, `commands` | Installer (template build) |
-| `generate-wallet` | `name` | Engine (fund-manager, `ab new`) |
-| `addressbook-save` | `entries` | Engine (fund-manager, `ab` CLI) |
+
+libvirt provisioner actions:
+
+| Action | Parameters | Used by |
+|--------|-----------|---------|
+| `virsh-start` | `name` | Provisioner (resume) |
+| `virsh-shutdown/destroy` | `name` | Provisioner (GC, destroy) |
+| `virsh-reboot` | `name` | Provisioner |
+| `virsh-define` | `xml` | Provisioner (vm-create) |
+| `virsh-undefine` | `name`, `flags` | Provisioner (destroy) |
 
 ### blockhost-common (shared library)
 
@@ -94,12 +114,13 @@ Installed to `/usr/lib/python3/dist-packages/blockhost/`. Provides:
 - `blockhost.vm_db` — `VMDatabase`, `MockVMDatabase`, `get_database()` (allocate VMIDs, reserve NFT token IDs, track VM state)
 - `blockhost.root_agent` — client library for the root agent daemon
 
-### libpam-web3-tools (host tools)
+### bhcrypt (shipped by blockhost-engine)
 
-Installed on the Proxmox host. Provides:
-- `pam_web3_tool` CLI — `encrypt-symmetric`, `decrypt`, `generate-keypair`
-- Signing page HTML — used by signup page generator
+Installed on the host via the engine package. Provides:
+- `bhcrypt` CLI — `decrypt`, `encrypt-symmetric`, `decrypt-symmetric`, `generate-keypair`, `derive-pubkey`
 - Contract artifacts — `AccessCredentialNFT.json`, `BlockhostSubscriptions.json`
+
+Key derivation for symmetric operations is engine-specific (EVM: keccak256, OPNet: SHAKE256). Wire format is identical: IV(12) + ciphertext + tag(16). ECIES is identical across engines.
 
 ---
 
@@ -134,8 +155,11 @@ All files are owned `root:blockhost`. The `blockhost` user reads them via group 
 | `.setup-complete` | empty | Marker: setup finished (prevents re-run) |
 | `setup-state.json` | JSON | Finalization progress tracking |
 | `vms.json` | JSON | VM database (VMID, IP, NFT token, subscription, expiry) |
+| `vms.json.lock` | empty | Lockfile for atomic DB updates (separate from data file) |
+| `pipeline.json` | JSON | Reserved for future use |
 | `terraform/` | directory | Terraform state, provider config, per-VM `.tf.json` |
 | `template-packages/` | directory | `.deb` files for VM template builds |
+| `fund-manager-state.json` | JSON | Fund manager last-run timestamps (auto-created by engine) |
 | `validation-output.txt` | text | Post-install validation report (testing mode) |
 
 All owned `blockhost:blockhost`.
@@ -185,7 +209,7 @@ Three distinct encryption contexts are used:
 
 **NFT user data** — connection details encrypted so only the NFT holder can decrypt them.
 - Scheme: AES-256-GCM
-- Key: `keccak256(user's wallet signature of publicSecret)`
+- Key derivation: engine-specific (EVM: `keccak256(signature)`, OPNet: `SHAKE256(signature)`)
 - The server encrypts at VM creation time; the user re-signs the same message to derive the decryption key.
 
 **Broker allocation** — request/response payloads between broker client and broker daemon.
@@ -233,7 +257,8 @@ Runs once after Debian auto-install. Each step writes a marker file so it can re
 | 2c | — | Verify root agent running, wait for socket |
 | 3 | `.step-provisioner-hook` | Run provisioner first-boot hook (hypervisor install, etc.) |
 | 3a | `.step-bridge` | Create Linux bridge (br0), migrate IP, verify connectivity |
-| 3b | `.step-foundry` | Install Foundry (`cast`, `forge`, `anvil`) |
+| 3b-pre | `.step-nodejs` | Install Node.js 22 LTS via NodeSource (required by engine) |
+| 3b | `.step-foundry` | Install Foundry (`cast`, `forge`, `anvil`) — EVM engine only |
 | 4 | `.step-network` | Verify network connectivity (DHCP fallback) |
 | 5 | `.step-otp` | Generate OTP code, display on console |
 | 6 | — | Start Flask web wizard on port 80/443 |
@@ -244,11 +269,11 @@ The wizard collects configuration through 7 steps. All state is stored in the Fl
 
 | Step | URL | Configures |
 |------|-----|-----------|
-| Pre | `/wizard/wallet` | Admin wallet connection (MetaMask signature) |
+| Pre | `/wizard/wallet` | Admin wallet connection (wallet signing, template from engine) |
 | 1 | `/wizard/network` | DHCP or static IP |
 | 2 | `/wizard/storage` | Disk selection for LVM |
-| 3 | `/wizard/blockchain` | Chain, RPC, deployer wallet, contracts, plan, revenue sharing |
-| 4 | `/wizard/proxmox` | Node, storage, bridge, VMID range, IP pool |
+| 3 | `/wizard/<engine>` | Chain-specific config (chain_id, RPC, deployer wallet, contracts, plan, revenue sharing) |
+| 4 | `/wizard/<provisioner>` | Provisioner-specific config (IP pool, storage, VMID range, etc.) |
 | 5 | `/wizard/ipv6` | Broker allocation or manual prefix |
 | 6 | `/wizard/admin_commands` | Port knocking configuration |
 | 7 | `/wizard/summary` | Review all settings, confirm |
@@ -257,19 +282,13 @@ The wizard collects configuration through 7 steps. All state is stored in the Fl
 
 After confirmation, `POST /api/finalize` starts a background thread that runs 14 steps sequentially. Progress is tracked in `setup-state.json` and polled by the frontend via `GET /api/finalize/status`.
 
-| # | Step ID | Function | Action |
-|---|---------|----------|--------|
-| 1 | `keypair` | `_finalize_keypair` | Generate server secp256k1 keypair |
-| 2 | `wallet` | `_finalize_wallet` | Write deployer private key |
-| 3 | `contracts` | `_finalize_contracts` | Deploy contracts or verify existing |
-| 4 | `config` | `_finalize_config` | Write YAML configs (incl. bridge), admin commands, `.env` |
-| 5+ | *(provisioner)* | from `get_finalization_steps()` | Provisioner-specific (e.g. Proxmox: token, terraform, template) |
-| — | `ipv6` | `_finalize_ipv6` | Broker allocation or manual prefix, WireGuard |
-| — | `https` | `_finalize_https` | sslip.io hostname, Let's Encrypt or self-signed |
-| — | `signup` | `_finalize_signup` | Generate signup page, create systemd service |
-| — | `mint_nft` | `_finalize_mint_nft` | Mint NFT #0 to admin wallet |
-| — | `finalize` | `_finalize_complete` | Enable services, create subscription plan, set ownership, mark complete |
-| — | `validate` | `_finalize_validate` | System validation (testing mode only) |
+| Phase | Step IDs | Source | Action |
+|-------|----------|--------|--------|
+| Engine pre | e.g. `keypair`, `wallet`, `contracts`, `chain_config` | `engine.get_finalization_steps()` | Engine-specific setup (keys, wallet, deploy, config) |
+| Provisioner | e.g. `token`, `terraform`, `template` (Proxmox) or `storage`, `network`, `template` (libvirt) | `provisioner.get_finalization_steps()` | Provisioner-specific setup |
+| Installer post | `ipv6`, `https`, `signup`, `nginx` | Hardcoded in `finalize.py` | Broker/manual prefix, TLS cert, signup page, nginx reverse proxy |
+| Engine post | e.g. `mint_nft`, `plan`, `revenue_share` | `engine.get_post_finalization_steps()` | NFT #0 mint, subscription plan, revenue sharing |
+| Final | `finalize`, `validate` | Hardcoded in `finalize.py` | Enable services, permissions, marker; validation (testing only) |
 
 Each step: checks if already completed, marks running, executes, marks completed or failed. Failed steps can be retried via `POST /api/finalize/retry`.
 

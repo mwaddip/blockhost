@@ -115,7 +115,7 @@ install_missing() {
         source "$HOME/.cargo/env"
     fi
 
-    # --- Foundry ---
+    # --- Foundry (EVM engine only) ---
     if [[ " ${MISSING_CMDS[*]} " == *" forge "* ]]; then
         echo ""
         echo "Installing Foundry..."
@@ -123,11 +123,12 @@ install_missing() {
         "$HOME/.foundry/bin/foundryup"
     fi
 
-    # --- Node.js (can't auto-install — too many methods) ---
+    # --- Node.js 22 LTS via NodeSource ---
     if [[ " ${MISSING_CMDS[*]} " == *" node "* ]]; then
         echo ""
-        echo -e "${YELLOW}Node.js 18+ must be installed manually:${NC}"
-        echo "  https://nodejs.org/ or via nvm (https://github.com/nvm-sh/nvm)"
+        echo "Installing Node.js 22 LTS via NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+        sudo apt-get install -y nodejs
     fi
 
     # --- Debian ISO ---
@@ -192,7 +193,7 @@ main() {
     log_section "Required Commands (package builds)"
     # ----------------------------------------
 
-    # Rust toolchain (libpam-web3, libpam-web3-tools)
+    # Rust toolchain (libpam-web3)
     if command -v cargo >/dev/null 2>&1; then
         log_ok "cargo ($(cargo --version 2>/dev/null | head -1))"
     else
@@ -200,30 +201,47 @@ main() {
         MISSING_CMDS+=("cargo")
     fi
 
-    # Foundry / forge (libpam-web3-tools, blockhost-engine contracts)
-    if command -v forge >/dev/null 2>&1 || [ -x "$HOME/.foundry/bin/forge" ]; then
-        local forge_bin="${HOME}/.foundry/bin/forge"
-        command -v forge >/dev/null 2>&1 && forge_bin="forge"
-        log_ok "forge ($($forge_bin --version 2>/dev/null | head -1))"
+    # Foundry / forge (EVM engine only — contract compilation)
+    local has_evm_engine=false
+    if [ -d "$PROJECT_DIR/blockhost-engine" ] || [ -d "$PROJECT_DIR/blockhost-engine-evm" ]; then
+        has_evm_engine=true
+    fi
+    if [ "$has_evm_engine" = true ]; then
+        if command -v forge >/dev/null 2>&1 || [ -x "$HOME/.foundry/bin/forge" ]; then
+            local forge_bin="${HOME}/.foundry/bin/forge"
+            command -v forge >/dev/null 2>&1 && forge_bin="forge"
+            log_ok "forge ($($forge_bin --version 2>/dev/null | head -1))"
+        else
+            log_missing "forge (install: curl -L https://foundry.paradigm.xyz | bash && foundryup)"
+            MISSING_CMDS+=("forge")
+        fi
     else
-        log_missing "forge (install: curl -L https://foundry.paradigm.xyz | bash && foundryup)"
-        MISSING_CMDS+=("forge")
+        log_warn "forge (not needed — no EVM engine submodule found)"
     fi
 
-    # Node.js (blockhost-engine)
+    # bun (OPNet engine — auth-svc compilation)
+    if [ -d "$PROJECT_DIR/blockhost-engine-opnet" ]; then
+        if command -v bun >/dev/null 2>&1; then
+            log_ok "bun ($(bun --version 2>/dev/null))"
+        else
+            log_warn "bun (optional — needed for OPNet auth-svc template package)"
+        fi
+    fi
+
+    # Node.js >= 22 LTS (blockhost-engine)
     if command -v node >/dev/null 2>&1; then
         local node_ver
         node_ver=$(node --version 2>/dev/null)
         local node_major
         node_major=$(echo "$node_ver" | sed 's/v//' | cut -d. -f1)
-        if [ "$node_major" -ge 18 ] 2>/dev/null; then
+        if [ "$node_major" -ge 22 ] 2>/dev/null; then
             log_ok "node ($node_ver)"
         else
-            log_missing "node >= 18 (found $node_ver)"
+            log_missing "node >= 22 (found $node_ver)"
             MISSING_CMDS+=("node")
         fi
     else
-        log_missing "node (install: https://nodejs.org/ or via nvm)"
+        log_missing "node (install via NodeSource: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -)"
         MISSING_CMDS+=("node")
     fi
 
@@ -314,11 +332,19 @@ main() {
 
     local required_host_pkgs=(
         "blockhost-common"
-        "libpam-web3-tools"
     )
     [ -n "$prov_pkg" ] && required_host_pkgs+=("$prov_pkg")
+
+    # Auto-detect engine package
+    local engine_deb
+    engine_deb=$(find "${PROJECT_DIR}/packages/host" -maxdepth 1 -name "blockhost-engine-*_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$engine_deb" ]; then
+        required_host_pkgs+=("$(basename "$engine_deb" | sed 's/_.*$//')")
+    else
+        required_host_pkgs+=("blockhost-engine-*")
+    fi
+
     required_host_pkgs+=(
-        "blockhost-engine"
         "blockhost-broker-client"
     )
 
@@ -410,7 +436,7 @@ elif [ -t 0 ]; then
         [[ " ${MISSING_CMDS[*]} " == *" forge "* ]] && \
             echo "  curl -L https://foundry.paradigm.xyz | bash && foundryup"
         [[ " ${MISSING_CMDS[*]} " == *" node "* ]] && \
-            echo "  Node.js 18+: https://nodejs.org/ or nvm"
+            echo "  Node.js 22 LTS: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt install -y nodejs"
         exit 1
     fi
 else

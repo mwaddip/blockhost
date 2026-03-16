@@ -150,7 +150,7 @@ info "Deployer: $DEPLOYER_ADDR (${DEPLOYER_ETH} ETH)"
 # jq check
 command -v jq >/dev/null 2>&1 || fail "jq is not installed"
 command -v cast >/dev/null 2>&1 || fail "cast is not installed"
-command -v pam_web3_tool >/dev/null 2>&1 || fail "pam_web3_tool is not installed"
+command -v bhcrypt >/dev/null 2>&1 || fail "bhcrypt is not installed"
 
 pass "Pre-flight: services running, config valid"
 
@@ -385,12 +385,12 @@ pass "NFT minted: token #$TOKEN_ID, owner $TOKEN_SHORT"
 info "Phase 8: Verify decryption"
 
 # Decrypt userEncrypted using the same signature
-DECRYPT_OUTPUT=$(pam_web3_tool decrypt-symmetric \
+DECRYPT_OUTPUT=$(bhcrypt decrypt-symmetric \
     --signature "$SIGNATURE" \
     --ciphertext "$USER_ENCRYPTED" 2>&1) || fail "Decryption failed: $DECRYPT_OUTPUT"
 
-# Strip "Decrypted: " prefix
-DECRYPTED="${DECRYPT_OUTPUT#Decrypted: }"
+# bhcrypt outputs raw plaintext (no prefix)
+DECRYPTED="$DECRYPT_OUTPUT"
 
 # Validate it's JSON
 echo "$DECRYPTED" | jq . > /dev/null 2>&1 || fail "Decrypted data is not valid JSON: $DECRYPTED"

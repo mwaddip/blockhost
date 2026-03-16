@@ -6,17 +6,20 @@
 #   packages/host/     - Packages to install on Proxmox host
 #   packages/template/ - Packages for VM template (libpam-web3)
 #
-# Usage: ./scripts/build-packages.sh --backend <provisioner-name>
+# Usage: ./scripts/build-packages.sh --backend <provisioner-name> --engine <engine-name>
 #
-# Example: ./scripts/build-packages.sh --backend proxmox
-#          ./scripts/build-packages.sh --backend libvirt
+# Example: ./scripts/build-packages.sh --backend proxmox --engine evm
+#          ./scripts/build-packages.sh --backend libvirt --engine opnet
 #
 # The --backend flag tells the script which provisioner submodule to build.
 # It looks for ./blockhost-provisioner-<name>/ and runs its build-deb.sh.
 #
+# The --engine flag tells the script which engine submodule to build.
+# It looks for ./blockhost-engine-<name>/ and runs its packaging/build.sh.
+#
 # Prerequisites:
 #   - Rust toolchain (for libpam-web3)
-#   - Node.js 18+ (for blockhost-engine)
+#   - Node.js 22+ LTS (for blockhost-engine, via NodeSource)
 #   - dpkg-deb
 #
 
@@ -25,6 +28,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BACKEND=""
+ENGINE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -37,9 +41,17 @@ while [[ $# -gt 0 ]]; do
             BACKEND="${1#*=}"
             shift
             ;;
+        --engine)
+            ENGINE="$2"
+            shift 2
+            ;;
+        --engine=*)
+            ENGINE="${1#*=}"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --backend <provisioner-name>"
+            echo "Usage: $0 --backend <provisioner-name> --engine <engine-name>"
             exit 1
             ;;
     esac
@@ -47,7 +59,13 @@ done
 
 if [ -z "$BACKEND" ]; then
     echo "Error: --backend is required"
-    echo "Usage: $0 --backend <provisioner-name>"
+    echo "Usage: $0 --backend <provisioner-name> --engine <engine-name>"
+    exit 1
+fi
+
+if [ -z "$ENGINE" ]; then
+    echo "Error: --engine is required"
+    echo "Usage: $0 --backend <provisioner-name> --engine <engine-name>"
     exit 1
 fi
 
@@ -94,30 +112,11 @@ BUILT_PACKAGES=()
 FAILED_PACKAGES=()
 
 #
-# 1. libpam-web3-tools (for Proxmox host)
+# 1. libpam-web3 (for VM template)
 #
-log "=== Building libpam-web3-tools ==="
-if [ -d "$PROJECT_DIR/libpam-web3/packaging" ]; then
-    cd "$PROJECT_DIR/libpam-web3"
-    rm -f packaging/libpam-web3-tools_*.deb
-    if ./packaging/build-deb-tools.sh; then
-        DEB=$(find packaging -name "libpam-web3-tools_*.deb" -type f | head -1)
-        if [ -n "$DEB" ]; then
-            cp "$DEB" "$HOST_PKG_DIR/"
-            BUILT_PACKAGES+=("libpam-web3-tools")
-            log "Built: $(basename "$DEB")"
-        fi
-    else
-        FAILED_PACKAGES+=("libpam-web3-tools")
-        warn "Failed to build libpam-web3-tools"
-    fi
-else
-    warn "libpam-web3 submodule not found"
-fi
-echo ""
-
-#
-# 2. libpam-web3 (for VM template)
+# NOTE: libpam-web3-tools is no longer built — bhcrypt is shipped by the engine package.
+# cargo build --release (run by build-deb.sh) still compiles the binary
+# as a side effect — the engine build picks it up from target/release/.
 #
 log "=== Building libpam-web3 (PAM module for VMs) ==="
 if [ -d "$PROJECT_DIR/libpam-web3/packaging" ]; then
@@ -140,7 +139,7 @@ fi
 echo ""
 
 #
-# 3. blockhost-common
+# 2. blockhost-common
 #
 log "=== Building blockhost-common ==="
 if [ -f "$PROJECT_DIR/blockhost-common/build.sh" ]; then
@@ -163,7 +162,7 @@ fi
 echo ""
 
 #
-# 4. blockhost-provisioner-${BACKEND}
+# 3. blockhost-provisioner-${BACKEND}
 #
 PROV_PKG="blockhost-provisioner-${BACKEND}"
 log "=== Building ${PROV_PKG} ==="
@@ -187,30 +186,52 @@ fi
 echo ""
 
 #
-# 5. blockhost-engine
+# 4. blockhost-engine-<ENGINE> (selected via --engine flag)
 #
-log "=== Building blockhost-engine ==="
-if [ -f "$PROJECT_DIR/blockhost-engine/packaging/build.sh" ]; then
-    cd "$PROJECT_DIR/blockhost-engine"
-    rm -f packaging/blockhost-engine_*.deb
+ENGINE_DIR="$PROJECT_DIR/blockhost-engine-${ENGINE}"
+if [ ! -d "$ENGINE_DIR" ]; then
+    # Fallback: pre-rename EVM engine at blockhost-engine/ (no suffix)
+    if [ -d "$PROJECT_DIR/blockhost-engine" ] && [ -f "$PROJECT_DIR/blockhost-engine/packaging/build.sh" ]; then
+        ENGINE_DIR="$PROJECT_DIR/blockhost-engine"
+    else
+        error "Engine directory not found: $ENGINE_DIR"
+    fi
+fi
+
+ENGINE_NAME=$(basename "$ENGINE_DIR")
+
+log "=== Building ${ENGINE_NAME} ==="
+if [ -f "${ENGINE_DIR}/packaging/build.sh" ]; then
+    cd "$ENGINE_DIR"
+    rm -f packaging/blockhost-engine*_*.deb
+    rm -f packaging/blockhost-auth-svc_*.deb
     if ./packaging/build.sh; then
-        DEB=$(find packaging -name "blockhost-engine_*.deb" -type f | head -1)
+        DEB=$(find packaging -name "blockhost-engine*_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$HOST_PKG_DIR/"
-            BUILT_PACKAGES+=("blockhost-engine")
+            BUILT_PACKAGES+=("$ENGINE_NAME")
             log "Built: $(basename "$DEB")"
         fi
+        # Template package: blockhost-auth-svc (for VMs)
+        TEMPLATE_DEB=$(find packaging -name "blockhost-auth-svc_*.deb" -type f | head -1)
+        if [ -n "$TEMPLATE_DEB" ]; then
+            cp "$TEMPLATE_DEB" "$TEMPLATE_PKG_DIR/"
+            BUILT_PACKAGES+=("blockhost-auth-svc")
+            log "Built: $(basename "$TEMPLATE_DEB") (for VM template)"
+        else
+            warn "blockhost-auth-svc template package not built (bun required)"
+        fi
     else
-        FAILED_PACKAGES+=("blockhost-engine")
-        warn "Failed to build blockhost-engine"
+        FAILED_PACKAGES+=("$ENGINE_NAME")
+        warn "Failed to build $ENGINE_NAME"
     fi
 else
-    warn "blockhost-engine/packaging/build.sh not found"
+    error "${ENGINE_NAME}/packaging/build.sh not found"
 fi
 echo ""
 
 #
-# 6. blockhost-broker-client
+# 5. blockhost-broker-client
 #
 log "=== Building blockhost-broker-client ==="
 if [ -f "$PROJECT_DIR/blockhost-broker/scripts/build-deb.sh" ]; then

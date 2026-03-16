@@ -53,19 +53,19 @@
     </div>
     {% endif %}
 
-    <!-- IPv6 Summary -->
+    <!-- Connectivity Summary -->
     <div class="summary-section">
-        <h3>IPv6</h3>
+        <h3>Connectivity</h3>
         <div class="summary-item">
             <span class="summary-label">Source</span>
-            <span class="summary-value">{{ 'Broker Network' if summary.ipv6.mode == 'broker' else 'Manual' }}</span>
+            <span class="summary-value">{{ 'Tunnel Broker' if summary.ipv6.mode == 'broker' else ('Manual' if summary.ipv6.mode == 'manual' else 'None') }}</span>
         </div>
         {% if summary.ipv6.mode == 'broker' %}
         <div class="summary-item">
-            <span class="summary-label">Broker Registry</span>
+            <span class="summary-label">Registry Contract</span>
             <span class="summary-value" style="font-size: 0.75rem;">{{ summary.ipv6.broker_registry or 'Will be fetched' }}</span>
         </div>
-        {% else %}
+        {% elif summary.ipv6.mode == 'manual' %}
         <div class="summary-item">
             <span class="summary-label">Prefix</span>
             <span class="summary-value">{{ summary.ipv6.prefix }}</span>
@@ -367,6 +367,10 @@ const stepOrder = allSteps.map(s => s.id);
 const stepNames = {};
 allSteps.forEach(s => { stepNames[s.id] = s.label; });
 
+// Client-side high-water marks — progress can't revert
+let knownCompleted = new Set();
+let maxProgress = 0;
+
 // Check for existing state on page load
 document.addEventListener('DOMContentLoaded', function() {
     checkExistingState();
@@ -521,6 +525,9 @@ function resetAndRestart() {
     })
     .then(response => response.json())
     .then(data => {
+        // Reset high-water marks
+        knownCompleted.clear();
+        maxProgress = 0;
         // Reset UI
         stepOrder.forEach(step => {
             const li = document.getElementById('step-' + step);
@@ -578,8 +585,8 @@ function pollStatus() {
         }
     })
     .catch(error => {
-        console.error('Poll error:', error);
-        // Don't stop polling on transient errors
+        // Connection lost (e.g. iptables redirect during certbot).
+        // Keep polling but don't touch the UI — progress can't revert.
     });
 }
 
@@ -647,8 +654,9 @@ function appendDataRow(container, id, key, value) {
 }
 
 function updateProgress(data) {
-    // Update progress bar
-    const percent = data.progress || 0;
+    // Update progress bar — never go backwards
+    const percent = Math.max(data.progress || 0, maxProgress);
+    maxProgress = percent;
     document.getElementById('progress-fill').style.width = percent + '%';
     document.getElementById('progress-text').textContent = percent + '%';
 
@@ -656,6 +664,9 @@ function updateProgress(data) {
     const currentStep = data.current_step;
     const completedSteps = data.completed_steps || [];
     const steps = data.steps || {};
+
+    // Grow the known-completed set, never shrink
+    completedSteps.forEach(function(s) { knownCompleted.add(s); });
 
     stepOrder.forEach(function(stepId) {
         const li = document.getElementById('step-' + stepId);
@@ -669,7 +680,8 @@ function updateProgress(data) {
         li.classList.remove('completed', 'in-progress', 'failed');
         if (retryBtn) retryBtn.classList.add('hidden');
 
-        if (stepData.status === 'completed' || completedSteps.includes(stepId)) {
+        if (stepData.status === 'completed' || knownCompleted.has(stepId)) {
+            knownCompleted.add(stepId);
             li.classList.add('completed');
             icon.innerHTML = '&#10003;';
             status.textContent = stepData.completed_at ? 'Completed' : '';

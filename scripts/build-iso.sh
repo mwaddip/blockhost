@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 ISO_EXTRACT="${BUILD_DIR}/iso-extract"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.3.0}"
 
 # Source Debian ISO
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
@@ -24,6 +24,7 @@ OUTPUT_ISO="${BUILD_DIR}/blockhost_${VERSION}.iso"
 TESTING_MODE=false
 BUILD_DEBS=false
 BACKEND=""
+ENGINE=""
 APT_PROXY=""
 
 # Colors
@@ -37,10 +38,11 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 usage() {
-    echo "Usage: $0 --backend <name> [OPTIONS]"
+    echo "Usage: $0 --backend <name> --engine <name> [OPTIONS]"
     echo ""
     echo "Required:"
     echo "  --backend <name>  Provisioner backend (e.g., proxmox, libvirt)"
+    echo "  --engine <name>   Blockchain engine (e.g., evm, opnet)"
     echo ""
     echo "Options:"
     echo "  --build-deb       Build all .deb packages from submodules before ISO creation"
@@ -52,6 +54,8 @@ usage() {
     echo "  - PermitRootLogin yes in sshd_config for easier debugging"
     echo "  - /etc/blockhost/.testing-mode marker for validation scripts"
     echo "  - apt proxy for faster package downloads (only with --apt-proxy)"
+    echo "  - Btrfs root (replaces LVM) with snapshots at each first-boot stage"
+    echo "  - 'revert' command on VM for instant rollback to any snapshot"
 }
 
 parse_args() {
@@ -67,6 +71,14 @@ parse_args() {
                 ;;
             --backend=*)
                 BACKEND="${1#*=}"
+                shift
+                ;;
+            --engine)
+                ENGINE="$2"
+                shift 2
+                ;;
+            --engine=*)
+                ENGINE="${1#*=}"
                 shift
                 ;;
             --testing)
@@ -239,6 +251,47 @@ configure_testing_mode() {
 
     log "Configuring testing mode..."
 
+    PRESEED_FILE="${ISO_EXTRACT}/preseed.cfg"
+
+    # --- Btrfs: swap LVM for btrfs in the preseed copy ---
+    if [ -f "$PRESEED_FILE" ]; then
+        log "Switching preseed from LVM to btrfs..."
+
+        # Replace partitioning method
+        sed -i 's/^d-i partman-auto\/method string lvm$/d-i partman-auto\/method string regular/' "$PRESEED_FILE"
+
+        # Remove LVM-specific lines
+        sed -i '/^d-i partman-auto-lvm\//d' "$PRESEED_FILE"
+        sed -i '/^d-i partman-lvm\//d' "$PRESEED_FILE"
+        sed -i '/^d-i partman-md\//d' "$PRESEED_FILE"
+
+        # Set default filesystem to btrfs
+        sed -i '/^d-i partman-auto\/choose_recipe/i d-i partman\/default_filesystem string btrfs' "$PRESEED_FILE"
+
+        # Add btrfs-progs to package list
+        sed -i 's/bash-completion$/bash-completion \\\n    btrfs-progs/' "$PRESEED_FILE"
+
+        log "Preseed updated for btrfs"
+    fi
+
+    # --- Copy revert and resume scripts to ISO ---
+    REVERT_SCRIPT="${PROJECT_DIR}/scripts/blockhost-revert"
+    RESUME_SCRIPT="${PROJECT_DIR}/scripts/blockhost-resume"
+    if [ -f "$REVERT_SCRIPT" ]; then
+        cp "$REVERT_SCRIPT" "${ISO_EXTRACT}/blockhost/scripts/blockhost-revert"
+        chmod +x "${ISO_EXTRACT}/blockhost/scripts/blockhost-revert"
+        log "Revert script added to ISO"
+    else
+        warn "Revert script not found at $REVERT_SCRIPT"
+    fi
+    if [ -f "$RESUME_SCRIPT" ]; then
+        cp "$RESUME_SCRIPT" "${ISO_EXTRACT}/blockhost/scripts/blockhost-resume"
+        chmod +x "${ISO_EXTRACT}/blockhost/scripts/blockhost-resume"
+        log "Resume script added to ISO"
+    else
+        warn "Resume script not found at $RESUME_SCRIPT"
+    fi
+
     # Read SSH public key for passwordless access (from repo testing key)
     SSH_PUBKEY_FILE="${PROJECT_DIR}/testing/blockhost-test-key.pub"
     SSH_PUBKEY=""
@@ -250,12 +303,10 @@ configure_testing_mode() {
         warn "Generate with: ssh-keygen -t ed25519 -f testing/blockhost-test-key -N ''"
     fi
 
-    PRESEED_FILE="${ISO_EXTRACT}/preseed.cfg"
-
     # Set apt proxy in preseed if provided
     if [ -n "$APT_PROXY" ] && [ -f "$PRESEED_FILE" ]; then
         if grep -q "mirror/http/proxy" "$PRESEED_FILE"; then
-            sed -i "s|d-i mirror/http/proxy string.*|d-i mirror/http/proxy string ${APT_PROXY}|" "$PRESEED_FILE"
+            sed -i "s#d-i mirror/http/proxy string.*#d-i mirror/http/proxy string ${APT_PROXY}#" "$PRESEED_FILE"
         else
             echo "d-i mirror/http/proxy string ${APT_PROXY}" >> "$PRESEED_FILE"
         fi
@@ -310,11 +361,42 @@ echo "Testing mode configured" >> /var/log/blockhost-install.log
 TESTING_EOF
         chmod +x "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh"
 
-        # Add to the late_command - append script execution
-        # We need to modify the preseed to also run our testing script
-        sed -i "s|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log; if [ -f \"\$CDROM/blockhost/scripts/configure-testing.sh\" ]; then cp \"\$CDROM/blockhost/scripts/configure-testing.sh\" /target/tmp/; in-target /bin/bash /tmp/configure-testing.sh; fi|" "$PRESEED_FILE"
+        # --- Btrfs @snapshots directory setup (runs via in-target in late_command) ---
+        # Creates the @snapshots directory on the btrfs top-level so first-boot
+        # can take snapshots at each stage. Works with Debian's native @rootfs layout.
+        # Runs via in-target because the installer env lacks bash/findmnt/btrfs-progs.
+        cat > "${ISO_EXTRACT}/blockhost/scripts/setup-btrfs-snapshots.sh" << 'BTRFS_EOF'
+#!/bin/bash
+# Btrfs snapshot directory setup — runs via in-target (chroot into installed system)
 
-        log "Added SSH root login and apt proxy configuration"
+LOG="/var/log/blockhost-install.log"
+
+# Detect the root device (strip btrfs [/subvol] suffix)
+ROOT_DEV=$(findmnt -no SOURCE / | sed 's/\[.*$//')
+FSTYPE=$(stat -f -c %T /)
+
+if [ -z "$ROOT_DEV" ] || [ "$FSTYPE" != "btrfs" ]; then
+    echo "btrfs-setup: root is ${FSTYPE:-unknown}, not btrfs — skipping" >> "$LOG"
+    exit 0
+fi
+
+# Mount the top-level subvolume (subvolid=5)
+mkdir -p /mnt/btrfs-top
+mount -o subvolid=5 "$ROOT_DEV" /mnt/btrfs-top
+
+# Create @snapshots directory on the top-level (sibling of @rootfs)
+mkdir -p /mnt/btrfs-top/@snapshots
+echo "btrfs-setup: created @snapshots on top-level (dev=$ROOT_DEV)" >> "$LOG"
+
+umount /mnt/btrfs-top
+BTRFS_EOF
+        chmod +x "${ISO_EXTRACT}/blockhost/scripts/setup-btrfs-snapshots.sh"
+
+        # Add to the late_command - append script execution
+        # Order: copy files → configure-testing (in-target) → btrfs setup (NOT in-target) → revert script
+        sed -i "s|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log; if [ -f \"\$CDROM/blockhost/scripts/configure-testing.sh\" ]; then cp \"\$CDROM/blockhost/scripts/configure-testing.sh\" /target/tmp/; in-target /bin/bash /tmp/configure-testing.sh; fi; if [ -f \"\$CDROM/blockhost/scripts/setup-btrfs-snapshots.sh\" ]; then cp \"\$CDROM/blockhost/scripts/setup-btrfs-snapshots.sh\" /target/tmp/; in-target /bin/bash /tmp/setup-btrfs-snapshots.sh; fi; if [ -f \"\$CDROM/blockhost/scripts/blockhost-revert\" ]; then cp \"\$CDROM/blockhost/scripts/blockhost-revert\" /target/usr/local/bin/revert; chmod +x /target/usr/local/bin/revert; fi; if [ -f \"\$CDROM/blockhost/scripts/blockhost-resume\" ]; then cp \"\$CDROM/blockhost/scripts/blockhost-resume\" /target/usr/local/bin/resume; chmod +x /target/usr/local/bin/resume; fi|" "$PRESEED_FILE"
+
+        log "Added SSH root login, apt proxy, btrfs snapshot setup, and revert script"
     fi
 }
 
@@ -359,13 +441,23 @@ main() {
         error "--backend is required\nUse --help for usage"
     fi
 
+    if [ -z "$ENGINE" ]; then
+        error "--engine is required\nUse --help for usage"
+    fi
+
     log "BlockHost ISO Builder v${VERSION}"
     log "Building from Debian 12 base"
     log "Backend: $BACKEND"
+    log "Engine: $ENGINE"
+
+    if [[ -n "$APT_PROXY" ]] && ! [[ "$APT_PROXY" =~ ^https?:// ]]; then
+        error "--apt-proxy must be an http:// or https:// URL"
+    fi
 
     if [ "$TESTING_MODE" = "true" ]; then
         log "TESTING MODE ENABLED"
         log "  - SSH root login: enabled"
+        log "  - Btrfs root + snapshots (replaces LVM)"
         if [ -n "$APT_PROXY" ]; then
             log "  - apt proxy: $APT_PROXY"
         fi
@@ -373,7 +465,7 @@ main() {
 
     if [ "$BUILD_DEBS" = "true" ]; then
         log "Building .deb packages from submodules..."
-        if ! "${SCRIPT_DIR}/build-packages.sh" --backend "$BACKEND"; then
+        if ! "${SCRIPT_DIR}/build-packages.sh" --backend "$BACKEND" --engine "$ENGINE"; then
             error "Package build failed. Fix errors above and retry."
         fi
         log "All packages built successfully"
@@ -400,6 +492,8 @@ main() {
         log "Testing mode features:"
         log "  - Root password: blockhost"
         log "  - SSH root login: enabled"
+        log "  - Btrfs root with first-boot snapshots"
+        log "  - 'revert <name>' on VM to rollback + swap .debs"
         if [ -n "$APT_PROXY" ]; then
             log "  - apt proxy: $APT_PROXY"
         fi

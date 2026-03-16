@@ -15,6 +15,7 @@ contains chain-agnostic infrastructure steps (keypair, ipv6, https, etc.).
 import ipaddress
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -23,7 +24,6 @@ from typing import Optional
 
 from installer.web.utils import (
     set_blockhost_ownership,
-    parse_pam_ciphertext,
     write_yaml,
     generate_self_signed_cert_for_finalization,
 )
@@ -40,7 +40,7 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
     5. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
     6. Final steps (finalize, validate)
     """
-    # Infrastructure steps (chain-agnostic, run before engine)
+    # Infrastructure steps (run before engine)
     infra_steps = [
         ('keypair', 'Generating server keypair', _finalize_keypair),
     ]
@@ -188,98 +188,42 @@ CONFIG_DIR = Path('/etc/blockhost')
 
 
 def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
-    """Generate server ECIES keypair (server.key + server.pubkey).
+    """Generate secp256k1 ECIES server keypair.
 
-    Uses pam_web3_tool (secp256k1) — not chain-specific, every engine
-    needs this for PAM authentication infrastructure.
-
-    Idempotent: skips if both files already exist.
-    No step result data — summary shows just "Completed".
+    Writes server.key (private, hex, 0640) and server.pubkey (uncompressed
+    public point, hex, 0640). Idempotent — skips if both already exist.
     """
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        server_key = CONFIG_DIR / 'server.key'
-        server_pubkey = CONFIG_DIR / 'server.pubkey'
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-        if server_key.exists() and server_pubkey.exists():
+        key_file = CONFIG_DIR / 'server.key'
+        pub_file = CONFIG_DIR / 'server.pubkey'
+
+        if key_file.exists() and pub_file.exists():
             return True, None
 
-        # Generate keypair
-        result = subprocess.run(
-            ['pam_web3_tool', 'generate-keypair'],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if key_file.exists():
+            priv_hex = key_file.read_text().strip()
+        else:
+            priv_hex = secrets.token_hex(32)
+            key_file.write_text(priv_hex + '\n')
+            set_blockhost_ownership(key_file, 0o640)
 
-        if result.returncode != 0:
-            return False, f'Keypair generation failed: {result.stderr}'
+        priv_int = int(priv_hex, 16)
+        priv_key = ec.derive_private_key(priv_int, ec.SECP256K1(), default_backend())
+        pub_hex = priv_key.public_key().public_bytes(
+            encoding=Encoding.X962,
+            format=PublicFormat.UncompressedPoint
+        ).hex()
 
-        # Parse private key from output (bare hex, 64 chars, no 0x prefix)
-        # pam_web3_tool outputs lines like:
-        #   Private key (hex): abcdef1234...
-        #   Public key (hex): 04abcdef...
-        private_key = ''
-        public_key = ''
-        for line in result.stdout.strip().split('\n'):
-            lower = line.lower()
-            if 'private' in lower and ':' in line:
-                val = line.split(':', 1)[1].strip().replace('0x', '')
-                if len(val) == 64 and all(c in '0123456789abcdefABCDEF' for c in val):
-                    private_key = val
-            elif 'public' in lower and ':' in line:
-                val = line.split(':', 1)[1].strip()
-                val_clean = val.replace('0x', '')
-                if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
-                    public_key = f'0x{val_clean}'
-
-        # Fallback: try bare hex lines (two lines: private, public)
-        if not private_key:
-            for line in result.stdout.strip().split('\n'):
-                stripped = line.strip().replace('0x', '')
-                if len(stripped) == 64 and all(c in '0123456789abcdefABCDEF' for c in stripped):
-                    private_key = stripped
-                    break
-
-        if not private_key:
-            return False, 'Could not parse private key from keypair output'
-
-        # Write server.key (hex, 64 chars, no 0x prefix)
-        server_key.write_text(private_key)
-        set_blockhost_ownership(server_key, 0o640)
-
-        # Derive public key if not parsed from generate-keypair output
-        if not public_key:
-            result2 = subprocess.run(
-                ['pam_web3_tool', 'derive-pubkey', '--private-key', private_key],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result2.returncode == 0:
-                for line in result2.stdout.strip().split('\n'):
-                    if ':' in line:
-                        val = line.split(':', 1)[1].strip()
-                    else:
-                        val = line.strip()
-                    val_clean = val.replace('0x', '')
-                    if len(val_clean) >= 128 and all(c in '0123456789abcdefABCDEF' for c in val_clean):
-                        public_key = f'0x{val_clean}'
-                        break
-            if not public_key:
-                return False, 'Could not derive public key from private key'
-
-        # Write server.pubkey (hex with 0x prefix)
-        server_pubkey.write_text(public_key)
-        set_blockhost_ownership(server_pubkey, 0o644)
+        pub_file.write_text(pub_hex + '\n')
+        set_blockhost_ownership(pub_file, 0o640)
 
         return True, None
-    except FileNotFoundError:
-        return False, 'pam_web3_tool not installed'
-    except subprocess.TimeoutExpired:
-        return False, 'Keypair generation timed out'
     except Exception as e:
-        return False, str(e)
+        return False, f'Failed to generate server keypair: {e}'
 
 
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
@@ -324,14 +268,13 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 'request',
                 '--nft-contract', nft_contract,
                 '--wallet-key', '/etc/blockhost/deployer.key',
-                '--timeout', '120',
             ]
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=180
+                timeout=3600
             )
 
             # Don't bail on non-zero if stdout contains allocation data

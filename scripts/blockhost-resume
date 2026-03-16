@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# BlockHost First-Boot Resume (testing only)
+#
+# Usage: resume
+#
+# Removes the first-boot hold file and restarts the service.
+# Run after reverting to a snapshot and uploading new .debs.
+#
+
+set -e
+
+STATE_DIR="/var/lib/blockhost"
+HOLD_FILE="${STATE_DIR}/.firstboot-hold"
+
+if [ ! -f "$HOLD_FILE" ]; then
+    echo "No hold file found — first-boot is not held."
+    exit 0
+fi
+
+rm "$HOLD_FILE"
+echo "Hold released. Restarting first-boot..."
+systemctl restart blockhost-firstboot

@@ -30,7 +30,7 @@ These do NOT need the root agent:
 
 - **Terraform** — runs in `/var/lib/blockhost/terraform/` (blockhost-owned)
 - **Foundry `cast`** — blockchain transactions, contract calls
-- **`pam_web3_tool`** — encryption/decryption (reads keys via group permission)
+- **`bhcrypt`** — encryption/decryption (reads keys via group permission)
 - **Config reads** — all `/etc/blockhost/` configs are group-readable
 - **Database operations** — `/var/lib/blockhost/vms.json` is blockhost-owned
 
@@ -93,10 +93,13 @@ Each submodule has a defined scope. Keep functionality in the right place.
 | Submodule | Scope | Contains |
 |-----------|-------|----------|
 | **blockhost-common** | Shared libraries | Config loading, VM database, root agent Python client |
-| **blockhost-provisioner-proxmox** | VM lifecycle | Create, suspend, destroy, resume, template build, NFT mint |
-| **blockhost-engine** | Blockchain interaction | Event monitor, admin commands, fund manager, `bw`/`ab` CLIs, root agent TS client |
-| **libpam-web3** | Authentication + crypto | PAM module (in VMs), `pam_web3_tool` CLI, signing page, ECIES encryption |
+| **blockhost-provisioner-proxmox** | VM lifecycle (Proxmox) | Create, suspend, destroy, resume, template build (Terraform + PVE API) |
+| **blockhost-provisioner-libvirt** | VM lifecycle (libvirt) | Create, suspend, destroy, resume, template build (virsh + libvirt API) |
+| **blockhost-engine** | Blockchain (EVM) | Event monitor, admin commands, fund manager, `bw`/`ab`/`is` CLIs, `bhcrypt` CLI, signup page, auth-svc |
+| **blockhost-engine-opnet** | Blockchain (OPNet) | Same as blockhost-engine but for OPNet/Bitcoin L1 |
+| **libpam-web3** | Authentication | PAM module (in VMs), GECOS-based wallet verification |
 | **blockhost-broker** | IPv6 allocation | Broker client, on-chain registry interaction, WireGuard config |
+| **facts** | Interface contracts | Shared specs: provisioner, engine, common, wizard UI, admin, NFT interfaces |
 | **Main repo** (installer) | Setup-time only | First boot, web wizard, finalization, root agent daemon |
 
 ### Guidelines

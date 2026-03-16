@@ -46,6 +46,12 @@ if [ -f "$MARKER_FILE" ]; then
     exit 0
 fi
 
+# Check if held after a snapshot revert (testing mode)
+if [ -f "${STATE_DIR}/.firstboot-hold" ]; then
+    log "First-boot held (post-revert). Upload new .debs, then run: resume"
+    exit 0
+fi
+
 log "First-boot script starting..."
 
 # Stop getty on tty1 so we can use the console exclusively
@@ -61,6 +67,35 @@ log "=========================================="
 
 # Export Python path
 export PYTHONPATH="${BLOCKHOST_DIR}:${PYTHONPATH}"
+
+#
+# Snapshot helper — takes a read-only snapshot before each major step
+#
+snapshot_if_testing() {
+    local name="$1"
+    [ -f /etc/blockhost/.testing-mode ] || return 0
+    [ "$(stat -f -c %T /)" = "btrfs" ] || return 0
+
+    local root_dev root_subvol
+    root_dev=$(findmnt -no SOURCE / | sed 's/\[.*$//')
+    # Extract subvolume path from mount options (e.g. "subvol=/@rootfs" → "@rootfs")
+    root_subvol=$(findmnt -no OPTIONS / | grep -oP 'subvol=/\K[^,]+')
+
+    if [ -z "$root_subvol" ]; then
+        log "Snapshot: cannot detect root subvolume, skipping $name"
+        return 0
+    fi
+
+    mkdir -p /mnt/btrfs-top
+    mount -o subvolid=5 "$root_dev" /mnt/btrfs-top
+
+    if [ -d "/mnt/btrfs-top/@snapshots" ] && [ ! -d "/mnt/btrfs-top/@snapshots/$name" ]; then
+        btrfs subvolume snapshot "/mnt/btrfs-top/$root_subvol" "/mnt/btrfs-top/@snapshots/$name"
+        log "Snapshot: $name"
+    fi
+
+    umount /mnt/btrfs-top
+}
 
 #
 # Step 1: Wait for network
@@ -90,6 +125,8 @@ fi
 # Packages must be installed before the provisioner hook because the hook
 # script and manifest are shipped inside the provisioner .deb.
 #
+snapshot_if_testing "pre-packages"
+
 STEP_PACKAGES="${STATE_DIR}/.step-packages"
 if [ ! -f "$STEP_PACKAGES" ]; then
     log "Step 2: Installing BlockHost packages..."
@@ -107,9 +144,17 @@ if [ ! -f "$STEP_PACKAGES" ]; then
             PROV_PKG=$(basename "$PROV_DEB" | sed 's/_.*$//')
         fi
 
-        FALLBACK_ORDER=(blockhost-common libpam-web3-tools)
+        # Auto-detect engine package in fallback path
+        FALLBACK_ENGINE_DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
+        FALLBACK_ENGINE_PKG=""
+        if [ -n "$FALLBACK_ENGINE_DEB" ]; then
+            FALLBACK_ENGINE_PKG=$(basename "$FALLBACK_ENGINE_DEB" | sed 's/_.*$//')
+        fi
+
+        # Engine is deferred — depends on nodejs (>= 22) from step 3b-pre
+        FALLBACK_ORDER=(blockhost-common)
         [ -n "$PROV_PKG" ] && FALLBACK_ORDER+=("$PROV_PKG")
-        FALLBACK_ORDER+=(blockhost-engine blockhost-broker-client)
+        FALLBACK_ORDER+=(blockhost-broker-client)
 
         for pkg in "${FALLBACK_ORDER[@]}"; do
             DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "${pkg}_*.deb" -type f 2>/dev/null | head -1)
@@ -174,6 +219,8 @@ fi
 # (e.g. Proxmox VE, Terraform). Discovered from the provisioner manifest
 # installed by the provisioner .deb in Step 2.
 #
+snapshot_if_testing "pre-provisioner-hook"
+
 STEP_PROVISIONER_HOOK="${STATE_DIR}/.step-provisioner-hook"
 if [ ! -f "$STEP_PROVISIONER_HOOK" ]; then
     log "Step 3: Running provisioner first-boot hook..."
@@ -337,53 +384,116 @@ else
 fi
 
 #
-# Step 3b: Install Foundry (for contract deployment)
+# Step 3b-pre: Install Node.js 22 LTS via NodeSource
 #
-STEP_FOUNDRY="${STATE_DIR}/.step-foundry"
-if [ ! -f "$STEP_FOUNDRY" ]; then
-    log "Step 3b: Installing Foundry..."
-
-    if ! command -v cast &> /dev/null; then
-        log "Downloading Foundry binaries..."
-
-        # Download pre-built binaries directly (non-interactive)
-        FOUNDRY_DIR="/usr/local/lib/foundry"
-        mkdir -p "$FOUNDRY_DIR"
-
-        # Get latest release from GitHub
-        FOUNDRY_VERSION=$(curl -s https://api.github.com/repos/foundry-rs/foundry/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [ -z "$FOUNDRY_VERSION" ]; then
-            FOUNDRY_VERSION="nightly"
+# Required by the engine's monitor service and CLI tools.
+# NodeSource provides stable .deb packages for Node 22 LTS.
+#
+STEP_NODEJS="${STATE_DIR}/.step-nodejs"
+if [ ! -f "$STEP_NODEJS" ]; then
+    if command -v node >/dev/null 2>&1; then
+        NODE_MAJOR=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
+        if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+            log "Step 3b-pre: Node.js $(node --version) already installed, skipping."
+            touch "$STEP_NODEJS"
         fi
-        log "Installing Foundry version: $FOUNDRY_VERSION"
-
-        # Download and extract
-        FOUNDRY_URL="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
-        log "Downloading from: $FOUNDRY_URL"
-
-        if curl -L "$FOUNDRY_URL" -o /tmp/foundry.tar.gz 2>&1; then
-            tar -xzf /tmp/foundry.tar.gz -C "$FOUNDRY_DIR"
-            rm /tmp/foundry.tar.gz
-
-            # Create symlinks in /usr/local/bin
-            for tool in forge cast anvil chisel; do
-                if [ -f "$FOUNDRY_DIR/$tool" ]; then
-                    chmod +x "$FOUNDRY_DIR/$tool"
-                    ln -sf "$FOUNDRY_DIR/$tool" "/usr/local/bin/$tool"
-                    log "Installed: $tool"
-                fi
-            done
-        else
-            log "WARNING: Failed to download Foundry, contract deployment may fail"
-        fi
-    else
-        log "Foundry already installed: $(cast --version 2>/dev/null || echo 'unknown version')"
     fi
 
-    touch "$STEP_FOUNDRY"
-    log "Step 3b complete - Foundry installed!"
+    if [ ! -f "$STEP_NODEJS" ]; then
+        log "Step 3b-pre: Installing Node.js 22 LTS via NodeSource..."
+        if curl -fsSL https://deb.nodesource.com/setup_22.x | bash - 2>&1 | tee -a "$LOG_FILE"; then
+            apt-get install -y nodejs 2>&1 | tee -a "$LOG_FILE"
+            if command -v node >/dev/null 2>&1; then
+                log "Step 3b-pre complete - Node.js $(node --version) installed"
+            else
+                log "ERROR: Node.js installation failed"
+                exit 1
+            fi
+        else
+            log "ERROR: NodeSource setup failed"
+            exit 1
+        fi
+        touch "$STEP_NODEJS"
+    fi
 else
-    log "Step 3b: Foundry already installed, skipping."
+    log "Step 3b-pre: Node.js already installed, skipping."
+fi
+
+#
+# Step 3b-post: Install engine package (deferred from step 2)
+#
+# The engine depends on nodejs (>= 22), python3-pycryptodome, python3-ecdsa.
+# Node was just installed above; pycryptodome and ecdsa come from Debian repos.
+# We deferred the engine from install-packages.sh because dpkg -i fails when
+# dependencies are missing, and apt-get -f install "fixes" it by removing the package.
+#
+snapshot_if_testing "pre-engine"
+
+STEP_ENGINE="${STATE_DIR}/.step-engine"
+if [ ! -f "$STEP_ENGINE" ]; then
+    log "Step 3b-post: Installing engine package..."
+
+    ENGINE_DEB=$(find "$BLOCKHOST_DIR/packages/host" -maxdepth 1 -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
+    if [ -n "$ENGINE_DEB" ] && [ -f "$ENGINE_DEB" ]; then
+        # Install APT dependencies first so dpkg -i succeeds
+        apt-get install -y python3-pycryptodome python3-ecdsa 2>&1 | tee -a "$LOG_FILE"
+        log "Installing: $(basename "$ENGINE_DEB")"
+        dpkg -i "$ENGINE_DEB" 2>&1 | tee -a "$LOG_FILE"
+        ENGINE_PKG_NAME=$(dpkg-deb -f "$ENGINE_DEB" Package)
+        if dpkg -s "$ENGINE_PKG_NAME" >/dev/null 2>&1; then
+            log "Step 3b-post complete - Engine installed ($ENGINE_PKG_NAME)"
+        else
+            log "ERROR: Engine package installation failed ($ENGINE_PKG_NAME)"
+            exit 1
+        fi
+    else
+        log "WARNING: No engine package found in $BLOCKHOST_DIR/packages/host"
+    fi
+
+    touch "$STEP_ENGINE"
+else
+    log "Step 3b-post: Engine already installed, skipping."
+fi
+
+#
+# Step 3c: Run engine first-boot hook
+#
+# The engine hook handles installing engine-specific host dependencies
+# (e.g. Foundry for EVM). Discovered from the engine manifest installed
+# by the engine .deb in step 3b-post.
+#
+snapshot_if_testing "pre-engine-hook"
+
+STEP_ENGINE_HOOK="${STATE_DIR}/.step-engine-hook"
+if [ ! -f "$STEP_ENGINE_HOOK" ]; then
+    log "Step 3c: Running engine first-boot hook..."
+
+    ENGINE_HOOK=""
+    ENGINE_MANIFEST="/usr/share/blockhost/engine.json"
+
+    if [ -f "$ENGINE_MANIFEST" ]; then
+        ENGINE_HOOK=$(python3 -c "import json; print(json.load(open('$ENGINE_MANIFEST')).get('setup',{}).get('first_boot_hook',''))" 2>/dev/null)
+    fi
+
+    if [ -n "$ENGINE_HOOK" ] && [ -x "$ENGINE_HOOK" ]; then
+        log "Running engine hook: $ENGINE_HOOK"
+        export STATE_DIR LOG_FILE
+        "$ENGINE_HOOK" 2>&1 | tee -a "$LOG_FILE"
+        HOOK_RC=${PIPESTATUS[0]}
+        if [ "$HOOK_RC" -ne 0 ]; then
+            log "ERROR: Engine hook failed (exit $HOOK_RC)"
+            exit 1
+        fi
+    elif [ -n "$ENGINE_HOOK" ]; then
+        log "WARNING: Engine hook declared but not executable: $ENGINE_HOOK"
+    else
+        log "Step 3c: No engine hook declared, skipping."
+    fi
+
+    touch "$STEP_ENGINE_HOOK"
+    log "Step 3c complete!"
+else
+    log "Step 3c: Engine hook already completed, skipping."
 fi
 
 #
@@ -414,6 +524,8 @@ if [ ! -f "$STEP_NETWORK" ]; then
 else
     log "Step 4: Network already verified, skipping."
 fi
+
+snapshot_if_testing "pre-wizard"
 
 #
 # Step 5: Generate OTP

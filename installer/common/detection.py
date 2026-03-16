@@ -34,8 +34,7 @@ def _check_cmdline() -> dict:
     try:
         cmdline = Path('/proc/cmdline').read_text()
 
-        # Proxmox live ISO indicators
-        if 'boot=live' in cmdline or 'proxinstall' in cmdline:
+        if 'boot=live' in cmdline:
             result['is_live'] = True
 
         # Check for root device hints
@@ -75,42 +74,6 @@ def _check_mounts() -> dict:
 
     except Exception:
         pass
-
-    return result
-
-
-def _check_proxmox_markers() -> dict:
-    """Check for Proxmox-specific files and markers."""
-    result = {
-        'is_proxmox': False,
-        'pve_version': None,
-        'is_installed': False,
-    }
-
-    # Check if Proxmox is present
-    pve_release = Path('/etc/pve-release')
-    if pve_release.exists():
-        result['is_proxmox'] = True
-        try:
-            result['pve_version'] = pve_release.read_text().strip()
-        except Exception:
-            pass
-
-    # Alternative check
-    if Path('/usr/bin/pvesh').exists():
-        result['is_proxmox'] = True
-
-    # Check for completed installation markers
-    # These are created after successful Proxmox installation
-    install_markers = [
-        '/var/lib/pve-cluster/.members',
-        '/etc/pve/corosync.conf',
-    ]
-
-    for marker in install_markers:
-        if Path(marker).exists():
-            result['is_installed'] = True
-            break
 
     return result
 
@@ -157,14 +120,12 @@ def detect_boot_medium() -> tuple[BootMedium, dict]:
     details = {
         'cmdline': _check_cmdline(),
         'mounts': _check_mounts(),
-        'proxmox': _check_proxmox_markers(),
         'blockhost': _check_blockhost_state(),
         'root_device': _get_root_device(),
     }
 
     cmdline = details['cmdline']
     mounts = details['mounts']
-    proxmox = details['proxmox']
     blockhost = details['blockhost']
 
     # Decision tree
@@ -182,14 +143,9 @@ def detect_boot_medium() -> tuple[BootMedium, dict]:
     # 3. If root is on a real disk
     root_fstype = mounts['root_fstype']
     if root_fstype in ('ext4', 'xfs', 'btrfs', 'zfs'):
-        # On a real filesystem
         if blockhost['setup_complete']:
             return BootMedium.HDD_INSTALLED, details
-        elif proxmox['is_installed']:
-            # Proxmox installed but BlockHost setup not complete
-            return BootMedium.HDD_FRESH, details
         else:
-            # Very fresh install, PVE not fully configured yet
             return BootMedium.HDD_FRESH, details
 
     return BootMedium.UNKNOWN, details

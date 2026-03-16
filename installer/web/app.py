@@ -13,6 +13,8 @@ Provides web-based installation wizard with:
 """
 
 import importlib
+import os
+import re
 import ssl
 import json
 import secrets
@@ -39,10 +41,8 @@ from installer.common.detection import detect_boot_medium, BootMedium
 # Import extracted modules
 from installer.web.utils import (
     detect_disks,
-    is_valid_address,
+    is_valid_evm_address,
     is_valid_ipv6_prefix,
-    get_broker_registry,
-    fetch_broker_registry_from_github,
     parse_pam_ciphertext,
     request_broker_allocation,
     generate_self_signed_cert,
@@ -58,6 +58,9 @@ PROVISIONER_MANIFEST_PATH = Path('/usr/share/blockhost/provisioner.json')
 
 # Engine manifest path (installed by engine .deb package)
 ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
+
+# Broker manifest path (installed by broker .deb package)
+BROKER_MANIFEST_PATH = Path('/usr/share/blockhost/broker.json')
 
 
 def _discover_provisioner() -> Optional[dict]:
@@ -106,6 +109,28 @@ def _discover_engine() -> Optional[dict]:
         return None
 
 
+def _discover_broker() -> Optional[dict]:
+    """Discover the broker from its manifest.
+
+    Unlike engine/provisioner, the broker doesn't need a full Blueprint —
+    it provides a manifest with field definitions and an optional Python
+    module with helper functions (e.g. fetch_registry).
+    """
+    if not BROKER_MANIFEST_PATH.is_file():
+        return None
+
+    try:
+        manifest = json.loads(BROKER_MANIFEST_PATH.read_text())
+        module = None
+        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
+        if wizard_module_name:
+            module = importlib.import_module(wizard_module_name)
+        return {'manifest': manifest, 'module': module}
+    except (json.JSONDecodeError, ImportError, Exception) as e:
+        print(f"Warning: Failed to load broker: {e}")
+        return None
+
+
 # Discover active provisioner (if installed)
 _provisioner = _discover_provisioner()
 
@@ -117,6 +142,9 @@ if _provisioner and _provisioner.get('manifest'):
 # Discover active engine (if installed)
 _engine = _discover_engine()
 
+# Discover broker (if installed)
+_broker = _discover_broker()
+
 # Resolve engine session key from manifest (e.g. the value of config_keys.session_key)
 _engine_session_key = None
 if _engine and _engine.get('manifest'):
@@ -124,12 +152,12 @@ if _engine and _engine.get('manifest'):
 
 
 def _validate_address(address: str) -> bool:
-    """Validate address via engine module, falling back to basic check."""
+    """Validate address via engine module. Returns False if no engine loaded."""
     if _engine and _engine.get('module'):
         fn = getattr(_engine['module'], 'validate_address', None)
         if fn:
             return fn(address)
-    return is_valid_address(address)
+    return False
 
 
 def _gather_session_config() -> dict:
@@ -177,7 +205,7 @@ if _provisioner and _provisioner.get('manifest'):
 
 # Post-provisioner steps (always present)
 _POST_STEPS = [
-    {'id': 'ipv6',           'label': 'IPv6',       'endpoint': 'wizard_ipv6'},
+    {'id': 'connectivity', 'label': 'Connectivity', 'endpoint': 'wizard_connectivity'},
     {'id': 'admin_commands', 'label': 'Admin',      'endpoint': 'wizard_admin_commands'},
     {'id': 'summary',        'label': 'Summary',    'endpoint': 'wizard_summary'},
 ]
@@ -286,11 +314,18 @@ class SetupState:
             'config': {},  # Stored configuration
         }
 
+    # Keys that must never persist after finalization completes
+    _SECRET_KEYS = frozenset({
+        'deployer_key', 'deployer_mnemonic',
+        'admin_signature', 'admin_public_secret',
+    })
+
     def save(self):
         """Save state to disk."""
         try:
             SETUP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             SETUP_STATE_FILE.write_text(json.dumps(self.state, indent=2, default=str))
+            os.chmod(SETUP_STATE_FILE, 0o640)
         except IOError as e:
             print(f"Warning: Could not save setup state: {e}")
 
@@ -358,7 +393,18 @@ class SetupState:
         self.state['status'] = 'completed'
         self.state['completed_at'] = datetime.datetime.now().isoformat()
         self.state['current_step'] = None
+        self._redact_secrets()
         self.save()
+
+    def _redact_secrets(self):
+        """Remove secret values from stored config after finalization."""
+        config = self.state.get('config', {})
+        for key in self._SECRET_KEYS:
+            config.pop(key, None)
+        for value in config.values():
+            if isinstance(value, dict):
+                for key in self._SECRET_KEYS:
+                    value.pop(key, None)
 
     def to_api_response(self) -> dict:
         """Convert state to API response format."""
@@ -376,6 +422,20 @@ class SetupState:
             'failed_step': failed_step,
             'error': self.state['steps'][failed_step]['error'] if failed_step else None,
         }
+
+
+def _resolve_broker_chain(broker: dict, wallet_address: str) -> Optional[dict]:
+    """Match wallet address against broker manifest chain patterns.
+
+    Returns the chain config dict (with 'chain_id' added) if a pattern matches,
+    else None.
+    """
+    chains = broker.get('manifest', {}).get('chains', {})
+    for chain_id, chain_config in chains.items():
+        pattern = chain_config.get('wallet_pattern', '')
+        if pattern and re.match(pattern, wallet_address):
+            return {**chain_config, 'chain_id': chain_id}
+    return None
 
 
 def create_app(config: Optional[dict] = None) -> Flask:
@@ -441,10 +501,24 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     eng_ui = eng_mod.get_ui_params(dict(session))
                 except Exception:
                     pass
+        broker_manifest = _broker['manifest'] if _broker else None
+
+        # Accent colors from manifests (engine = foreground, provisioner = background)
+        engine_color = None
+        provisioner_color = None
+        if _engine and _engine.get('manifest'):
+            engine_color = _engine['manifest'].get('accent_color')
+        if _provisioner and _provisioner.get('manifest'):
+            provisioner_color = _provisioner['manifest'].get('accent_color')
+
         return {
             'wizard_steps': WIZARD_STEPS,
             'prov_ui': prov_ui,
             'eng_ui': eng_ui,
+            'broker_available': _broker is not None,
+            'broker_manifest': broker_manifest,
+            'engine_color': engine_color,
+            'provisioner_color': provisioner_color,
         }
 
     @app.template_global()
@@ -528,48 +602,97 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 flash('Invalid wallet address', 'error')
                 return redirect(url_for('wizard_wallet'))
 
-            if not admin_signature or not admin_signature.startswith('0x'):
+            if not admin_signature:
                 flash('Missing signature', 'error')
                 return redirect(url_for('wizard_wallet'))
+
+            # Engine-specific signature format check
+            if _engine and _engine.get('module'):
+                validate_sig = getattr(_engine['module'], 'validate_signature', None)
+                if validate_sig and not validate_sig(admin_signature):
+                    flash('Invalid signature format', 'error')
+                    return redirect(url_for('wizard_wallet'))
 
             session['admin_wallet'] = admin_wallet
             session['admin_signature'] = admin_signature
             session['admin_public_secret'] = public_secret
             return redirect(url_for('wizard_network'))
 
-        # If wallet already connected, allow re-doing or skip
-        # TODO: engine.get_wallet_template() override — non-EVM engines need
-        # their own wallet connect page (different signing method, no MetaMask)
-        return render_template('wizard/wallet.html')
+        # Resolve wallet template: engine override or built-in fallback
+        wallet_template = 'wizard/wallet.html'
+        if _engine and _engine.get('module'):
+            eng_fn = getattr(_engine['module'], 'get_wallet_template', None)
+            if eng_fn:
+                custom = eng_fn()
+                if custom:
+                    wallet_template = custom
+
+        return render_template(wallet_template)
+
+    def _bhcrypt_decrypt(signature: str, ciphertext: str) -> dict:
+        """Fallback: decrypt config via bhcrypt subprocess."""
+        import yaml
+        result = subprocess.run(
+            ['bhcrypt', 'decrypt-symmetric',
+             '--signature', signature,
+             '--ciphertext', ciphertext],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise ValueError('Decryption failed — wrong wallet or corrupted file')
+
+        config = yaml.safe_load(result.stdout)
+        if not isinstance(config, dict):
+            raise ValueError('Decrypted content is not valid config')
+        return config
+
+    def _bhcrypt_encrypt(signature: str, plaintext: str) -> str:
+        """Fallback: encrypt config via bhcrypt subprocess."""
+        result = subprocess.run(
+            ['bhcrypt', 'encrypt-symmetric',
+             '--signature', signature,
+             '--plaintext', plaintext],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise ValueError(f'Encryption failed: {result.stderr}')
+
+        ciphertext_hex = parse_pam_ciphertext(result.stdout)
+        if not ciphertext_hex:
+            raise ValueError('Could not parse encrypted output')
+        return ciphertext_hex
 
     @app.route('/api/restore-config', methods=['POST'])
     @require_auth
     def api_restore_config():
         """Decrypt an uploaded config file and restore session data."""
         admin_signature = request.form.get('admin_signature', '').strip()
-        if not admin_signature or not admin_signature.startswith('0x'):
+
+        # Validate signature format (engine-specific)
+        if not admin_signature:
             return jsonify({'error': 'Missing admin signature'}), 400
+        if _engine and _engine.get('module'):
+            validate_sig = getattr(_engine['module'], 'validate_signature', None)
+            if validate_sig and not validate_sig(admin_signature):
+                return jsonify({'error': 'Invalid signature format'}), 400
 
         uploaded = request.files.get('config_file')
         if not uploaded:
             return jsonify({'error': 'No file uploaded'}), 400
 
         ciphertext = uploaded.read().decode('utf-8', errors='ignore').strip()
-        if not ciphertext.startswith('0x'):
-            return jsonify({'error': 'Invalid config file (expected hex ciphertext)'}), 400
 
         try:
-            result = subprocess.run(
-                ['pam_web3_tool', 'decrypt-symmetric',
-                 '--signature', admin_signature,
-                 '--ciphertext', ciphertext],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return jsonify({'error': 'Decryption failed — wrong wallet or corrupted file'}), 400
+            # Decrypt config (engine-specific or legacy fallback)
+            decrypt_fn = None
+            if _engine and _engine.get('module'):
+                decrypt_fn = getattr(_engine['module'], 'decrypt_config', None)
 
-            import yaml
-            config = yaml.safe_load(result.stdout)
+            if decrypt_fn:
+                config = decrypt_fn(admin_signature, ciphertext)
+            else:
+                config = _bhcrypt_decrypt(admin_signature, ciphertext)
+
             if not isinstance(config, dict):
                 return jsonify({'error': 'Decrypted content is not valid config'}), 400
 
@@ -586,9 +709,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 if eng_data:
                     session[_engine_session_key] = eng_data
 
-            # Restore provisioner data: new format uses 'provisioner',
-            # old Proxmox backups use 'proxmox' — map to the active session key
-            prov_data = config.get('provisioner') or config.get('proxmox', {})
+            prov_data = config.get('provisioner', {})
             if prov_data and _prov_session_key:
                 session[_prov_session_key] = prov_data
 
@@ -597,9 +718,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
             return jsonify({'status': 'ok', 'redirect': url_for('wizard_summary')})
         except FileNotFoundError:
-            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+            return jsonify({'error': 'bhcrypt not installed'}), 500
         except subprocess.TimeoutExpired:
             return jsonify({'error': 'Decryption timed out'}), 500
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
@@ -619,7 +742,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if method == 'dhcp':
                 # Check if we already have a working network
                 current_ip = net_manager.get_current_ip()
-                if current_ip and net_manager.test_connectivity():
+                if net_manager.test_connectivity():
                     flash(f'Network already configured: {current_ip}', 'success')
                     return redirect(url_for('wizard_storage'))
 
@@ -660,44 +783,96 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
         if request.method == 'POST':
             selected_disk = request.form.get('disk')
+            valid_disk_paths = {d['path'] for d in disks}
+            if selected_disk not in valid_disk_paths:
+                flash('Invalid disk selection', 'error')
+                return redirect(url_for('wizard_storage'))
             session['selected_disk'] = selected_disk
-            return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_ipv6')))
+            return redirect(url_for(_NEXT_STEP.get('storage', 'wizard_connectivity')))
 
         return render_template('wizard/storage.html',
                              disks=disks)
 
+    @app.route('/wizard/connectivity', methods=['GET', 'POST'])
+    @require_auth
+    def wizard_connectivity():
+        """Connectivity options configuration step."""
+        wallet_address = session.get('admin_wallet', '')
+
+        # Resolve broker chain config from wallet address
+        broker_chain = None
+        if _broker and wallet_address:
+            broker_chain = _resolve_broker_chain(_broker, wallet_address)
+
+        if request.method == 'POST':
+            selected = request.form.getlist('connectivity_options')
+            connectivity = {'options': selected}
+
+            if 'manual' in selected:
+                manual_prefix = request.form.get('manual_prefix', '')
+                if manual_prefix and not is_valid_ipv6_prefix(manual_prefix):
+                    flash('Invalid IPv6 prefix format', 'error')
+                    return redirect(url_for('wizard_connectivity'))
+                try:
+                    alloc_size = int(request.form.get('allocation_size', 64))
+                except (ValueError, TypeError):
+                    alloc_size = 64
+                alloc_size = max(48, min(120, alloc_size))
+                connectivity['manual'] = {
+                    'prefix': manual_prefix,
+                    'allocation_size': alloc_size,
+                }
+
+            if 'broker' in selected and _broker:
+                if not broker_chain:
+                    flash('No supported chain detected for broker mode', 'error')
+                    return redirect(url_for('wizard_connectivity'))
+                broker_reg = request.form.get('broker_registry', '')
+                # Validate using chain-specific pattern from manifest
+                if broker_reg and broker_chain:
+                    pattern = broker_chain.get('contract_validation', '')
+                    if pattern and not re.match(pattern, broker_reg):
+                        flash('Invalid broker registry address', 'error')
+                        return redirect(url_for('wizard_connectivity'))
+                connectivity['broker'] = {
+                    'broker_registry': broker_reg,
+                }
+
+            # Map to session['ipv6'] for backwards compat with finalize.py
+            if 'broker' in selected:
+                session['ipv6'] = {
+                    'mode': 'broker',
+                    'broker_registry': connectivity.get('broker', {}).get('broker_registry', ''),
+                }
+            elif 'manual' in selected:
+                session['ipv6'] = {
+                    'mode': 'manual',
+                    'prefix': connectivity.get('manual', {}).get('prefix', ''),
+                    'allocation_size': connectivity.get('manual', {}).get('allocation_size', 64),
+                }
+            else:
+                session['ipv6'] = {'mode': 'none'}
+
+            session['connectivity'] = connectivity
+            return redirect(url_for(_NEXT_STEP.get('connectivity', 'wizard_admin_commands')))
+
+        # Build exclusion map: manual and broker are mutually exclusive
+        exclusion_map = {'manual': ['broker'], 'broker': ['manual']}
+        if _broker:
+            manifest_excludes = _broker['manifest'].get('excludes', [])
+            if manifest_excludes:
+                exclusion_map['broker'] = manifest_excludes
+
+        return render_template('wizard/connectivity.html',
+                             broker_chain=broker_chain,
+                             exclusion_map=json.dumps(exclusion_map),
+                             prev_step_url=url_for(_PREV_STEP.get('connectivity', 'wizard_storage')))
+
     @app.route('/wizard/ipv6', methods=['GET', 'POST'])
     @require_auth
     def wizard_ipv6():
-        """IPv6 configuration step."""
-        # Get broker registry from engine config if available
-        engine_data = session.get(_engine_session_key, {}) if _engine_session_key else {}
-        broker_registry = get_broker_registry(engine_data.get('chain_id'))
-
-        if request.method == 'POST':
-            mode = request.form.get('ipv6_mode')
-            session['ipv6'] = {
-                'mode': mode,
-            }
-
-            if mode == 'broker':
-                session['ipv6'].update({
-                    'broker_registry': request.form.get('broker_registry'),
-                    'prefix': request.form.get('broker_prefix'),
-                    'broker_node': request.form.get('broker_node'),
-                    'wg_config': request.form.get('broker_wg_config'),
-                })
-            else:
-                session['ipv6'].update({
-                    'prefix': request.form.get('manual_prefix'),
-                    'allocation_size': request.form.get('allocation_size'),
-                })
-
-            return redirect(url_for('wizard_admin_commands'))
-
-        return render_template('wizard/ipv6.html',
-                             broker_registry=broker_registry,
-                             prev_step_url=url_for(_PREV_STEP.get('ipv6', 'wizard_storage')))
+        """Backwards-compat redirect — provisioners may still reference this."""
+        return redirect(url_for('wizard_connectivity'))
 
     @app.route('/wizard/admin-commands', methods=['GET', 'POST'])
     @require_auth
@@ -719,7 +894,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'destination_mode': request.form.get('destination_mode', 'self'),
                     'knock_command': request.form.get('knock_command', ''),
                     'knock_ports': ports,
-                    'knock_timeout': int(request.form.get('knock_timeout', 300)),
+                    'knock_timeout': max(30, min(3600, int(request.form.get('knock_timeout', 300)))),
                 })
 
             session['admin_commands'] = admin_commands
@@ -896,20 +1071,31 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """List available disks."""
         return jsonify(detect_disks())
 
-    # IPv6 API endpoints
-    @app.route('/api/ipv6/broker-request', methods=['POST'])
+    # Connectivity / IPv6 API endpoints
+    @app.route('/api/connectivity/fetch-registry')
     @require_auth
-    def api_ipv6_broker_request():
-        """Request IPv6 allocation from broker network."""
-        data = request.get_json()
-        registry = data.get('registry')
+    def api_connectivity_fetch_registry():
+        """Fetch broker registry contract via broker's module."""
+        if not _broker or not _broker.get('module'):
+            return jsonify({'success': False, 'error': 'No broker installed'}), 404
 
-        if not registry or not _validate_address(registry):
-            return jsonify({'success': False, 'error': 'Invalid registry address'}), 400
+        wallet = session.get('admin_wallet', '')
+        if not wallet:
+            return jsonify({'success': False, 'error': 'No wallet connected'}), 400
 
-        # Call broker-client to request allocation
-        result = request_broker_allocation(registry)
-        return jsonify(result)
+        testing = Path('/etc/blockhost/.testing-mode').exists()
+        fetch_fn = getattr(_broker['module'], 'fetch_registry', None)
+        if not fetch_fn:
+            return jsonify({'success': False, 'error': 'Broker module has no fetch_registry'}), 500
+
+        try:
+            registry = fetch_fn(wallet, testing=testing)
+            if registry:
+                return jsonify({'success': True, 'registry': registry})
+            else:
+                return jsonify({'success': False, 'error': 'Registry not found for this wallet'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
 
     @app.route('/api/ipv6/manual', methods=['POST'])
     @require_auth
@@ -940,22 +1126,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
             'prefix': ipv6.get('prefix'),
         })
 
-    @app.route('/api/ipv6/broker-registry')
-    @require_auth
-    def api_ipv6_broker_registry():
-        """Fetch broker registry contract address from GitHub."""
-        chain_id = request.args.get('chain_id', '11155111')
-
-        registry = fetch_broker_registry_from_github(chain_id)
-        if registry:
-            return jsonify({'success': True, 'registry': registry, 'chain_id': chain_id})
-        else:
-            # Fallback to hardcoded values
-            fallback = get_broker_registry(chain_id)
-            if fallback:
-                return jsonify({'success': True, 'registry': fallback, 'chain_id': chain_id, 'source': 'fallback'})
-            return jsonify({'success': False, 'error': 'Registry not found for this chain'})
-
     # Template API endpoints
     @app.route('/api/template/build', methods=['POST'])
     @require_auth
@@ -963,17 +1133,17 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """Start VM template build (async)."""
         job_id = f"template-{secrets.token_hex(4)}"
 
-        thread = threading.Thread(
-            target=_build_vm_template,
-            args=(job_id,)
-        )
-        thread.start()
-
         _jobs[job_id] = {
             'status': 'running',
             'progress': 0,
             'message': 'Starting template build...',
         }
+
+        thread = threading.Thread(
+            target=_build_vm_template,
+            args=(job_id,)
+        )
+        thread.start()
 
         return jsonify({'job_id': job_id})
 
@@ -1131,18 +1301,15 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'error': 'No admin signature available for encryption'}), 500
 
         try:
-            result = subprocess.run(
-                ['pam_web3_tool', 'encrypt-symmetric',
-                 '--signature', admin_signature,
-                 '--plaintext', plaintext],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return jsonify({'error': f'Encryption failed: {result.stderr}'}), 500
+            # Encrypt config (engine-specific or legacy fallback)
+            encrypt_fn = None
+            if _engine and _engine.get('module'):
+                encrypt_fn = getattr(_engine['module'], 'encrypt_config', None)
 
-            ciphertext_hex = parse_pam_ciphertext(result.stdout)
-            if not ciphertext_hex:
-                return jsonify({'error': 'Could not parse encrypted output'}), 500
+            if encrypt_fn:
+                ciphertext_hex = encrypt_fn(admin_signature, plaintext)
+            else:
+                ciphertext_hex = _bhcrypt_encrypt(admin_signature, plaintext)
 
             return Response(
                 ciphertext_hex,
@@ -1150,9 +1317,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 headers={'Content-Disposition': 'attachment; filename=blockhost-config.enc'},
             )
         except FileNotFoundError:
-            return jsonify({'error': 'pam_web3_tool not installed'}), 500
+            return jsonify({'error': 'Encryption tool not installed'}), 500
         except subprocess.TimeoutExpired:
             return jsonify({'error': 'Encryption timed out'}), 500
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/api/finalize/retry', methods=['POST'])
     @require_auth
