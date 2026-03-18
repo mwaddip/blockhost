@@ -22,3 +22,9 @@
 [submodule "blockhost-engine-evm"]
 	path = blockhost-engine-evm
 	url = https://github.com/mwaddip/blockhost-engine-evm
+[submodule "blockhost-monitor"]
+	path = blockhost-monitor
+	url = https://github.com/mwaddip/blockhost-monitor
+[submodule "blockhost-engine-cardano"]
+	path = blockhost-engine-cardano
+	url = https://github.com/mwaddip/blockhost-engine-cardano

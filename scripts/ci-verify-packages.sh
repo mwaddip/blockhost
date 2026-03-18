@@ -88,9 +88,13 @@ else
     check_package "$HOST_DIR" "blockhost-engine-*_*.deb"         "blockhost-engine"
 fi
 check_package "$HOST_DIR" "blockhost-broker-client_*.deb"  "blockhost-broker-client"
+check_package "$HOST_DIR" "blockhost-watchdog_*.deb"      "blockhost-watchdog"
 
-# Template packages (1)
+# Template packages
 check_package "$TEMPLATE_DIR" "libpam-web3_*.deb"          "libpam-web3"
+if [ -n "$ENGINE" ]; then
+    check_package "$TEMPLATE_DIR" "libpam-web3-${ENGINE}_*.deb" "libpam-web3-${ENGINE}"
+fi
 
 echo ""
 if [ "$ERRORS" -gt 0 ]; then
