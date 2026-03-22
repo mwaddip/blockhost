@@ -1,0 +1,17 @@
+#!/bin/bash
+# Generate a fresh OTP for the BlockHost web installer.
+# Use when the installer session has expired or the process was restarted.
+set -e
+
+cd /opt/blockhost
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+from pathlib import Path
+from installer.common.otp import OTPManager, OTP_STATE_FILE
+
+OTP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+mgr = OTPManager(str(OTP_STATE_FILE.parent))
+code = mgr.generate(force=True)
+print(code)
+"

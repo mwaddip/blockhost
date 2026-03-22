@@ -26,3 +26,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 vendor/
+
+# Docs build artifacts
+docs/plans/
+docs/package-lock.json
