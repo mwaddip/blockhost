@@ -1507,12 +1507,12 @@ def run_server(host: str = '0.0.0.0', port: int = 80, use_https: bool = False):
             context.load_cert_chain(str(cert_path), str(key_path))
             testing_mode = Path('/etc/blockhost/.testing-mode').exists()
             app.run(host=host, port=443, ssl_context=context,
-                    debug=testing_mode, use_reloader=False)
+                    debug=testing_mode, use_reloader=testing_mode)
             return
 
     # HTTP mode
     testing_mode = Path('/etc/blockhost/.testing-mode').exists()
-    app.run(host=host, port=port, debug=testing_mode, use_reloader=False)
+    app.run(host=host, port=port, debug=testing_mode, use_reloader=testing_mode)
 
 
 def main():

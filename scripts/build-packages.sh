@@ -208,22 +208,13 @@ log "=== Building ${ENGINE_NAME} ==="
 if [ -f "${ENGINE_DIR}/packaging/build.sh" ]; then
     cd "$ENGINE_DIR"
     rm -f packaging/blockhost-engine*_*.deb
-    rm -f packaging/blockhost-auth-svc_*.deb
+
     if ./packaging/build.sh; then
         DEB=$(find packaging -name "blockhost-engine*_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$HOST_PKG_DIR/"
             BUILT_PACKAGES+=("$ENGINE_NAME")
             log "Built: $(basename "$DEB")"
-        fi
-        # Template package: blockhost-auth-svc (for VMs)
-        TEMPLATE_DEB=$(find packaging -name "blockhost-auth-svc_*.deb" -type f | head -1)
-        if [ -n "$TEMPLATE_DEB" ]; then
-            cp "$TEMPLATE_DEB" "$TEMPLATE_PKG_DIR/"
-            BUILT_PACKAGES+=("blockhost-auth-svc")
-            log "Built: $(basename "$TEMPLATE_DEB") (for VM template)"
-        else
-            warn "blockhost-auth-svc template package not built (bun required)"
         fi
     else
         FAILED_PACKAGES+=("$ENGINE_NAME")

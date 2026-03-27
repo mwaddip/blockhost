@@ -28,13 +28,15 @@ ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
 
 # Engine-supplied address format (loaded once at startup)
 _address_re = None
+_engine_name = None
 
 
-def _load_engine_constraints():
-    """Load address format pattern from engine manifest."""
-    global _address_re
+def _load_engine_manifest():
+    """Load engine name and address format pattern from engine manifest."""
+    global _address_re, _engine_name
     try:
         manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
+        _engine_name = manifest.get('name')
         ap = manifest.get('constraints', {}).get('address_pattern')
         if ap:
             _address_re = re.compile(ap)
@@ -42,7 +44,7 @@ def _load_engine_constraints():
         pass
 
 
-_load_engine_constraints()
+_load_engine_manifest()
 
 
 @dataclass
@@ -505,12 +507,18 @@ def run_full_validation() -> ValidationReport:
         required_keys=db_yaml_keys
     ))
 
-    # web3-defaults.yaml
+    # web3-defaults.yaml — required keys depend on the engine
+    if _engine_name == 'cardano':
+        web3_required = ['blockchain.network', 'blockchain.nft_policy_id',
+                         'blockchain.subscription_policy_id', 'blockchain.server_public_key']
+    else:
+        # EVM / OPNet default
+        web3_required = ['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract',
+                         'blockchain.subscription_contract', 'blockchain.server_public_key']
     report.add(_check_yaml_syntax(
         etc_blockhost / 'web3-defaults.yaml',
         "Config", "web3-defaults.yaml",
-        required_keys=['blockchain.chain_id', 'blockchain.rpc_url', 'blockchain.nft_contract',
-                       'blockchain.subscription_contract', 'blockchain.server_public_key']
+        required_keys=web3_required
     ))
 
     # blockhost.yaml
@@ -765,21 +773,34 @@ def run_full_validation() -> ValidationReport:
     # ========== ENVIRONMENT FILE ==========
 
     env_path = Path('/opt/blockhost/.env')
+    if _engine_name == 'cardano':
+        env_required = ['CARDANO_NETWORK', 'NFT_POLICY_ID', 'SUBSCRIPTION_POLICY_ID', 'DEPLOYER_KEY_FILE']
+    else:
+        env_required = ['RPC_URL', 'NFT_CONTRACT', 'DEPLOYER_KEY_FILE', 'BLOCKHOST_CONTRACT']
     report.add(_check_env_file(
         env_path,
-        required_vars=['RPC_URL', 'NFT_CONTRACT', 'DEPLOYER_KEY_FILE', 'BLOCKHOST_CONTRACT']
+        required_vars=env_required
     ))
     if env_path.exists():
         report.add(_check_file_permissions(env_path, 0o640, "Permissions", ".env file"))
-        # Check that RPC_URL is set
         try:
             env_content = env_path.read_text()
-            if 'RPC_URL=' in env_content:
-                report.add(ValidationResult("Environment", "RPC variable", True, "RPC endpoint configured"))
+            if _engine_name == 'cardano':
+                rpc_key = 'CARDANO_NETWORK='
+                rpc_label = "Network variable"
+                rpc_ok = "Cardano network configured"
+                rpc_fail = "No CARDANO_NETWORK variable found in .env"
             else:
-                report.add(ValidationResult("Environment", "RPC variable", False, "No RPC variable found in .env"))
+                rpc_key = 'RPC_URL='
+                rpc_label = "RPC variable"
+                rpc_ok = "RPC endpoint configured"
+                rpc_fail = "No RPC variable found in .env"
+            if rpc_key in env_content:
+                report.add(ValidationResult("Environment", rpc_label, True, rpc_ok))
+            else:
+                report.add(ValidationResult("Environment", rpc_label, False, rpc_fail))
         except Exception as e:
-            report.add(ValidationResult("Environment", "RPC variable", False, f"Error reading .env: {e}"))
+            report.add(ValidationResult("Environment", "Environment check", False, f"Error reading .env: {e}"))
 
     # ========== PRIVILEGE SEPARATION ==========
 
