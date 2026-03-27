@@ -155,6 +155,7 @@ if [ ! -f "$STEP_PACKAGES" ]; then
         FALLBACK_ORDER=(blockhost-common)
         [ -n "$PROV_PKG" ] && FALLBACK_ORDER+=("$PROV_PKG")
         FALLBACK_ORDER+=(blockhost-broker-client)
+        FALLBACK_ORDER+=(blockhost-watchdog)
 
         for pkg in "${FALLBACK_ORDER[@]}"; do
             DEB=$(find "$BLOCKHOST_DIR/packages/host" -name "${pkg}_*.deb" -type f 2>/dev/null | head -1)

@@ -46,6 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `blockhost-engine-evm/`
 - `blockhost-engine-opnet/`
 - `blockhost-broker/`
+- `blockhost-monitor/`
 
 **When changes to a submodule are needed:**
 1. Do NOT attempt to edit files in submodule directories
@@ -91,13 +92,14 @@ Packages built from submodules during first-boot:
 
 | Submodule | Build Command | Package(s) | Install Location |
 |-----------|---------------|------------|------------------|
-| libpam-web3 | `packaging/build-deb.sh` | libpam-web3 | VM template dir |
+| libpam-web3 | `build.sh --with-backends=<engine>` | libpam-web3, libpam-web3-\<engine\> | VM template dir |
 | blockhost-common | `build.sh` | blockhost-common | Host |
 | blockhost-provisioner-proxmox | `build-deb.sh` | blockhost-provisioner-proxmox | Host (Proxmox) |
 | blockhost-provisioner-libvirt | `build-deb.sh` | blockhost-provisioner-libvirt | Host (libvirt) |
 | blockhost-engine-evm | `packaging/build.sh` | blockhost-engine-evm | Host |
 | blockhost-engine-opnet | `packaging/build.sh` | blockhost-engine-opnet | Host |
 | blockhost-broker | `scripts/build-deb.sh` | blockhost-broker-client | Host |
+| blockhost-monitor | `build.sh` | blockhost-watchdog | Host |
 
 **Note**: `libpam-web3` is stored in `/var/lib/blockhost/template-packages/` for inclusion in VM templates, not installed on the host directly.
 

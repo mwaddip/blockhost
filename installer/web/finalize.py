@@ -83,6 +83,9 @@ def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
 
 def run_finalization_with_state(setup_state, config: dict, provisioner, engine=None):
     """Run the full finalization process with persistent state tracking."""
+    # Make engine available to step functions via config
+    if engine:
+        config['_engine'] = engine
     steps = get_finalization_steps(provisioner, engine)
 
     try:
@@ -739,6 +742,17 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
                 {'path_prefix': '/admin'}, indent=2))
             set_blockhost_ownership(admin_config_file, 0o644)
 
+        # Engine-specific nginx locations (e.g. chain API reverse proxy)
+        engine_locations = ""
+        _engine = config.get('_engine')
+        if _engine and _engine.get('module'):
+            get_locs = getattr(_engine['module'], 'get_nginx_extra_locations', None)
+            if get_locs:
+                extra = get_locs(config)
+                if extra:
+                    # Indent each line for nginx block nesting
+                    engine_locations = '\n' + extra.rstrip('\n') + '\n'
+
         # Write nginx config
         nginx_config = f"""server {{
     listen 443 ssl;
@@ -764,6 +778,7 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }}
+{engine_locations}
 }}
 
 server {{

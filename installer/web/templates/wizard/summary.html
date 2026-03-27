@@ -634,7 +634,13 @@ function appendDataRow(container, id, key, value) {
     const code = document.createElement('code');
     code.className = 'contract-addr';
     code.id = 'step-data-' + id.replace(/[^a-z0-9_-]/gi, '-');
-    code.textContent = value;
+    code.dataset.fullValue = value;
+    if (value.length > 30) {
+        code.textContent = value.slice(0, 14) + '...' + value.slice(-14);
+        code.title = value;
+    } else {
+        code.textContent = value;
+    }
 
     row.appendChild(label);
     row.appendChild(code);
@@ -788,36 +794,39 @@ function showError(stepId, message) {
 }
 
 function copyAddress(elementId) {
-    var text = document.getElementById(elementId).textContent;
-    navigator.clipboard.writeText(text).then(function() {
-        var btn = document.getElementById(elementId).nextElementSibling;
+    var el = document.getElementById(elementId);
+    var text = el.dataset.fullValue || el.textContent;
+
+    function showCopied() {
+        var btn = el.nextElementSibling;
+        if (!btn) return;
         btn.classList.add('copied');
         btn.innerHTML = '&#10003;';
         setTimeout(function() {
             btn.classList.remove('copied');
             btn.innerHTML = '&#128203;';
         }, 2000);
-    }).catch(function() {
-        // Fallback for Firefox on HTTP (clipboard API requires secure context)
-        var range = document.createRange();
-        range.selectNodeContents(document.getElementById(elementId));
-        var sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
+    }
+
+    function fallbackCopy() {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
         try {
             document.execCommand('copy');
-            var btn = document.getElementById(elementId).nextElementSibling;
-            btn.classList.add('copied');
-            btn.innerHTML = '&#10003;';
-            setTimeout(function() {
-                btn.classList.remove('copied');
-                btn.innerHTML = '&#128203;';
-            }, 2000);
-        } catch(e) {
-            // At least the text is selected for manual copy
-        }
-        sel.removeAllRanges();
-    });
+            showCopied();
+        } catch(e) { /* text is at least selected */ }
+        document.body.removeChild(ta);
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied).catch(fallbackCopy);
+    } else {
+        fallbackCopy();
+    }
 }
 
 function reboot() {

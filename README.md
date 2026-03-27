@@ -95,6 +95,55 @@ See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for the full build reference and 
 
 ---
 
+## Contributing with coding agents
+
+> **Full guide:** [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — also available as a Claude Code skill (`blockhost-development`). If you're using Claude Code, invoke the skill for the complete reference. If not, read the guide and follow the principles below.
+
+This project is maintained across multiple repositories using coding agent sessions. If you want to work on it efficiently:
+
+### Session architecture
+
+- **One main session** manages this repo with all submodules checked out. This session:
+  - Owns the `facts/` submodule — the interface contracts that define how everything connects
+  - Knows the full infrastructure through the defined interfaces and their boundaries
+  - Writes specs and prompts for separate sessions that maintain each submodule's code
+  - Pulls submodule updates, commits pointer changes, builds packages and ISOs
+  - **Never edits submodule source code directly**
+
+- **Separate sessions** for each submodule (engines, provisioners, common, libpam, broker). Each session:
+  - Receives prompts from the main session (markdown files in `prompts/`)
+  - Works within its interface contract from `facts/`
+  - Pushes to its own repo — the main session pulls and integrates
+
+### Interface discipline
+
+- **Respect the interface boundaries.** The contracts in `facts/` define every cross-boundary interaction. Read them before changing anything.
+- **If an interface change is needed:**
+  1. Update the `facts/` interface contract first
+  2. Push facts, submodules pull in the new contract
+  3. Submodule sessions build according to the updated contract
+- **When adding new engines or provisioners:**
+  - The interface is complete — it should provide everything you need
+  - Every other component is agnostic of whatever engine/provisioner is installed. Keep it that way.
+  - No chain-specific exceptions in other components' build scripts, validation code, or config templates
+  - Use state wherever sensible over config files. Presence of a file, a UTXO, a directory — these are cheaper and more reliable than config keys.
+
+### Practical workflow
+
+- Write prompts to `prompts/` as markdown files — disposable after the submodule session applies them
+- Use the btrfs revert/resume cycle for rapid VM testing — swap `.deb` files without rebuilding the ISO
+- Always run `build-packages.sh` before `build-iso.sh` — the ISO copies pre-built packages, it doesn't build them
+- Config files like `web3-defaults.yaml` and `.env` are engine-owned — common ships empty skeletons, the engine's finalization fills them
+- `validate_system.py` reads `engine.json` for chain-specific validation — never hardcode chain assumptions in shared code
+
+### Dependency philosophy
+
+- If a library does 300 things and you need 3, write the 3. See [noble-bip32ed25519](https://github.com/mwaddip/noble-bip32ed25519) and [cmttk](https://github.com/mwaddip/cmttk).
+- GitHub deps (`"pkg": "github:user/repo"`) for small internal libraries — no npm publishing ceremony
+- Bundles should be self-contained — no runtime `node_modules` on the target system
+
+---
+
 ## Security
 
 BlockHost is built with security as a core design principle: OS-level authentication, on-chain identity, encrypted credentials, zero standing admin access. That said, the code has not been formally audited. Review before deploying with real assets.

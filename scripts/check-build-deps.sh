@@ -115,6 +115,24 @@ install_missing() {
         source "$HOME/.cargo/env"
     fi
 
+    # --- cargo-zigbuild (glibc cross-compilation) ---
+    if [[ " ${MISSING_CMDS[*]} " == *" cargo-zigbuild "* ]]; then
+        echo ""
+        echo "Installing cargo-zigbuild..."
+        cargo install cargo-zigbuild
+    fi
+
+    # --- zig (needed by cargo-zigbuild) ---
+    if [[ " ${MISSING_CMDS[*]} " == *" zig "* ]]; then
+        echo ""
+        echo "Installing zig..."
+        if command -v snap >/dev/null 2>&1; then
+            sudo snap install zig --classic --beta
+        else
+            echo "Error: snap not available. Install zig manually: https://ziglang.org/download/"
+        fi
+    fi
+
     # --- Foundry (EVM engine only) ---
     if [[ " ${MISSING_CMDS[*]} " == *" forge "* ]]; then
         echo ""
@@ -263,11 +281,27 @@ main() {
     # curl (Foundry installer, various downloads)
     check_command curl curl
 
+    # cargo-zigbuild (libpam-web3 — cross-compile against Debian 12 glibc)
+    if command -v cargo-zigbuild >/dev/null 2>&1; then
+        log_ok "cargo-zigbuild ($(cargo-zigbuild --version 2>/dev/null | head -1))"
+    elif command -v cargo >/dev/null 2>&1; then
+        log_missing "cargo-zigbuild (install: cargo install cargo-zigbuild)"
+        MISSING_CMDS+=("cargo-zigbuild")
+    fi
+
     # C toolchain (libpam-web3 Rust build needs C linker)
     check_command gcc build-essential
 
     # pkg-config (libpam-web3 Rust build, native library discovery)
     check_command pkg-config pkg-config
+
+    # zig (needed by cargo-zigbuild for cross-compilation)
+    if command -v zig >/dev/null 2>&1; then
+        log_ok "zig ($(zig version 2>/dev/null))"
+    else
+        log_missing "zig (install: sudo snap install zig --classic --beta)"
+        MISSING_CMDS+=("zig")
+    fi
 
     # ----------------------------------------
     log_section "Required Files"
