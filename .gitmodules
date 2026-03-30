@@ -28,3 +28,6 @@
 [submodule "blockhost-engine-cardano"]
 	path = blockhost-engine-cardano
 	url = https://github.com/mwaddip/blockhost-engine-cardano
+[submodule "blockhost-engine-ergo"]
+	path = blockhost-engine-ergo
+	url = https://github.com/mwaddip/blockhost-engine-ergo.git
