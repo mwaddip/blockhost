@@ -112,25 +112,30 @@ BUILT_PACKAGES=()
 FAILED_PACKAGES=()
 
 #
-# 1. libpam-web3 core + chain plugin (for VM template)
+# 1. libpam-web3 (for VM template)
+#
+# NOTE: libpam-web3-tools is no longer built — bhcrypt is shipped by the engine package.
+# cargo build --release (run by build-deb.sh) still compiles the binary
+# as a side effect — the engine build picks it up from target/release/.
 #
 log "=== Building libpam-web3 (PAM module + ${ENGINE} plugin for VMs) ==="
-if [ -f "$PROJECT_DIR/libpam-web3/build.sh" ]; then
+if [ -d "$PROJECT_DIR/libpam-web3" ] && [ -f "$PROJECT_DIR/libpam-web3/build.sh" ]; then
     cd "$PROJECT_DIR/libpam-web3"
     rm -f packaging/libpam-web3_*.deb
+    rm -f plugins/*/packaging/libpam-web3-*_*.deb 2>/dev/null
     if ./build.sh --with-backends="$ENGINE"; then
-        # Core package
+        # Copy core PAM module
         DEB=$(find packaging -maxdepth 1 -name "libpam-web3_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$TEMPLATE_PKG_DIR/"
             BUILT_PACKAGES+=("libpam-web3")
             log "Built: $(basename "$DEB") (for VM template)"
         fi
-        # Chain plugin package
-        PLUGIN_DEB=$(find "plugins/$ENGINE/packaging" -name "libpam-web3-${ENGINE}_*.deb" -type f 2>/dev/null | head -1)
+        # Copy chain plugin .deb if built
+        PLUGIN_DEB=$(find plugins -name "libpam-web3-*_*.deb" -type f 2>/dev/null | head -1)
         if [ -n "$PLUGIN_DEB" ]; then
             cp "$PLUGIN_DEB" "$TEMPLATE_PKG_DIR/"
-            BUILT_PACKAGES+=("libpam-web3-${ENGINE}")
+            BUILT_PACKAGES+=("$(basename "$PLUGIN_DEB" | sed 's/_.*$//')")
             log "Built: $(basename "$PLUGIN_DEB") (for VM template)"
         fi
     else
@@ -138,7 +143,7 @@ if [ -f "$PROJECT_DIR/libpam-web3/build.sh" ]; then
         warn "Failed to build libpam-web3"
     fi
 else
-    warn "libpam-web3/build.sh not found"
+    warn "libpam-web3 submodule not found"
 fi
 echo ""
 
@@ -208,13 +213,22 @@ log "=== Building ${ENGINE_NAME} ==="
 if [ -f "${ENGINE_DIR}/packaging/build.sh" ]; then
     cd "$ENGINE_DIR"
     rm -f packaging/blockhost-engine*_*.deb
-
+    rm -f packaging/blockhost-auth-svc_*.deb
     if ./packaging/build.sh; then
         DEB=$(find packaging -name "blockhost-engine*_*.deb" -type f | head -1)
         if [ -n "$DEB" ]; then
             cp "$DEB" "$HOST_PKG_DIR/"
             BUILT_PACKAGES+=("$ENGINE_NAME")
             log "Built: $(basename "$DEB")"
+        fi
+        # Template package: blockhost-auth-svc (for VMs)
+        TEMPLATE_DEB=$(find packaging -name "blockhost-auth-svc_*.deb" -type f | head -1)
+        if [ -n "$TEMPLATE_DEB" ]; then
+            cp "$TEMPLATE_DEB" "$TEMPLATE_PKG_DIR/"
+            BUILT_PACKAGES+=("blockhost-auth-svc")
+            log "Built: $(basename "$TEMPLATE_DEB") (for VM template)"
+        else
+            warn "blockhost-auth-svc template package not built (bun required)"
         fi
     else
         FAILED_PACKAGES+=("$ENGINE_NAME")
@@ -245,28 +259,6 @@ if [ -f "$PROJECT_DIR/blockhost-broker/scripts/build-deb.sh" ]; then
     fi
 else
     warn "blockhost-broker/scripts/build-deb.sh not found"
-fi
-echo ""
-
-#
-# 6. blockhost-watchdog (host monitor)
-#
-log "=== Building blockhost-watchdog ==="
-if [ -f "$PROJECT_DIR/blockhost-monitor/build.sh" ]; then
-    cd "$PROJECT_DIR/blockhost-monitor"
-    if bash build.sh; then
-        DEB=$(find build -name "blockhost-watchdog_*.deb" -type f | head -1)
-        if [ -n "$DEB" ]; then
-            cp "$DEB" "$HOST_PKG_DIR/"
-            BUILT_PACKAGES+=("blockhost-watchdog")
-            log "Built: $(basename "$DEB")"
-        fi
-    else
-        FAILED_PACKAGES+=("blockhost-watchdog")
-        warn "Failed to build blockhost-watchdog"
-    fi
-else
-    warn "blockhost-monitor/build.sh not found"
 fi
 echo ""
 

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## OVERRIDES (LOAD FIRST)
+
+**Before loading anything else, read and internalize `~/projects/OVERRIDES.md`.** It contains cross-project rules that apply to all sessions regardless of repository.
+
 # BlockHost - Pluggable VM Hosting Platform
 
 ## SETTINGS.md (HIGHEST PRIORITY)
