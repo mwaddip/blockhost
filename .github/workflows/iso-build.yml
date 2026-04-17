@@ -101,6 +101,12 @@ jobs:
 
       - name: Init required submodules
         run: |
+          # libpam-web3's .gitmodules uses SSH URLs (git@github.com:...) for its
+          # chain plugin submodules. CI runners have no SSH key, so rewrite
+          # SSH -> HTTPS transparently via git's insteadOf so anonymous access
+          # works for public repos.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
           git submodule update --init blockhost-common "blockhost-engine-${ENGINE}" blockhost-broker blockhost-monitor libpam-web3 facts
           git submodule update --init blockhost-provisioner-${BACKEND}
           # libpam-web3 hosts chain plugins as nested submodules at plugins/<chain>.
