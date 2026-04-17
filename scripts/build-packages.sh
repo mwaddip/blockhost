@@ -263,6 +263,29 @@ fi
 echo ""
 
 #
+# 6. blockhost-watchdog (from blockhost-monitor submodule)
+#
+log "=== Building blockhost-watchdog (from blockhost-monitor) ==="
+if [ -f "$PROJECT_DIR/blockhost-monitor/build.sh" ]; then
+    cd "$PROJECT_DIR/blockhost-monitor"
+    rm -rf build
+    if ./build.sh; then
+        DEB=$(find build -name "blockhost-watchdog_*.deb" -type f | head -1)
+        if [ -n "$DEB" ]; then
+            cp "$DEB" "$HOST_PKG_DIR/"
+            BUILT_PACKAGES+=("blockhost-watchdog")
+            log "Built: $(basename "$DEB")"
+        fi
+    else
+        FAILED_PACKAGES+=("blockhost-watchdog")
+        warn "Failed to build blockhost-watchdog"
+    fi
+else
+    warn "blockhost-monitor/build.sh not found"
+fi
+echo ""
+
+#
 # Summary
 #
 log "=========================================="
