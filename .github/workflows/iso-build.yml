@@ -20,8 +20,13 @@ on:
       - 'v*'
 
 jobs:
-  build-iso:
-    name: Build BlockHost ISO
+  #
+  # Dev builds — single ISO from workflow_dispatch inputs, on the self-hosted
+  # blockhost-iso runner that has the Debian netinst cached + local apt-cacher.
+  #
+  build-dev:
+    name: Dev ISO (${{ inputs.backend }}/${{ inputs.engine }})
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, blockhost-iso]
     env:
       BACKEND: ${{ inputs.backend || 'proxmox' }}
@@ -30,12 +35,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Init required submodules
         run: |
-          # Engine submodule: blockhost-engine-<name>, fallback to blockhost-engine (pre-rename EVM)
           ENGINE_SUB="blockhost-engine-${ENGINE}"
           if [ ! -d "$ENGINE_SUB" ] && [ -d "blockhost-engine" ]; then
             ENGINE_SUB="blockhost-engine"
           fi
-          git submodule update --init blockhost-common "$ENGINE_SUB" blockhost-broker libpam-web3 facts
+          git submodule update --init blockhost-common "$ENGINE_SUB" blockhost-broker blockhost-monitor libpam-web3 facts
           git submodule update --init blockhost-provisioner-${{ env.BACKEND }}
 
       - name: Symlink base ISO from project directory
@@ -63,18 +67,93 @@ jobs:
       - name: Build ISO
         run: |
           ARGS="--backend $BACKEND --engine $ENGINE"
-          # workflow_dispatch: use input; tag push: always enable testing
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.testing_mode }}" = "true" ]; then
-              ARGS="$ARGS --testing --apt-proxy http://192.168.122.1:3142"
-            fi
+          if [ "${{ inputs.testing_mode }}" = "true" ]; then
+            ARGS="$ARGS --testing --apt-proxy http://192.168.122.1:3142"
           fi
           sudo ./scripts/build-iso.sh $ARGS
 
       - name: Upload ISO artifact
-        if: ${{ github.event_name == 'push' }}
         uses: actions/upload-artifact@v4
         with:
-          name: blockhost-iso
+          name: blockhost-iso-${{ env.BACKEND }}-${{ env.ENGINE }}
           path: build/blockhost_*.iso
           retention-days: 30
+
+  #
+  # Release builds — matrix of four libvirt ISOs, one per engine, on
+  # ubuntu-latest. Attached to the GitHub Release for the tag.
+  #
+  build-release:
+    name: Release ISO (libvirt/${{ matrix.engine }})
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [evm, opnet, cardano, ergo]
+    env:
+      BACKEND: libvirt
+      ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init required submodules
+        run: |
+          git submodule update --init blockhost-common "blockhost-engine-${ENGINE}" blockhost-broker blockhost-monitor libpam-web3 facts
+          git submodule update --init blockhost-provisioner-${BACKEND}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libpam-web3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: blockhost-monitor/go.sum
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev libclang-dev xorriso isolinux
+
+      - name: Download base Debian netinst ISO
+        run: |
+          mkdir -p build
+          BASE=https://cdimage.debian.org/debian-cd/current/amd64/iso-cd
+          FILE=$(curl -fsSL "$BASE/SHA256SUMS" | awk '/debian-12[^ ]*-netinst\.iso$/ {print $2; exit}')
+          if [ -z "$FILE" ]; then
+            echo "Could not determine netinst ISO filename from SHA256SUMS"
+            exit 1
+          fi
+          echo "Fetching $FILE"
+          curl -fsSL -o build/debian-12-netinst.iso "$BASE/$FILE"
+
+      - name: Build packages
+        run: ./scripts/build-packages.sh --backend "$BACKEND" --engine "$ENGINE"
+
+      - name: Verify packages
+        run: ./scripts/ci-verify-packages.sh --backend "$BACKEND" --engine "$ENGINE"
+
+      - name: Build ISO
+        run: sudo ./scripts/build-iso.sh --backend "$BACKEND" --engine "$ENGINE"
+
+      - name: Rename ISO with engine suffix
+        run: |
+          SRC=$(ls build/blockhost_*.iso | head -1)
+          DEST="build/blockhost-${GITHUB_REF_NAME}-${BACKEND}-${ENGINE}.iso"
+          sudo mv "$SRC" "$DEST"
+          sudo chown $(id -u):$(id -g) "$DEST"
+
+      - name: Upload ISO to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/blockhost-${{ github.ref_name }}-${{ env.BACKEND }}-${{ env.ENGINE }}.iso
+          fail_on_unmatched_files: true
