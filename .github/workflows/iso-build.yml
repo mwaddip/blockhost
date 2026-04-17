@@ -87,6 +87,8 @@ jobs:
     name: Release ISO (libvirt/${{ matrix.engine }})
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
