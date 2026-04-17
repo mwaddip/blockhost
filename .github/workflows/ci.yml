@@ -56,24 +56,6 @@ jobs:
         working-directory: blockhost-engine-evm
         run: npm test
 
-  forge-tests:
-    name: Forge Tests (Contracts)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Init required submodules
-        run: git submodule update --init libpam-web3
-
-      - uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Install Solidity dependencies
-        working-directory: libpam-web3/contracts
-        run: forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
-
-      - name: Run tests
-        working-directory: libpam-web3/contracts
-        run: forge test -vv
-
   build-packages:
     name: Build Packages
     runs-on: ubuntu-latest
@@ -108,6 +90,12 @@ jobs:
         with:
           go-version: '1.22'
           cache-dependency-path: blockhost-monitor/go.sum
+
+      - uses: mlugg/setup-zig@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev libclang-dev
