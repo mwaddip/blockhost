@@ -92,6 +92,8 @@ jobs:
           cache-dependency-path: blockhost-monitor/go.sum
 
       - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
 
       - uses: taiki-e/install-action@v2
         with:
