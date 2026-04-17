@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 ISO_EXTRACT="${BUILD_DIR}/iso-extract"
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-0.5.0}"
 
 # Source Debian ISO
 DEBIAN_ISO="${DEBIAN_ISO:-${BUILD_DIR}/debian-12-netinst.iso}"
