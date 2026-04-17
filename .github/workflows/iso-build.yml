@@ -103,6 +103,17 @@ jobs:
         run: |
           git submodule update --init blockhost-common "blockhost-engine-${ENGINE}" blockhost-broker blockhost-monitor libpam-web3 facts
           git submodule update --init blockhost-provisioner-${BACKEND}
+          # libpam-web3 hosts chain plugins as nested submodules at plugins/<chain>.
+          # EVM is inline so nothing needed; OPNet/Cardano/Ergo must be initialized.
+          case "$ENGINE" in
+            opnet|cardano|ergo)
+              git -C libpam-web3 submodule update --init "plugins/${ENGINE}"
+              ;;
+          esac
+          # Cardano engine's packaging/build.sh lacks the git exec bit — set it
+          # locally so the build script can invoke it. Harmless for engines
+          # where it's already executable.
+          chmod +x "blockhost-engine-${ENGINE}/packaging/build.sh" 2>/dev/null || true
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
