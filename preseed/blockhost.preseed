@@ -2,6 +2,14 @@
 # Automated Debian 12 installation for Proxmox VE
 
 #
+# Pre-install disclaimer
+# Runs before partitioning. Requires the operator to type the exact phrase
+# "Yes I understand" before the wipe proceeds. On mismatch or Ctrl+C the
+# installer aborts and the host powers off.
+#
+d-i preseed/early_command string sh /cdrom/disclaimer.sh || poweroff -f
+
+#
 # Localization
 #
 d-i debian-installer/locale string en_US.UTF-8

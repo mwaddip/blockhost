@@ -136,6 +136,10 @@ add_preseed() {
     # Copy preseed file
     cp "${PROJECT_DIR}/preseed/blockhost.preseed" "${ISO_EXTRACT}/preseed.cfg"
 
+    # Copy pre-install disclaimer script (invoked by preseed/early_command)
+    cp "${PROJECT_DIR}/preseed/disclaimer.sh" "${ISO_EXTRACT}/disclaimer.sh"
+    chmod +x "${ISO_EXTRACT}/disclaimer.sh"
+
     # Modify GRUB to use preseed
     GRUB_CFG="${ISO_EXTRACT}/boot/grub/grub.cfg"
     if [ -f "$GRUB_CFG" ]; then
