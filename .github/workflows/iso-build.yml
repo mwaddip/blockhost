@@ -124,17 +124,19 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev libpam0g-dev libssl-dev libclang-dev xorriso isolinux
 
-      - name: Download base Debian netinst ISO
+      - name: Download base Debian 12 netinst ISO
+        env:
+          DEBIAN_VERSION: 12.12.0
         run: |
           mkdir -p build
-          BASE=https://cdimage.debian.org/debian-cd/current/amd64/iso-cd
-          FILE=$(curl -fsSL "$BASE/SHA256SUMS" | awk '/debian-12[^ ]*-netinst\.iso$/ {print $2; exit}')
-          if [ -z "$FILE" ]; then
-            echo "Could not determine netinst ISO filename from SHA256SUMS"
-            exit 1
-          fi
-          echo "Fetching $FILE"
-          curl -fsSL -o build/debian-12-netinst.iso "$BASE/$FILE"
+          # Pin to a specific Debian 12 point release — cdimage.debian.org/.../current/
+          # now points at Debian 13 (trixie), which our preseed / build-iso.sh
+          # haven't been tested against. Bump DEBIAN_VERSION when a newer 12.x.x
+          # ships and we want to pick it up.
+          BASE=https://cdimage.debian.org/cdimage/archive/${DEBIAN_VERSION}/amd64/iso-cd
+          FILE=debian-${DEBIAN_VERSION}-amd64-netinst.iso
+          echo "Fetching ${BASE}/${FILE}"
+          curl -fsSL -o build/debian-12-netinst.iso "${BASE}/${FILE}"
 
       - name: Build packages
         run: ./scripts/build-packages.sh --backend "$BACKEND" --engine "$ENGINE"
