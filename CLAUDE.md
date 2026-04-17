@@ -49,13 +49,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `blockhost-provisioner-libvirt/`
 - `blockhost-engine-evm/`
 - `blockhost-engine-opnet/`
+- `blockhost-engine-cardano/`
+- `blockhost-engine-ergo/`
 - `blockhost-broker/`
 - `blockhost-monitor/`
 
 **When changes to a submodule are needed:**
 1. Do NOT attempt to edit files in submodule directories
-2. Instead, provide the user with a complete prompt to send to that submodule's Claude session
-3. Format the prompt clearly so the user can copy-paste it directly
+2. Instead, write a prompt file under `prompts/` and dispatch to the submodule's session per the workflow below
+3. Follow the prompt dispatch rules exactly — load directive, `--from-file`, `$'\r'`, ask-before-sending
+
+## Prompt Dispatch Workflow
+
+@~/.claude/projects/-home-mwaddip-projects-blockhost/memory/feedback_prompt_dispatch.md
 
 ## Project Structure
 
