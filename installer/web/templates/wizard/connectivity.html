@@ -8,7 +8,7 @@
 
 <div class="card">
     <h2>Connectivity</h2>
-    <p class="text-muted mb-2">Configure how VMs obtain routable IPv6 addresses and network connectivity.</p>
+    <p class="text-muted mb-2">Choose how your VMs are reachable and how subscribers connect.</p>
 
     <form id="connectivity-form" method="POST" action="{{ url_for('wizard_connectivity') }}">
 
@@ -44,6 +44,27 @@
             </div>
             <div class="alert alert-warning">
                 <strong>Note:</strong> You are responsible for ensuring proper routing of this prefix to your server.
+            </div>
+        </div>
+
+        <!-- Onion Option (always available, no package required) -->
+        <label class="checkbox-group" id="label-onion" onclick="toggleOption(this, 'onion')">
+            <input type="checkbox" name="connectivity_options" value="onion" id="opt-onion">
+            <div class="checkbox-label">
+                <h4>Onion Routing (Tor)</h4>
+                <p>Host reachable only via .onion addresses — no public IP needed</p>
+            </div>
+        </label>
+
+        <div id="section-onion" class="form-section hidden" style="margin-top: 0.5rem; margin-bottom: 1.5rem;">
+            <h3>Onion Routing</h3>
+            <p class="text-muted mb-2" style="font-size: 0.875rem;">
+                The host runs a Tor daemon. Each VM gets its own <code>.onion</code> hidden service.
+                Subscribers connect via Tor: <code>torsocks ssh user@xxx.onion</code>.
+            </p>
+            <div class="alert alert-info">
+                <strong>No broker, no IPv6, no TLS.</strong> Tor provides end-to-end encryption.
+                Subscribers will need Tor installed locally.
             </div>
         </div>
 
