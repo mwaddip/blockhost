@@ -67,6 +67,14 @@ def _setup_onion(vm_name: str, bridge_ip: str) -> str:
          f"sed -i 's|signing_url = .*|signing_url = \"http://{onion}:8443\"|' /etc/pam_web3/config.toml"],
         check=True,
     )
+    # Disable TLS for onion mode (Tor provides encryption)
+    subprocess.run(
+        ["blockhost-vm-guest-exec", vm_name,
+         "if grep -q '^use_tls' /etc/pam_web3/config.toml; then "
+         f"sed -i 's/^use_tls = .*/use_tls = false/' /etc/pam_web3/config.toml; "
+         "else sed -i '/^\\[auth\\]/a use_tls = false' /etc/pam_web3/config.toml; fi"],
+        check=True,
+    )
     return onion
 
 
@@ -132,7 +140,22 @@ Register both in ACTIONS with the action names `tor-hidden-service-add` and `tor
 
 Ensure `get_command("guest-exec")` resolves from the manifest's `commands.guest-exec`.
 
+5. **Modify: `usr/share/blockhost/cloud-init/templates/nft-auth.yaml`**
+
+   Add `use_tls = true` to the `[auth]` section of `/etc/pam_web3/config.toml` write_files block:
+
+   ```toml
+   [auth]
+   signing_url = "https://${SIGNING_HOST}:8443"
+   otp_length = ${OTP_LENGTH}
+   otp_ttl_seconds = ${OTP_TTL}
+   use_tls = true
+   ```
+
+   This gives the network hook a known key to sed-replace to `false` in onion mode.
+
 ## Verification
 - `python3 -c "from blockhost.network_hook import get_connection_endpoint, cleanup"`
 - `grep tor-hidden-service-add /usr/share/blockhost/root-agent-actions/system.py`
 - Provisioner dispatcher resolves `guest-exec` command
+- `grep 'use_tls' /usr/share/blockhost/cloud-init/templates/nft-auth.yaml`
