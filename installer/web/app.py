@@ -823,6 +823,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'allocation_size': alloc_size,
                 }
 
+            if 'onion' in selected:
+                connectivity['onion'] = {}
+
             if 'broker' in selected and _broker:
                 if not broker_chain:
                     flash('No supported chain detected for broker mode', 'error')
@@ -850,14 +853,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     'prefix': connectivity.get('manual', {}).get('prefix', ''),
                     'allocation_size': connectivity.get('manual', {}).get('allocation_size', 64),
                 }
+            elif 'onion' in selected:
+                session['ipv6'] = {'mode': 'onion'}
             else:
                 session['ipv6'] = {'mode': 'none'}
 
             session['connectivity'] = connectivity
             return redirect(url_for(_NEXT_STEP.get('connectivity', 'wizard_admin_commands')))
 
-        # Build exclusion map: manual and broker are mutually exclusive
-        exclusion_map = {'manual': ['broker'], 'broker': ['manual']}
+        # Build exclusion map: all three modes are mutually exclusive
+        exclusion_map = {'manual': ['broker', 'onion'], 'broker': ['manual', 'onion'], 'onion': ['manual', 'broker']}
         if _broker:
             manifest_excludes = _broker['manifest'].get('excludes', [])
             if manifest_excludes:
@@ -988,10 +993,14 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     provisioner_steps_meta.append(meta)
         all_finalization_steps.extend(provisioner_steps_meta)
 
-        # Installer post-steps
+        # Installer post-steps — skip ipv6/https for onion mode
+        network_mode = session.get('ipv6', {}).get('mode', 'none')
+        if network_mode != 'onion':
+            all_finalization_steps.extend([
+                {'id': 'ipv6', 'label': 'Configuring IPv6'},
+                {'id': 'https', 'label': 'Configuring HTTPS'},
+            ])
         all_finalization_steps.extend([
-            {'id': 'ipv6', 'label': 'Configuring IPv6'},
-            {'id': 'https', 'label': 'Configuring HTTPS'},
             {'id': 'signup', 'label': 'Generating signup page'},
             {'id': 'nginx', 'label': 'Setting up nginx reverse proxy'},
         ])
