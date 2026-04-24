@@ -437,7 +437,7 @@ if [ ! -f "$STEP_ENGINE" ]; then
     ENGINE_DEB=$(find "$BLOCKHOST_DIR/packages/host" -maxdepth 1 -name "blockhost-engine*_*.deb" -type f 2>/dev/null | head -1)
     if [ -n "$ENGINE_DEB" ] && [ -f "$ENGINE_DEB" ]; then
         # Install APT dependencies first so dpkg -i succeeds
-        apt-get install -y python3-pycryptodome python3-ecdsa 2>&1 | tee -a "$LOG_FILE"
+        apt-get install -y python3-pycryptodome python3-ecdsa tor 2>&1 | tee -a "$LOG_FILE"
         log "Installing: $(basename "$ENGINE_DEB")"
         dpkg -i "$ENGINE_DEB" 2>&1 | tee -a "$LOG_FILE"
         ENGINE_PKG_NAME=$(dpkg-deb -f "$ENGINE_DEB" Package)

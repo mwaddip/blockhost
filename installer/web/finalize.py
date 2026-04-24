@@ -240,6 +240,17 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
     ipv6 = config.get('ipv6', {})
     if ipv6.get('mode') == 'onion':
         Path('/etc/blockhost/network-mode').write_text('onion\n')
+
+        # Generate host hidden service (admin/signup access to the host itself)
+        host_onion_dir = Path('/var/lib/tor/blockhost-host')
+        host_onion_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['chown', '-R', 'debian-tor:debian-tor', str(host_onion_dir)], check=True)
+        with open('/etc/tor/torrc', 'a') as f:
+            f.write('\n# BlockHost — host hidden service (admin/signup)\n')
+            f.write(f'HiddenServiceDir {host_onion_dir}\n')
+            f.write('HiddenServicePort 80 127.0.0.1:80\n')
+        subprocess.run(['systemctl', 'enable', '--now', 'tor'], check=True)
+
         return True, None  # Tor handles connectivity, no IPv6 needed
     try:
 
