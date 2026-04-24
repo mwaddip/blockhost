@@ -51,10 +51,15 @@ def _setup_onion(vm_name: str, bridge_ip: str) -> str:
     )
     onion = result.stdout.strip()
 
-    # Push .onion into VM
+    # Push .onion into VM — update /etc/hosts and signing_host file
     subprocess.run(
         ["blockhost-vm-guest-exec", vm_name,
-         f"echo '{bridge_ip} {onion} {vm_name}' >> /etc/hosts"],
+         f"sed -i '/^{bridge_ip} /d' /etc/hosts && echo '{bridge_ip} {onion} {vm_name}' >> /etc/hosts"],
+        check=True,
+    )
+    subprocess.run(
+        ["blockhost-vm-guest-exec", vm_name,
+         f"echo '{onion}' > /run/libpam-web3/signing_host"],
         check=True,
     )
     subprocess.run(
