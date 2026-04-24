@@ -1,4 +1,5 @@
 Before starting, load CLAUDE.md, `~/projects/OVERRIDES.md`, and the `blockhost-development` skill.
+First, update your facts submodule: `cd facts && git pull origin main && cd ..`
 Read `facts/ENGINE_INTERFACE.md` §13 (Network Hook Integration) before making changes.
 
 ---

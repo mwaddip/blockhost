@@ -1,4 +1,5 @@
 Before starting, load CLAUDE.md, `~/projects/OVERRIDES.md`, and the `blockhost-development` skill.
+First, update your facts submodule: `cd facts && git pull origin main && cd ..`
 Read `facts/COMMON_INTERFACE.md` §7 (`/etc/blockhost/network-mode`, Network Hook, Root Agent Tor Actions) before making changes.
 
 ---

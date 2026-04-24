@@ -1,4 +1,5 @@
 Before starting, load CLAUDE.md, `~/projects/OVERRIDES.md`, and the `blockhost-development` skill.
+First, update your facts submodule: `cd facts && git pull origin main && cd ..`
 Read `facts/PROVISIONER_INTERFACE.md` §2 (the `guest-exec` section) before making changes.
 
 ---
