@@ -1,3 +1,7 @@
+# Worktrees
+.worktrees/
+.superpowers/
+
 # Build artifacts
 build/
 *.iso
