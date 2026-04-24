@@ -237,8 +237,11 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
     2. Install persistent WireGuard config
     3. Enable IPv6 forwarding
     """
+    ipv6 = config.get('ipv6', {})
+    if ipv6.get('mode') == 'onion':
+        Path('/etc/blockhost/network-mode').write_text('onion\n')
+        return True, None  # Tor handles connectivity, no IPv6 needed
     try:
-        ipv6 = config.get('ipv6', {})
 
         # Enable IPv6 forwarding (needed for VM traffic regardless of mode)
         subprocess.run(
@@ -496,6 +499,9 @@ WantedBy=multi-user.target
                 except Exception as e:
                     print(f"Warning: Could not add ipv6_pool to db.yaml: {e}")
 
+        # Write network mode for engine/first-boot consumption
+        Path('/etc/blockhost/network-mode').write_text(f'{ipv6.get("mode", "none")}\n')
+
         return True, None
     except subprocess.TimeoutExpired:
         return False, 'Broker request timed out (180s)'
@@ -505,6 +511,9 @@ WantedBy=multi-user.target
 
 def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
     """Configure HTTPS using dns_zone (preferred) or sslip.io fallback, with Let's Encrypt."""
+    ipv6 = config.get('ipv6', {})
+    if ipv6.get('mode') == 'onion':
+        return True, None  # Tor provides end-to-end encryption, no TLS needed
     try:
         config_dir = Path('/etc/blockhost')
         ssl_dir = config_dir / 'ssl'
