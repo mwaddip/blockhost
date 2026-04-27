@@ -13,7 +13,7 @@ hero:
       link: https://github.com/mwaddip/blockhost
 features:
   - title: No Accounts
-    details: Your crypto wallet is your identity. No registration, no email, no 2FA. Works with Ethereum, OPNet (Bitcoin L1), and Cardano.
+    details: Your crypto wallet is your identity. No registration, no email, no 2FA. Works with Ethereum, OPNet (Bitcoin L1), Cardano, and Ergo.
   - title: No Control Panels
     details: Subscriptions, credentials, and admin commands all live on-chain. The server watches the blockchain and acts on what it sees.
   - title: No Manual Provisioning
@@ -21,7 +21,7 @@ features:
   - title: OS-Level Auth
     details: A custom PAM module verifies wallet signatures at SSH login. Not an app-layer wrapper — it's in the authentication stack itself.
   - title: Pluggable Everything
-    details: Swap the blockchain engine (EVM, OPNet, Cardano) or the hypervisor (Proxmox, libvirt) without changing anything else.
+    details: Swap the blockchain engine (EVM, OPNet, Cardano, Ergo) or the hypervisor (Proxmox, libvirt) without changing anything else.
   - title: One ISO
     details: Boots on bare metal, auto-installs Debian, deploys packages, launches a setup wizard. From hardware to live system in under 10 minutes.
 ---
