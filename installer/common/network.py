@@ -64,8 +64,26 @@ class NetworkManager:
         r'^dummy',
     ]
 
+    # How long detect_interfaces() and ip-route lookups stay valid before re-running.
+    _CACHE_TTL_SECONDS = 5
+
     def __init__(self):
         self._interfaces: Optional[list[NetworkInterface]] = None
+        self._interfaces_cached_at: float = 0.0
+        self._interfaces_cache_includes_virtual: bool = False
+        self._gateway: Optional[str] = None
+        self._gateway_cached_at: float = 0.0
+        self._connectivity: Optional[bool] = None
+        self._connectivity_cached_at: float = 0.0
+
+    def invalidate_cache(self):
+        """Drop cached network state — call after configure_static / run_dhcp."""
+        self._interfaces = None
+        self._interfaces_cached_at = 0.0
+        self._gateway = None
+        self._gateway_cached_at = 0.0
+        self._connectivity = None
+        self._connectivity_cached_at = 0.0
 
     def _is_virtual(self, name: str) -> bool:
         """Check if interface is virtual."""
@@ -92,77 +110,96 @@ class NetworkManager:
         except Exception:
             return 'unknown', False
 
-    def _get_interface_addresses(self, name: str) -> tuple[list[str], list[str]]:
-        """Get IPv4 and IPv6 addresses for an interface."""
-        ipv4 = []
-        ipv6 = []
+    def _query_all_addresses(self) -> dict[str, tuple[list[str], list[str]]]:
+        """One `ip -j addr show` for all interfaces — returns {name: (ipv4, ipv6)}."""
+        out: dict[str, tuple[list[str], list[str]]] = {}
+        try:
+            result = subprocess.run(
+                ['ip', '-j', 'addr', 'show'],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return out
+            for entry in json.loads(result.stdout):
+                name = entry.get('ifname')
+                if not name:
+                    continue
+                ipv4: list[str] = []
+                ipv6: list[str] = []
+                for ai in entry.get('addr_info', []):
+                    addr = f"{ai['local']}/{ai['prefixlen']}"
+                    if ai.get('family') == 'inet':
+                        ipv4.append(addr)
+                    elif ai.get('family') == 'inet6':
+                        ipv6.append(addr)
+                out[name] = (ipv4, ipv6)
+        except Exception:
+            pass
+        return out
 
+    def _get_interface_addresses(self, name: str) -> tuple[list[str], list[str]]:
+        """Get IPv4 and IPv6 addresses for one interface (uncached single-iface query)."""
         try:
             result = subprocess.run(
                 ['ip', '-j', 'addr', 'show', name],
-                capture_output=True,
-                text=True,
-                timeout=5
+                capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 if data:
+                    ipv4: list[str] = []
+                    ipv6: list[str] = []
                     for addr_info in data[0].get('addr_info', []):
                         addr = f"{addr_info['local']}/{addr_info['prefixlen']}"
                         if addr_info['family'] == 'inet':
                             ipv4.append(addr)
                         elif addr_info['family'] == 'inet6':
                             ipv6.append(addr)
+                    return ipv4, ipv6
         except Exception:
             pass
-
-        return ipv4, ipv6
+        return [], []
 
     def detect_interfaces(self, include_virtual: bool = False) -> list[NetworkInterface]:
         """
-        Detect available network interfaces.
-
-        Args:
-            include_virtual: Include virtual interfaces
-
-        Returns:
-            List of NetworkInterface objects
+        Detect available network interfaces (cached up to _CACHE_TTL_SECONDS).
         """
-        interfaces = []
-        net_dir = Path('/sys/class/net')
+        now = time.monotonic()
+        if (self._interfaces is not None
+                and self._interfaces_cache_includes_virtual == include_virtual
+                and (now - self._interfaces_cached_at) < self._CACHE_TTL_SECONDS):
+            return self._interfaces
 
+        interfaces: list[NetworkInterface] = []
+        net_dir = Path('/sys/class/net')
         if not net_dir.exists():
             return interfaces
+
+        all_addrs = self._query_all_addresses()
 
         for iface_path in net_dir.iterdir():
             name = iface_path.name
             is_virtual = self._is_virtual(name)
-
             if is_virtual and not include_virtual:
                 continue
 
-            # Get MAC address
             try:
                 mac = (iface_path / 'address').read_text().strip()
             except Exception:
                 mac = ''
 
             state, carrier = self._get_interface_state(name)
-            ipv4, ipv6 = self._get_interface_addresses(name)
+            ipv4, ipv6 = all_addrs.get(name, ([], []))
 
             interfaces.append(NetworkInterface(
-                name=name,
-                mac=mac,
-                state=state,
-                has_carrier=carrier,
-                ipv4=ipv4,
-                ipv6=ipv6,
-                is_virtual=is_virtual,
+                name=name, mac=mac, state=state, has_carrier=carrier,
+                ipv4=ipv4, ipv6=ipv6, is_virtual=is_virtual,
             ))
 
-        # Sort: interfaces with carrier first, then by name
         interfaces.sort(key=lambda i: (not i.has_carrier, i.name))
         self._interfaces = interfaces
+        self._interfaces_cached_at = now
+        self._interfaces_cache_includes_virtual = include_virtual
         return interfaces
 
     def get_default_interface(self) -> Optional[NetworkInterface]:
@@ -209,6 +246,7 @@ class NetworkManager:
                 if result.returncode == 0:
                     # Verify we got an IP
                     time.sleep(1)
+                    self.invalidate_cache()
                     ipv4, _ = self._get_interface_addresses(interface)
                     if ipv4:
                         return True, f"DHCP configured: {ipv4[0]}"
@@ -280,6 +318,7 @@ class NetworkManager:
             if config.dns:
                 self._configure_dns(config.dns)
 
+            self.invalidate_cache()
             return True, f"Static IP configured: {config.address}"
 
         except subprocess.TimeoutExpired:
@@ -320,18 +359,22 @@ class NetworkManager:
         return None
 
     def get_current_gateway(self) -> Optional[str]:
-        """Get current default gateway."""
+        """Get current default gateway (cached up to _CACHE_TTL_SECONDS)."""
+        now = time.monotonic()
+        if (self._gateway is not None
+                and (now - self._gateway_cached_at) < self._CACHE_TTL_SECONDS):
+            return self._gateway
         try:
             result = subprocess.run(
                 ['ip', '-j', 'route', 'show', 'default'],
-                capture_output=True,
-                text=True,
-                timeout=5
+                capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 if data:
-                    return data[0].get('gateway')
+                    self._gateway = data[0].get('gateway')
+                    self._gateway_cached_at = now
+                    return self._gateway
         except Exception:
             pass
         return None
@@ -345,14 +388,21 @@ class NetworkManager:
             return False
 
     def test_connectivity(self, host: str = '8.8.8.8', timeout: int = 5) -> bool:
-        """Test network connectivity with ping."""
+        """Test network connectivity with ping (positive results cached briefly)."""
+        now = time.monotonic()
+        if (self._connectivity is True
+                and (now - self._connectivity_cached_at) < self._CACHE_TTL_SECONDS):
+            return True
         try:
             result = subprocess.run(
                 ['ping', '-c', '1', '-W', str(timeout), host],
                 capture_output=True,
-                timeout=timeout + 2
+                timeout=timeout + 2,
             )
-            return result.returncode == 0
+            ok = result.returncode == 0
+            self._connectivity = ok
+            self._connectivity_cached_at = now
+            return ok
         except Exception:
             return False
 

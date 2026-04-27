@@ -12,9 +12,12 @@ Pure utility functions with no Flask dependency:
 import grp
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+import yaml
 
 
 def set_blockhost_ownership(path, mode=0o640):
@@ -22,6 +25,12 @@ def set_blockhost_ownership(path, mode=0o640):
     os.chmod(str(path), mode)
     gid = grp.getgrnam('blockhost').gr_gid
     os.chown(str(path), 0, gid)
+
+
+def write_blockhost_file(path: Union[str, Path], content: str, mode: int = 0o640):
+    """Write content to path then set root:blockhost ownership."""
+    Path(path).write_text(content)
+    set_blockhost_ownership(path, mode)
 
 
 def detect_disks() -> list[dict]:
@@ -70,17 +79,11 @@ def is_valid_evm_address(address: str) -> bool:
 
 def is_valid_ipv6_prefix(prefix: str) -> bool:
     """Validate IPv6 prefix format."""
-    import re
-    pattern = r'^([0-9a-fA-F:]+)/(\d{1,3})$'
-    match = re.match(pattern, prefix)
+    match = re.match(r'^([0-9a-fA-F:]+)/(\d{1,3})$', prefix)
     if not match:
         return False
-
     prefix_len = int(match.group(2))
-    if prefix_len < 32 or prefix_len > 128:
-        return False
-
-    return True
+    return 32 <= prefix_len <= 128
 
 
 def request_broker_allocation(registry: str) -> dict:
@@ -127,35 +130,7 @@ def request_broker_allocation(registry: str) -> dict:
 
 def write_yaml(path: Path, data: dict):
     """Write data to YAML file."""
-    try:
-        import yaml
-        path.write_text(yaml.safe_dump(data, default_flow_style=False))
-    except ImportError:
-        # Fallback: simple YAML output
-        lines = []
-        dict_to_yaml(data, lines, 0)
-        path.write_text('\n'.join(lines))
-
-
-def dict_to_yaml(data: dict, lines: list, indent: int):
-    """Simple dict to YAML converter."""
-    prefix = '  ' * indent
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"{prefix}{key}:")
-            dict_to_yaml(value, lines, indent + 1)
-        elif isinstance(value, list):
-            lines.append(f"{prefix}{key}:")
-            for item in value:
-                lines.append(f"{prefix}  - {item}")
-        elif value is None:
-            lines.append(f"{prefix}{key}: null")
-        elif isinstance(value, bool):
-            lines.append(f"{prefix}{key}: {str(value).lower()}")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{prefix}{key}: {value}")
-        else:
-            lines.append(f"{prefix}{key}: \"{value}\"")
+    path.write_text(yaml.safe_dump(data, default_flow_style=False))
 
 
 def parse_pam_ciphertext(output: str) -> Optional[str]:

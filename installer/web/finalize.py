@@ -12,73 +12,79 @@ revenue_share) are provided by the engine wizard plugin. This module
 contains chain-agnostic infrastructure steps (keypair, ipv6, https, etc.).
 """
 
+import grp
 import ipaddress
 import json
 import os
+import pwd
+import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
+from blockhost.config import CONFIG_DIR, DATA_DIR, BROKER_ALLOCATION_FILE
 from installer.web.utils import (
     set_blockhost_ownership,
+    write_blockhost_file,
     write_yaml,
     generate_self_signed_cert_for_finalization,
 )
 
 
 def get_finalization_steps(provisioner, engine=None) -> list[tuple]:
-    """Build the finalization step list, injecting engine and provisioner steps.
+    """Canonical finalization step list — single source of truth.
 
-    Step order:
-    1. Infrastructure steps (keypair — chain-agnostic, needed before engine)
+    Each tuple is (id, label, func) or (id, label, func, hint). Plugins may
+    return either form. Order:
+    1. Infrastructure (keypair — chain-agnostic, needed before engine)
     2. Engine pre-steps (from plugin: wallet, contracts, chain_config)
     3. Provisioner steps (from plugin: token, terraform, bridge, template)
     4. Post steps (ipv6, https, signup, nginx)
     5. Engine post-steps (from plugin: mint_nft, plan, revenue_share)
-    6. Final steps (finalize, validate)
+    6. Final (finalize, validate)
     """
-    # Infrastructure steps (run before engine)
-    infra_steps = [
+    def plugin_steps(plugin, attr):
+        if plugin and plugin.get('module') and hasattr(plugin['module'], attr):
+            return getattr(plugin['module'], attr)()
+        return []
+
+    return [
         ('keypair', 'Generating server keypair', _finalize_keypair),
-    ]
-
-    # Engine pre-steps (chain-specific)
-    engine_steps = []
-    if engine and engine.get('module'):
-        eng_mod = engine['module']
-        if hasattr(eng_mod, 'get_finalization_steps'):
-            engine_steps = eng_mod.get_finalization_steps()
-
-    # Provisioner steps (from plugin)
-    provisioner_steps = []
-    if provisioner and provisioner.get('module'):
-        prov_mod = provisioner['module']
-        if hasattr(prov_mod, 'get_finalization_steps'):
-            provisioner_steps = prov_mod.get_finalization_steps()
-
-    post_steps = [
+        *plugin_steps(engine, 'get_finalization_steps'),
+        *plugin_steps(provisioner, 'get_finalization_steps'),
         ('ipv6', 'Configuring IPv6', _finalize_ipv6),
         ('https', 'Configuring HTTPS', _finalize_https),
         ('signup', 'Generating signup page', _finalize_signup),
         ('nginx', 'Setting up nginx reverse proxy', _finalize_nginx),
-    ]
-
-    # Engine post-steps (need hostname from https step)
-    engine_post_steps = []
-    if engine and engine.get('module'):
-        eng_mod = engine['module']
-        if hasattr(eng_mod, 'get_post_finalization_steps'):
-            engine_post_steps = eng_mod.get_post_finalization_steps()
-
-    final_steps = [
+        *plugin_steps(engine, 'get_post_finalization_steps'),
         ('finalize', 'Finalizing setup', _finalize_complete),
-        ('validate', 'Validating system (testing only)', _finalize_validate),
+        ('validate', 'Validating system', _finalize_validate, 'testing only'),
     ]
 
-    return infra_steps + engine_steps + provisioner_steps + post_steps + engine_post_steps + final_steps
+
+def get_step_metadata(provisioner, engine=None, network_mode: str = 'none') -> list[dict]:
+    """Return UI-friendly step metadata.
+
+    network_mode='onion' filters ipv6/https from display — those steps still
+    run during finalization but short-circuit, so they shouldn't appear in
+    the progress UI.
+    """
+    meta = []
+    for step in get_finalization_steps(provisioner, engine):
+        sid = step[0]
+        if network_mode == 'onion' and sid in ('ipv6', 'https'):
+            continue
+        m = {'id': sid, 'label': step[1]}
+        if len(step) > 3:
+            m['hint'] = step[3]
+        meta.append(m)
+    return meta
 
 
 def run_finalization_with_state(setup_state, config: dict, provisioner, engine=None):
@@ -115,7 +121,7 @@ def run_finalization_with_state(setup_state, config: dict, provisioner, engine=N
                             ipv6_cfg = config.get('ipv6', {})
                             prefix = ipv6_cfg.get('prefix', '')
                             if not prefix:
-                                alloc_file = Path('/etc/blockhost/broker-allocation.json')
+                                alloc_file = CONFIG_DIR / BROKER_ALLOCATION_FILE
                                 if alloc_file.exists():
                                     try:
                                         alloc = json.loads(alloc_file.read_text())
@@ -183,12 +189,32 @@ def _discover_bridge() -> Optional[str]:
     return None
 
 
+def _chown_recursive(path: str, user: str, group: str):
+    """Recursively chown path. Uses os.walk + os.chown — no subprocess fork per file."""
+    uid = pwd.getpwnam(user).pw_uid
+    gid = grp.getgrnam(group).gr_gid
+    os.chown(path, uid, gid)
+    for root, dirs, files in os.walk(path):
+        for entry in dirs + files:
+            try:
+                os.chown(os.path.join(root, entry), uid, gid, follow_symlinks=False)
+            except OSError:
+                pass
+
+
+def _systemctl(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run `systemctl <args>` with a uniform timeout policy. Never raises on non-zero."""
+    return subprocess.run(['systemctl', *args], capture_output=True, text=True, timeout=timeout)
+
+
+def _ip(*args: str, timeout: int = 10) -> subprocess.CompletedProcess:
+    """Run `ip <args>` and capture output. Never raises on non-zero."""
+    return subprocess.run(['ip', *args], capture_output=True, text=True, timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Step functions (private to this module — chain-agnostic infrastructure)
 # ---------------------------------------------------------------------------
-
-CONFIG_DIR = Path('/etc/blockhost')
-
 
 def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
     """Generate secp256k1 ECIES server keypair.
@@ -211,8 +237,7 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
             priv_hex = key_file.read_text().strip()
         else:
             priv_hex = secrets.token_hex(32)
-            key_file.write_text(priv_hex + '\n')
-            set_blockhost_ownership(key_file, 0o640)
+            write_blockhost_file(key_file, priv_hex + '\n')
 
         priv_int = int(priv_hex, 16)
         priv_key = ec.derive_private_key(priv_int, ec.SECP256K1(), default_backend())
@@ -221,197 +246,141 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
             format=PublicFormat.UncompressedPoint
         ).hex()
 
-        pub_file.write_text(pub_hex + '\n')
-        set_blockhost_ownership(pub_file, 0o640)
+        write_blockhost_file(pub_file, pub_hex + '\n')
 
         return True, None
     except Exception as e:
         return False, f'Failed to generate server keypair: {e}'
 
 
-def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure IPv6 tunnel if using broker, or save manual prefix.
+def _setup_onion_host_service():
+    """Configure tor hidden service for host (admin/signup over .onion)."""
+    host_onion_dir = Path('/var/lib/tor/blockhost-host')
+    host_onion_dir.mkdir(parents=True, exist_ok=True)
+    _chown_recursive(str(host_onion_dir), 'debian-tor', 'debian-tor')
+    with open('/etc/tor/torrc', 'a') as f:
+        f.write('\n# BlockHost — host hidden service (admin/signup)\n')
+        f.write(f'HiddenServiceDir {host_onion_dir}\n')
+        f.write('HiddenServicePort 80 127.0.0.1:80\n')
+    _systemctl('enable', '--now', 'tor')
 
-    For broker mode:
-    1. Request allocation (broker-client saves its own config)
-    2. Install persistent WireGuard config
-    3. Enable IPv6 forwarding
-    """
-    ipv6 = config.get('ipv6', {})
-    if ipv6.get('mode') == 'onion':
-        Path('/etc/blockhost/network-mode').write_text('onion\n')
 
-        # Generate host hidden service (admin/signup access to the host itself)
-        host_onion_dir = Path('/var/lib/tor/blockhost-host')
-        host_onion_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['chown', '-R', 'debian-tor:debian-tor', str(host_onion_dir)], check=True)
-        with open('/etc/tor/torrc', 'a') as f:
-            f.write('\n# BlockHost — host hidden service (admin/signup)\n')
-            f.write(f'HiddenServiceDir {host_onion_dir}\n')
-            f.write('HiddenServicePort 80 127.0.0.1:80\n')
-        subprocess.run(['systemctl', 'enable', '--now', 'tor'], check=True)
+def _enable_ipv6_forwarding():
+    """Enable net.ipv6.conf.all.forwarding now and persistently."""
+    subprocess.run(
+        ['sysctl', '-w', 'net.ipv6.conf.all.forwarding=1'],
+        capture_output=True, timeout=10,
+    )
+    sysctl_dir = Path('/etc/sysctl.d')
+    sysctl_dir.mkdir(parents=True, exist_ok=True)
+    (sysctl_dir / '99-blockhost-ipv6.conf').write_text(
+        'net.ipv6.conf.all.forwarding=1\n'
+    )
 
-        return True, None  # Tor handles connectivity, no IPv6 needed
-    try:
 
-        # Enable IPv6 forwarding (needed for VM traffic regardless of mode)
-        subprocess.run(
-            ['sysctl', '-w', 'net.ipv6.conf.all.forwarding=1'],
-            capture_output=True,
-            timeout=10
-        )
-        sysctl_dir = Path('/etc/sysctl.d')
-        sysctl_dir.mkdir(parents=True, exist_ok=True)
-        (sysctl_dir / '99-blockhost-ipv6.conf').write_text(
-            'net.ipv6.conf.all.forwarding=1\n'
-        )
-
-        if ipv6.get('mode') == 'broker':
-            registry = ipv6.get('broker_registry')
-            blockchain = config.get('blockchain', {})
-            nft_contract = blockchain.get('nft_contract', '')
-
-            if not nft_contract:
-                return False, 'NFT contract address not available for broker request'
-
-            if not registry:
-                return False, 'Broker registry address not configured'
-
-            # Step 1: Request allocation (no --configure-wg — let broker-client
-            # save its own broker-allocation.json via save_allocation_config())
-            cmd = [
-                'broker-client',
-                '--registry-contract', registry,
-                'request',
-                '--nft-contract', nft_contract,
-                '--wallet-key', '/etc/blockhost/deployer.key',
-            ]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=3600
-            )
-
-            # Don't bail on non-zero if stdout contains allocation data
-            allocation_file = Path('/etc/blockhost/broker-allocation.json')
-            prefix = ''
-
-            if allocation_file.exists():
-                # broker-client wrote it — fix permissions and read prefix
-                set_blockhost_ownership(allocation_file, 0o640)
-                try:
-                    alloc_data = json.loads(allocation_file.read_text())
-                    prefix = alloc_data.get('prefix', alloc_data.get('ipv6_prefix', ''))
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            if not prefix:
-                # Fallback: parse from stdout
-                import re
-                for line in (result.stdout or '').strip().split('\n'):
-                    if line.strip().startswith('{'):
-                        try:
-                            data = json.loads(line)
-                            prefix = data.get('prefix', data.get('ipv6_prefix', ''))
-                            if prefix:
-                                break
-                        except json.JSONDecodeError:
-                            pass
-                if not prefix:
-                    prefix_match = re.search(r'prefix[:\s]+([0-9a-fA-F:]+/\d+)', result.stdout or '')
-                    if prefix_match:
-                        prefix = prefix_match.group(1)
-
-            if not prefix:
-                error_msg = result.stderr or result.stdout or 'No prefix in broker response'
-                return False, f'Broker allocation failed: {error_msg}'
-
-            # Store prefix in config for later steps (https, step data)
-            config['ipv6']['prefix'] = prefix
-
-            # Step 2: Install persistent WireGuard config
-            install_result = subprocess.run(
-                [
-                    'broker-client',
-                    '--registry-contract', registry,
-                    'install',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-
-            if install_result.returncode != 0:
-                # Non-fatal warning — tunnel may work ephemerally
-                print(f"Warning: broker-client install failed: {install_result.stderr}")
-
-            # Step 3: Verify WireGuard tunnel is up
-            wg_check = subprocess.run(
-                ['wg', 'show'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if wg_check.returncode != 0 or not wg_check.stdout.strip():
-                # Try to bring up the tunnel manually
-                subprocess.run(
-                    ['wg-quick', 'up', 'wg-broker'],
-                    capture_output=True,
-                    timeout=30
-                )
-
-        elif ipv6.get('mode') == 'manual':
-            # Manual mode - just save the provided prefix
-            allocation_file = Path('/etc/blockhost/broker-allocation.json')
-            allocation_file.write_text(json.dumps({
-                'prefix': ipv6.get('prefix', ''),
-                'broker_node': '',
-                'registry': '',
-                'mode': 'manual',
-            }, indent=2))
-            set_blockhost_ownership(allocation_file, 0o640)
-            config['ipv6']['prefix'] = ipv6.get('prefix', '')
-
-        # Step 4: Create dummy interface with host's own routable IPv6 address
-        # The host's wg-broker address (::201) has routing issues due to the
-        # WireGuard tunnel topology. A dummy interface with ::202 sidesteps
-        # this by giving the host a separate routable /128 address.
-        prefix = config.get('ipv6', {}).get('prefix', '')
-        if prefix:
+def _extract_prefix_from_broker_stdout(stdout: str) -> str:
+    """Best-effort: pull a prefix from broker-client stdout when allocation file is missing."""
+    for line in (stdout or '').strip().split('\n'):
+        if line.strip().startswith('{'):
             try:
-                network = ipaddress.IPv6Network(prefix, strict=False)
-                host_addr = str(network.network_address + 2)
+                data = json.loads(line)
+                prefix = data.get('prefix', data.get('ipv6_prefix', ''))
+                if prefix:
+                    return prefix
+            except json.JSONDecodeError:
+                pass
+    m = re.search(r'prefix[:\s]+([0-9a-fA-F:]+/\d+)', stdout or '')
+    return m.group(1) if m else ''
 
-                # Load dummy module
-                subprocess.run(
-                    ['modprobe', 'dummy'],
-                    capture_output=True, timeout=10
-                )
-                Path('/etc/modules-load.d/dummy.conf').write_text('dummy\n')
 
-                # Create and configure dummy0
-                subprocess.run(
-                    ['ip', 'link', 'add', 'dummy0', 'type', 'dummy'],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ['ip', 'link', 'set', 'dummy0', 'up'],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ['ip', '-6', 'addr', 'add', f'{host_addr}/128', 'dev', 'dummy0'],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ['ip', '-6', 'route', 'add', f'{host_addr}/128', 'dev', 'wg-broker'],
-                    capture_output=True, timeout=10
-                )
+def _request_broker_allocation_step(config: dict, ipv6: dict) -> tuple[Optional[str], Optional[str]]:
+    """Run broker-client request + install. Returns (prefix, error)."""
+    registry = ipv6.get('broker_registry')
+    nft_contract = config.get('blockchain', {}).get('nft_contract', '')
 
-                # Persist via systemd oneshot (works on both Proxmox and standard Debian
-                # — Proxmox bypasses ifupdown, so interfaces.d/ is not reliable)
-                service_content = f"""[Unit]
+    if not nft_contract:
+        return None, 'NFT contract address not available for broker request'
+    if not registry:
+        return None, 'Broker registry address not configured'
+
+    # Step 1: Request allocation (no --configure-wg — broker-client writes its own
+    # broker-allocation.json via save_allocation_config())
+    result = subprocess.run(
+        ['broker-client', '--registry-contract', registry, 'request',
+         '--nft-contract', nft_contract,
+         '--wallet-key', str(CONFIG_DIR / 'deployer.key')],
+        capture_output=True, text=True, timeout=3600,
+    )
+
+    allocation_file = CONFIG_DIR / BROKER_ALLOCATION_FILE
+    prefix = ''
+    if allocation_file.exists():
+        set_blockhost_ownership(allocation_file, 0o640)
+        try:
+            alloc_data = json.loads(allocation_file.read_text())
+            prefix = alloc_data.get('prefix', alloc_data.get('ipv6_prefix', ''))
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    if not prefix:
+        prefix = _extract_prefix_from_broker_stdout(result.stdout)
+
+    if not prefix:
+        return None, f'Broker allocation failed: {result.stderr or result.stdout or "no prefix in broker response"}'
+
+    # Step 2: Install persistent WireGuard config (non-fatal on failure)
+    install_result = subprocess.run(
+        ['broker-client', '--registry-contract', registry, 'install'],
+        capture_output=True, text=True, timeout=60,
+    )
+    if install_result.returncode != 0:
+        print(f"Warning: broker-client install failed: {install_result.stderr}")
+
+    # Step 3: Verify WireGuard tunnel is up; bring it up if not
+    wg_check = subprocess.run(['wg', 'show'], capture_output=True, text=True, timeout=10)
+    if wg_check.returncode != 0 or not wg_check.stdout.strip():
+        subprocess.run(['wg-quick', 'up', 'wg-broker'], capture_output=True, timeout=30)
+
+    return prefix, None
+
+
+def _save_manual_allocation(ipv6: dict) -> str:
+    """Manual mode: write broker-allocation.json from user-provided prefix."""
+    prefix = ipv6.get('prefix', '')
+    write_blockhost_file(
+        CONFIG_DIR / 'broker-allocation.json',
+        json.dumps({
+            'prefix': prefix,
+            'broker_node': '',
+            'registry': '',
+            'mode': 'manual',
+        }, indent=2),
+        mode=0o640,
+    )
+    return prefix
+
+
+def _create_host_dummy_iface(prefix: str):
+    """Give the host its own routable /128 on dummy0; persist via systemd oneshot.
+
+    The host's wg-broker address (::201) has routing issues from the WG topology;
+    a dummy interface with ::202 sidesteps this with a separate routable /128.
+    Proxmox bypasses ifupdown, so interfaces.d/ isn't reliable — use systemd.
+    """
+    try:
+        network = ipaddress.IPv6Network(prefix, strict=False)
+        host_addr = str(network.network_address + 2)
+
+        # ip link add type dummy auto-loads the kernel module; explicit modprobe
+        # only needed to ensure /etc/modules-load.d/dummy.conf is present.
+        Path('/etc/modules-load.d/dummy.conf').write_text('dummy\n')
+        _ip('link', 'add', 'dummy0', 'type', 'dummy')
+        _ip('link', 'set', 'dummy0', 'up')
+        _ip('-6', 'addr', 'add', f'{host_addr}/128', 'dev', 'dummy0')
+        _ip('-6', 'route', 'add', f'{host_addr}/128', 'dev', 'wg-broker')
+
+        service_file = Path('/etc/systemd/system/blockhost-dummy-ipv6.service')
+        service_file.write_text(f"""[Unit]
 Description=BlockHost host routable IPv6 (dummy interface)
 After=wg-quick@wg-broker.service
 Wants=wg-quick@wg-broker.service
@@ -427,92 +396,110 @@ ExecStop=/sbin/ip link del dummy0
 
 [Install]
 WantedBy=multi-user.target
-"""
-                service_file = Path('/etc/systemd/system/blockhost-dummy-ipv6.service')
-                service_file.write_text(service_content)
-                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
-                subprocess.run(['systemctl', 'enable', 'blockhost-dummy-ipv6'], capture_output=True, timeout=10)
-            except (ValueError, subprocess.TimeoutExpired) as e:
-                print(f"Warning: Could not create dummy interface: {e}")
+""")
+        _systemctl('daemon-reload', timeout=10)
+        _systemctl('enable', 'blockhost-dummy-ipv6', timeout=10)
+    except (ValueError, subprocess.TimeoutExpired) as e:
+        print(f"Warning: Could not create dummy interface: {e}")
 
-        # Step 5: Add gateway address to bridge for VM connectivity
-        # VMs use the first host address in the prefix as their IPv6 gateway.
-        # This address must exist on the bridge VMs are connected to.
+
+def _add_bridge_gateway(prefix: str):
+    """Add the VM-facing IPv6 gateway address to the host bridge and persist it."""
+    try:
+        bridge_dev = _discover_bridge()
+        if not bridge_dev:
+            print("Warning: No bridge found for IPv6 gateway — skipping")
+            return
+        network = ipaddress.IPv6Network(prefix, strict=False)
+        gw_addr = str(network.network_address + 1)
+
+        # /128 to avoid conflicting with the /120 on wg-broker
+        _ip('-6', 'addr', 'add', f'{gw_addr}/128', 'dev', bridge_dev)
+
+        # interfaces.d/ confuses ifupdown on boot — must live in the same file
+        # as the bridge's inet stanza.
+        with open('/etc/network/interfaces', 'a') as f:
+            f.write(
+                f'\n# BlockHost IPv6 gateway address on bridge for VM connectivity\n'
+                f'iface {bridge_dev} inet6 static\n'
+                f'    address {gw_addr}/128\n'
+            )
+    except (ValueError, subprocess.TimeoutExpired) as e:
+        print(f"Warning: Could not add IPv6 gateway to bridge: {e}")
+
+
+def _persist_db_yaml_and_reserve_ipv6(prefix: str):
+    """Single pass: read db.yaml once, reserve host IPv6 addrs in vm-db, write ipv6_pool."""
+    try:
+        network = ipaddress.IPv6Network(prefix, strict=False)
+        reserved = [
+            str(network.network_address + 1),  # bridge gateway
+            str(network.network_address + 2),  # dummy0 host address
+        ]
+
+        db_yaml = CONFIG_DIR / 'db.yaml'
+        db_config = {}
+        if db_yaml.exists():
+            db_config = yaml.safe_load(db_yaml.read_text()) or {}
+        db_file = Path(db_config.get('db_file') or DATA_DIR / 'vm-db.json')
+
+        # Update vm-db.json (or create it)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        if db_file.exists():
+            db = json.loads(db_file.read_text())
+        else:
+            db = {"vms": {}, "next_vmid": 100, "allocated_ips": [],
+                  "allocated_ipv6": [], "reserved_nft_tokens": {}}
+        allocated = db.setdefault("allocated_ipv6", [])
+        for addr in reserved:
+            if addr not in allocated:
+                allocated.append(addr)
+        db_file.write_text(json.dumps(db, indent=2))
+
+        # Update db.yaml's ipv6_pool (only if db.yaml already existed — provisioner owns it)
+        if db_yaml.exists():
+            db_config['ipv6_pool'] = {'prefix': prefix}
+            write_yaml(db_yaml, db_config)
+    except Exception as e:
+        print(f"Warning: Could not persist IPv6 reservations: {e}")
+
+
+def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
+    """Configure IPv6: onion service, broker-tunnel allocation, or manual prefix.
+
+    Sequences focused helpers; each step short-circuits or warns on failure
+    rather than failing the whole step. The broker request itself is the only
+    hard-fail.
+    """
+    ipv6 = config.get('ipv6', {})
+    network_mode_file = CONFIG_DIR / 'network-mode'
+
+    if ipv6.get('mode') == 'onion':
+        network_mode_file.write_text('onion\n')
+        try:
+            _setup_onion_host_service()
+        except Exception as e:
+            return False, f'Failed to set up onion host service: {e}'
+        return True, None  # Tor handles connectivity, no IPv6 needed
+
+    try:
+        _enable_ipv6_forwarding()
+
+        if ipv6.get('mode') == 'broker':
+            prefix, err = _request_broker_allocation_step(config, ipv6)
+            if err:
+                return False, err
+            config['ipv6']['prefix'] = prefix
+        elif ipv6.get('mode') == 'manual':
+            config['ipv6']['prefix'] = _save_manual_allocation(ipv6)
+
         prefix = config.get('ipv6', {}).get('prefix', '')
         if prefix:
-            try:
-                bridge_dev = _discover_bridge()
-                if not bridge_dev:
-                    print("Warning: No bridge found for IPv6 gateway — skipping")
-                else:
-                    network = ipaddress.IPv6Network(prefix, strict=False)
-                    gw_addr = str(network.network_address + 1)
+            _create_host_dummy_iface(prefix)
+            _add_bridge_gateway(prefix)
+            _persist_db_yaml_and_reserve_ipv6(prefix)
 
-                    # Add to bridge as /128 to avoid conflicting with the /120 on wg-broker
-                    subprocess.run(
-                        ['ip', '-6', 'addr', 'add', f'{gw_addr}/128', 'dev', bridge_dev],
-                        capture_output=True,
-                        timeout=10
-                    )
-
-                    # Persist: append inet6 stanza to /etc/network/interfaces
-                    # Must be in the same file as the bridge's inet stanza —
-                    # a separate interfaces.d/ file confuses ifupdown on boot.
-                    with open('/etc/network/interfaces', 'a') as f:
-                        f.write(
-                            f'\n# BlockHost IPv6 gateway address on bridge for VM connectivity\n'
-                            f'iface {bridge_dev} inet6 static\n'
-                            f'    address {gw_addr}/128\n'
-                        )
-            except (ValueError, subprocess.TimeoutExpired) as e:
-                print(f"Warning: Could not add IPv6 gateway to bridge: {e}")
-
-        # Reserve host infrastructure IPv6 addresses in VM database so the
-        # allocator never hands them out to VMs.
-        if prefix:
-            try:
-                network = ipaddress.IPv6Network(prefix, strict=False)
-                reserved = [
-                    str(network.network_address + 1),  # bridge gateway
-                    str(network.network_address + 2),  # dummy0 host address
-                ]
-                # Read db_file path from db.yaml (written by provisioner)
-                db_yaml = CONFIG_DIR / 'db.yaml'
-                db_file = Path('/var/lib/blockhost/vm-db.json')  # fallback
-                if db_yaml.exists():
-                    import yaml
-                    db_conf = yaml.safe_load(db_yaml.read_text()) or {}
-                    if db_conf.get('db_file'):
-                        db_file = Path(db_conf['db_file'])
-                db_file.parent.mkdir(parents=True, exist_ok=True)
-                if db_file.exists():
-                    db = json.loads(db_file.read_text())
-                else:
-                    db = {"vms": {}, "next_vmid": 100, "allocated_ips": [],
-                          "allocated_ipv6": [], "reserved_nft_tokens": {}}
-                allocated = db.setdefault("allocated_ipv6", [])
-                for addr in reserved:
-                    if addr not in allocated:
-                        allocated.append(addr)
-                db_file.write_text(json.dumps(db, indent=2))
-            except Exception as e:
-                print(f"Warning: Could not reserve host IPv6 in VM database: {e}")
-
-        # Append ipv6_pool to db.yaml (written by provisioner in an earlier step)
-        if prefix:
-            db_yaml = CONFIG_DIR / 'db.yaml'
-            if db_yaml.exists():
-                try:
-                    import yaml
-                    db_config = yaml.safe_load(db_yaml.read_text()) or {}
-                    db_config['ipv6_pool'] = {'prefix': prefix}
-                    write_yaml(db_yaml, db_config)
-                except Exception as e:
-                    print(f"Warning: Could not add ipv6_pool to db.yaml: {e}")
-
-        # Write network mode for engine/first-boot consumption
-        Path('/etc/blockhost/network-mode').write_text(f'{ipv6.get("mode", "none")}\n')
-
+        network_mode_file.write_text(f'{ipv6.get("mode", "none")}\n')
         return True, None
     except subprocess.TimeoutExpired:
         return False, 'Broker request timed out (180s)'
@@ -526,15 +513,14 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
     if ipv6.get('mode') == 'onion':
         return True, None  # Tor provides end-to-end encryption, no TLS needed
     try:
-        config_dir = Path('/etc/blockhost')
-        ssl_dir = config_dir / 'ssl'
+        ssl_dir = CONFIG_DIR / 'ssl'
         ssl_dir.mkdir(parents=True, exist_ok=True)
 
         # Try to get IPv6 address and dns_zone from broker allocation
         ipv6_address = None
         dns_zone = None
         ipv6_network = None
-        broker_file = config_dir / 'broker-allocation.json'
+        broker_file = CONFIG_DIR / BROKER_ALLOCATION_FILE
         if broker_file.exists():
             broker_data = json.loads(broker_file.read_text())
             prefix = broker_data.get('prefix', '')
@@ -589,52 +575,30 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
         if use_dns_zone or use_sslip or (hostname and '.' in hostname and not hostname.endswith('.local')):
             # Try to get Let's Encrypt certificate
             try:
-                # Check if certbot is available
-                certbot_check = subprocess.run(['which', 'certbot'], capture_output=True)
-                if certbot_check.returncode != 0:
-                    # Install certbot if not present
+                # Install certbot if missing (wizard binds :443; port 80 is free)
+                if not shutil.which('certbot'):
                     subprocess.run(
                         ['apt-get', 'install', '-y', 'certbot'],
-                        capture_output=True,
-                        timeout=300
+                        capture_output=True, timeout=300,
                     )
 
-                # Run certbot for HTTP-01 challenge
-                # Use --http-01-port on a free port, redirect :80 via iptables
-                # (the wizard is already listening on :80 IPv4)
-                # Both iptables (IPv4) and ip6tables (IPv6) needed — Let's Encrypt
-                # may connect over either protocol depending on DNS resolution.
-                _redirect_rule = ['-t', 'nat', '-p', 'tcp',
-                                  '--dport', '80', '-j', 'REDIRECT', '--to-port', '8088']
-                for cmd in ['iptables', 'ip6tables']:
-                    subprocess.run(
-                        [cmd, '-A', 'PREROUTING'] + _redirect_rule,
-                        capture_output=True, timeout=10
-                    )
-                try:
-                    result = subprocess.run(
-                        [
-                            'certbot', 'certonly',
-                            '--standalone',
-                            '--http-01-port', '8088',
-                            '--non-interactive',
-                            '--agree-tos',
-                            '--register-unsafely-without-email',
-                            '--domain', hostname,
-                            '--cert-path', str(ssl_dir / 'cert.pem'),
-                            '--key-path', str(ssl_dir / 'key.pem'),
-                            '--fullchain-path', str(ssl_dir / 'fullchain.pem'),
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=120
-                    )
-                finally:
-                    for cmd in ['iptables', 'ip6tables']:
-                        subprocess.run(
-                            [cmd, '-D', 'PREROUTING'] + _redirect_rule,
-                            capture_output=True, timeout=10
-                        )
+                # Bind certbot directly to port 80 — the wizard is on 443 during
+                # finalization, and nginx hasn't been started yet.
+                result = subprocess.run(
+                    [
+                        'certbot', 'certonly',
+                        '--standalone',
+                        '--http-01-port', '80',
+                        '--non-interactive',
+                        '--agree-tos',
+                        '--register-unsafely-without-email',
+                        '--domain', hostname,
+                        '--cert-path', str(ssl_dir / 'cert.pem'),
+                        '--key-path', str(ssl_dir / 'key.pem'),
+                        '--fullchain-path', str(ssl_dir / 'fullchain.pem'),
+                    ],
+                    capture_output=True, text=True, timeout=120,
+                )
 
                 if result.returncode == 0:
                     https_config['tls_mode'] = 'letsencrypt'
@@ -673,21 +637,24 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
                     hook.write_text('#!/bin/sh\nsystemctl reload nginx\n')
                     hook.chmod(0o755)
                 else:
-                    # Let's Encrypt failed, fall back to self-signed
+                    cause = (result.stderr or result.stdout or '').strip().splitlines()[-1:] or ['no detail']
+                    print(f"certbot failed (rc={result.returncode}): {cause[0]}", file=sys.stderr)
                     generate_self_signed_cert_for_finalization(hostname, ssl_dir)
                     https_config['tls_mode'] = 'self-signed'
+                    https_config['fallback_reason'] = cause[0]
 
             except Exception as e:
-                # Certbot failed, use self-signed
+                print(f"certbot stage raised: {e!r}", file=sys.stderr)
                 generate_self_signed_cert_for_finalization(hostname, ssl_dir)
                 https_config['tls_mode'] = 'self-signed'
+                https_config['fallback_reason'] = repr(e)
         else:
             # No valid domain, use self-signed
             generate_self_signed_cert_for_finalization(hostname, ssl_dir)
             https_config['tls_mode'] = 'self-signed'
 
         # Write HTTPS configuration
-        https_config_file = config_dir / 'https.json'
+        https_config_file = CONFIG_DIR / 'https.json'
         https_config_file.write_text(json.dumps(https_config, indent=2))
 
         # Store in running config for other steps
@@ -738,16 +705,16 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
         # Read HTTPS config for cert paths and hostname
         https_config = config.get('https', {})
         if not https_config:
-            https_file = Path('/etc/blockhost/https.json')
+            https_file = CONFIG_DIR / 'https.json'
             if https_file.exists():
                 https_config = json.loads(https_file.read_text())
 
         hostname = https_config.get('hostname', socket.gethostname())
-        cert_file = https_config.get('cert_file', '/etc/blockhost/ssl/cert.pem')
-        key_file = https_config.get('key_file', '/etc/blockhost/ssl/key.pem')
+        cert_file = https_config.get('cert_file', str(CONFIG_DIR / 'ssl/cert.pem'))
+        key_file = https_config.get('key_file', str(CONFIG_DIR / 'ssl/key.pem'))
 
         # Read admin panel path prefix
-        admin_config_file = Path('/etc/blockhost/admin.json')
+        admin_config_file = CONFIG_DIR / 'admin.json'
         admin_prefix = '/admin'
         if admin_config_file.exists():
             try:
@@ -757,10 +724,11 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
             except (json.JSONDecodeError, OSError):
                 pass
         else:
-            # Write default config
-            admin_config_file.write_text(json.dumps(
-                {'path_prefix': '/admin'}, indent=2))
-            set_blockhost_ownership(admin_config_file, 0o644)
+            write_blockhost_file(
+                admin_config_file,
+                json.dumps({'path_prefix': '/admin'}, indent=2),
+                mode=0o644,
+            )
 
         # Engine-specific nginx locations (e.g. chain API reverse proxy)
         engine_locations = ""
@@ -842,18 +810,9 @@ server {{
             return False, f"nginx config validation failed: {result.stderr}"
 
         # Enable but do NOT start — nginx starts on reboot
-        subprocess.run(
-            ['systemctl', 'enable', 'nginx'],
-            capture_output=True,
-            timeout=30
-        )
-
-        # Stop nginx if apt started it (apt-get install often auto-starts it)
-        subprocess.run(
-            ['systemctl', 'stop', 'nginx'],
-            capture_output=True,
-            timeout=30
-        )
+        _systemctl('enable', 'nginx')
+        # apt-get install often auto-starts nginx; stop it
+        _systemctl('stop', 'nginx')
 
         return True, None
     except Exception as e:
@@ -868,10 +827,8 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
     chain-agnostic admin config and system housekeeping.
     """
     try:
-        config_dir = Path('/etc/blockhost')
-        config_dir.mkdir(parents=True, exist_ok=True)
-        marker_dir = Path('/var/lib/blockhost')
-        marker_dir.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         admin_commands = config.get('admin_commands', {})
         admin_signature = config.get('admin_signature', '')
@@ -890,64 +847,33 @@ def _finalize_complete(config: dict) -> tuple[bool, Optional[str]]:
                     }
                 }
             }
-            (config_dir / 'admin-commands.json').write_text(
+            (CONFIG_DIR / 'admin-commands.json').write_text(
                 json.dumps(commands_db, indent=2) + '\n'
             )
 
         # Write admin signature for NFT #0 minting (used by engine mint step)
         if admin_signature:
-            sig_file = config_dir / 'admin-signature.key'
-            sig_file.write_text(admin_signature)
-            set_blockhost_ownership(sig_file, 0o640)
+            write_blockhost_file(CONFIG_DIR / 'admin-signature.key', admin_signature)
 
         # Enable chain-agnostic blockhost services (will start on reboot)
         # Note: blockhost-monitor is engine-specific — enabled by engine post-step
-        subprocess.run(
-            ['systemctl', 'enable', 'blockhost-admin'],
-            capture_output=True,
-            timeout=30
-        )
-        subprocess.run(
-            ['systemctl', 'enable', 'blockhost-gc.timer'],
-            capture_output=True,
-            timeout=30
-        )
+        _systemctl('enable', 'blockhost-admin')
+        _systemctl('enable', 'blockhost-gc.timer')
 
-        # Ensure state dir is owned by blockhost user
-        subprocess.run(
-            ['chown', '-R', 'blockhost:blockhost', '/var/lib/blockhost'],
-            capture_output=True, timeout=30
-        )
-        # libvirt-qemu needs to traverse to access VM disk images and cloud-init ISOs
-        subprocess.run(
-            ['chmod', '755', '/var/lib/blockhost'],
-            capture_output=True, timeout=30
-        )
+        # State dir owned by blockhost; libvirt-qemu needs traverse access for VM disks/cloud-init ISOs
+        _chown_recursive(str(DATA_DIR), 'blockhost', 'blockhost')
+        os.chmod(DATA_DIR, 0o755)
 
-        # Ensure config dir has correct group ownership
-        subprocess.run(
-            ['chown', '-R', 'root:blockhost', '/etc/blockhost'],
-            capture_output=True, timeout=30
-        )
-        subprocess.run(
-            ['chmod', '750', '/etc/blockhost'],
-            capture_output=True, timeout=30
-        )
+        # Config dir: root:blockhost with group-readable contents
+        _chown_recursive(str(CONFIG_DIR), 'root', 'blockhost')
+        os.chmod(CONFIG_DIR, 0o750)
 
         # Write setup complete marker
-        (marker_dir / '.setup-complete').touch()
+        (DATA_DIR / '.setup-complete').touch()
 
         # Disable and stop first-boot service
-        subprocess.run(
-            ['systemctl', 'disable', 'blockhost-firstboot'],
-            capture_output=True,
-            timeout=30
-        )
-        subprocess.run(
-            ['systemctl', 'stop', 'blockhost-firstboot'],
-            capture_output=True,
-            timeout=30
-        )
+        _systemctl('disable', 'blockhost-firstboot')
+        _systemctl('stop', 'blockhost-firstboot')
 
         return True, None
     except Exception as e:

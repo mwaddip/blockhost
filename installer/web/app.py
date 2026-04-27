@@ -20,10 +20,13 @@ import json
 import secrets
 import subprocess
 import threading
-from datetime import timedelta
+import time
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 from flask import (
     Flask, Response, render_template, request, redirect, url_for,
@@ -34,6 +37,7 @@ from flask import (
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from blockhost.config import CONFIG_DIR, DATA_DIR
 from installer.common.otp import OTPManager
 from installer.common.network import NetworkManager
 from installer.common.detection import detect_boot_medium, BootMedium
@@ -48,91 +52,53 @@ from installer.web.utils import (
     generate_self_signed_cert,
 )
 from installer.web.finalize import (
+    get_finalization_steps,
+    get_step_metadata,
     run_finalization_with_state,
     run_finalization,
 )
 
 
-# Provisioner manifest path (installed by provisioner .deb package)
-PROVISIONER_MANIFEST_PATH = Path('/usr/share/blockhost/provisioner.json')
+# Plugin manifest paths (installed by their respective .deb packages)
+_MANIFEST_DIR = Path('/usr/share/blockhost')
+PROVISIONER_MANIFEST_PATH = _MANIFEST_DIR / 'provisioner.json'
+ENGINE_MANIFEST_PATH = _MANIFEST_DIR / 'engine.json'
+BROKER_MANIFEST_PATH = _MANIFEST_DIR / 'broker.json'
 
-# Engine manifest path (installed by engine .deb package)
-ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
-
-# Broker manifest path (installed by broker .deb package)
-BROKER_MANIFEST_PATH = Path('/usr/share/blockhost/broker.json')
+# Marker indicating the ISO was built with --testing
+TESTING_MARKER = CONFIG_DIR / '.testing-mode'
 
 
-def _discover_provisioner() -> Optional[dict]:
-    """Discover the active provisioner from its manifest.
+def _discover_plugin(manifest_path: Path, kind: str, want_blueprint: bool = True) -> Optional[dict]:
+    """Load a plugin's manifest + optional wizard module.
 
-    Returns a dict with 'manifest', 'module', and 'blueprint' keys,
-    or None if no provisioner is installed.
+    For provisioner/engine, want_blueprint=True asks the loaded module for a
+    Flask Blueprint at module.blueprint. The broker doesn't expose a Blueprint
+    so it passes want_blueprint=False.
+
+    Returns None if the manifest file is absent or fails to parse/import.
     """
-    if not PROVISIONER_MANIFEST_PATH.is_file():
+    if not manifest_path.is_file():
         return None
-
     try:
-        manifest = json.loads(PROVISIONER_MANIFEST_PATH.read_text())
-        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
-        if not wizard_module_name:
-            return {'manifest': manifest, 'module': None, 'blueprint': None}
-
-        module = importlib.import_module(wizard_module_name)
-        blueprint = getattr(module, 'blueprint', None)
-        return {'manifest': manifest, 'module': module, 'blueprint': blueprint}
-    except (json.JSONDecodeError, ImportError, Exception) as e:
-        print(f"Warning: Failed to load provisioner: {e}")
-        return None
-
-
-def _discover_engine() -> Optional[dict]:
-    """Discover the active engine from its manifest.
-
-    Returns a dict with 'manifest', 'module', and 'blueprint' keys,
-    or None if no engine is installed.
-    """
-    if not ENGINE_MANIFEST_PATH.is_file():
-        return None
-
-    try:
-        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
-        wizard_module_name = manifest.get('setup', {}).get('wizard_module')
-        if not wizard_module_name:
-            return {'manifest': manifest, 'module': None, 'blueprint': None}
-
-        module = importlib.import_module(wizard_module_name)
-        blueprint = getattr(module, 'blueprint', None)
-        return {'manifest': manifest, 'module': module, 'blueprint': blueprint}
-    except (json.JSONDecodeError, ImportError, Exception) as e:
-        print(f"Warning: Failed to load engine: {e}")
-        return None
-
-
-def _discover_broker() -> Optional[dict]:
-    """Discover the broker from its manifest.
-
-    Unlike engine/provisioner, the broker doesn't need a full Blueprint —
-    it provides a manifest with field definitions and an optional Python
-    module with helper functions (e.g. fetch_registry).
-    """
-    if not BROKER_MANIFEST_PATH.is_file():
-        return None
-
-    try:
-        manifest = json.loads(BROKER_MANIFEST_PATH.read_text())
-        module = None
+        manifest = json.loads(manifest_path.read_text())
+        result = {'manifest': manifest, 'module': None}
+        if want_blueprint:
+            result['blueprint'] = None
         wizard_module_name = manifest.get('setup', {}).get('wizard_module')
         if wizard_module_name:
             module = importlib.import_module(wizard_module_name)
-        return {'manifest': manifest, 'module': module}
-    except (json.JSONDecodeError, ImportError, Exception) as e:
-        print(f"Warning: Failed to load broker: {e}")
+            result['module'] = module
+            if want_blueprint:
+                result['blueprint'] = getattr(module, 'blueprint', None)
+        return result
+    except (json.JSONDecodeError, ImportError) as e:
+        print(f"Warning: Failed to load {kind}: {e}")
         return None
 
 
 # Discover active provisioner (if installed)
-_provisioner = _discover_provisioner()
+_provisioner = _discover_plugin(PROVISIONER_MANIFEST_PATH, 'provisioner')
 
 # Resolve provisioner session key from manifest (e.g. the value of config_keys.session_key)
 _prov_session_key = None
@@ -140,10 +106,10 @@ if _provisioner and _provisioner.get('manifest'):
     _prov_session_key = _provisioner['manifest'].get('config_keys', {}).get('session_key')
 
 # Discover active engine (if installed)
-_engine = _discover_engine()
+_engine = _discover_plugin(ENGINE_MANIFEST_PATH, 'engine')
 
-# Discover broker (if installed)
-_broker = _discover_broker()
+# Discover broker (if installed) — broker has no Blueprint, only optional helpers
+_broker = _discover_plugin(BROKER_MANIFEST_PATH, 'broker', want_blueprint=False)
 
 # Resolve engine session key from manifest (e.g. the value of config_keys.session_key)
 _engine_session_key = None
@@ -226,52 +192,28 @@ for _i in range(len(WIZARD_STEPS) - 1):
     _PREV_STEP[WIZARD_STEPS[_i + 1]['id']] = WIZARD_STEPS[_i]['endpoint']
 
 def _get_finalization_step_ids() -> list[str]:
-    """Get finalization step IDs without requiring function references.
-
-    Used by SetupState at module load time to know what steps exist.
-    """
-    # Infrastructure steps (chain-agnostic, run before engine)
-    infra_ids = ['keypair']
-
-    # Engine pre-steps
-    engine_ids = []
-    if _engine and _engine.get('module'):
-        eng_mod = _engine['module']
-        if hasattr(eng_mod, 'get_finalization_steps'):
-            engine_ids = [s[0] for s in eng_mod.get_finalization_steps()]
-    elif _engine and _engine.get('manifest'):
-        engine_ids = _engine['manifest'].get('setup', {}).get('finalization_steps', [])
-
-    # Provisioner steps
-    provisioner_ids = []
-    if _provisioner and _provisioner.get('module'):
-        prov_mod = _provisioner['module']
-        if hasattr(prov_mod, 'get_finalization_steps'):
-            provisioner_ids = [s[0] for s in prov_mod.get_finalization_steps()]
-    elif _provisioner and _provisioner.get('manifest'):
-        provisioner_ids = _provisioner['manifest'].get('setup', {}).get('finalization_steps', [])
-
-    post_ids = ['ipv6', 'https', 'signup', 'nginx']
-
-    # Engine post-steps
-    engine_post_ids = []
-    if _engine and _engine.get('module'):
-        eng_mod = _engine['module']
-        if hasattr(eng_mod, 'get_post_finalization_steps'):
-            engine_post_ids = [s[0] for s in eng_mod.get_post_finalization_steps()]
-    elif _engine and _engine.get('manifest'):
-        engine_post_ids = _engine['manifest'].get('setup', {}).get('post_finalization_steps', [])
-
-    final_ids = ['finalize', 'validate']
-
-    return infra_ids + engine_ids + provisioner_ids + post_ids + engine_post_ids + final_ids
+    """Step IDs in finalization order — used by SetupState to allocate slots."""
+    return [s[0] for s in get_finalization_steps(_provisioner, _engine)]
 
 
 # Global job storage for async operations
-_jobs = {}
+_jobs: dict = {}
+_JOBS_TTL_SECONDS = 3600
+
+
+def _record_job(job_id: str, initial: dict):
+    """Insert a new job, dropping any entries older than _JOBS_TTL_SECONDS."""
+    now = time.monotonic()
+    initial.setdefault('created_at', now)
+    stale = [jid for jid, j in _jobs.items()
+             if j.get('status') in ('completed', 'failed')
+             and (now - j.get('created_at', now)) > _JOBS_TTL_SECONDS]
+    for jid in stale:
+        _jobs.pop(jid, None)
+    _jobs[job_id] = initial
 
 # Setup state file for persistent tracking
-SETUP_STATE_FILE = Path('/var/lib/blockhost/setup-state.json')
+SETUP_STATE_FILE = DATA_DIR / 'setup-state.json'
 
 
 class SetupState:
@@ -364,10 +306,9 @@ class SetupState:
 
     def mark_step_completed(self, step_id: str, data: dict = None):
         """Mark a step as completed, optionally attaching result data."""
-        import datetime
         self.state['steps'][step_id]['status'] = 'completed'
         self.state['steps'][step_id]['error'] = None
-        self.state['steps'][step_id]['completed_at'] = datetime.datetime.now().isoformat()
+        self.state['steps'][step_id]['completed_at'] = datetime.now().isoformat()
         if data:
             self.state['steps'][step_id]['data'] = data
         self.save()
@@ -381,17 +322,15 @@ class SetupState:
 
     def start(self, config: dict):
         """Start the setup process."""
-        import datetime
         self.state['status'] = 'running'
-        self.state['started_at'] = datetime.datetime.now().isoformat()
+        self.state['started_at'] = datetime.now().isoformat()
         self.state['config'] = config
         self.save()
 
     def complete(self):
         """Mark setup as fully complete."""
-        import datetime
         self.state['status'] = 'completed'
-        self.state['completed_at'] = datetime.datetime.now().isoformat()
+        self.state['completed_at'] = datetime.now().isoformat()
         self.state['current_step'] = None
         self._redact_secrets()
         self.save()
@@ -631,7 +570,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
 
     def _bhcrypt_decrypt(signature: str, ciphertext: str) -> dict:
         """Fallback: decrypt config via bhcrypt subprocess."""
-        import yaml
         result = subprocess.run(
             ['bhcrypt', 'decrypt-symmetric',
              '--signature', signature,
@@ -805,10 +743,22 @@ def create_app(config: Optional[dict] = None) -> Flask:
             broker_chain = _resolve_broker_chain(_broker, wallet_address)
 
         if request.method == 'POST':
-            selected = request.form.getlist('connectivity_options')
-            connectivity = {'options': selected}
+            selected = set(request.form.getlist('connectivity_options'))
+            # Modes are mutually exclusive; pick the first match in priority order
+            mode = next((m for m in ('broker', 'manual', 'onion') if m in selected), 'none')
 
-            if 'manual' in selected:
+            if mode == 'broker':
+                if _broker and not broker_chain:
+                    flash('No supported chain detected for broker mode', 'error')
+                    return redirect(url_for('wizard_connectivity'))
+                broker_reg = request.form.get('broker_registry', '')
+                if broker_reg and broker_chain:
+                    pattern = broker_chain.get('contract_validation', '')
+                    if pattern and not re.match(pattern, broker_reg):
+                        flash('Invalid broker registry address', 'error')
+                        return redirect(url_for('wizard_connectivity'))
+                session['ipv6'] = {'mode': 'broker', 'broker_registry': broker_reg}
+            elif mode == 'manual':
                 manual_prefix = request.form.get('manual_prefix', '')
                 if manual_prefix and not is_valid_ipv6_prefix(manual_prefix):
                     flash('Invalid IPv6 prefix format', 'error')
@@ -818,47 +768,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 except (ValueError, TypeError):
                     alloc_size = 64
                 alloc_size = max(48, min(120, alloc_size))
-                connectivity['manual'] = {
+                session['ipv6'] = {
+                    'mode': 'manual',
                     'prefix': manual_prefix,
                     'allocation_size': alloc_size,
                 }
-
-            if 'onion' in selected:
-                connectivity['onion'] = {}
-
-            if 'broker' in selected and _broker:
-                if not broker_chain:
-                    flash('No supported chain detected for broker mode', 'error')
-                    return redirect(url_for('wizard_connectivity'))
-                broker_reg = request.form.get('broker_registry', '')
-                # Validate using chain-specific pattern from manifest
-                if broker_reg and broker_chain:
-                    pattern = broker_chain.get('contract_validation', '')
-                    if pattern and not re.match(pattern, broker_reg):
-                        flash('Invalid broker registry address', 'error')
-                        return redirect(url_for('wizard_connectivity'))
-                connectivity['broker'] = {
-                    'broker_registry': broker_reg,
-                }
-
-            # Map to session['ipv6'] for backwards compat with finalize.py
-            if 'broker' in selected:
-                session['ipv6'] = {
-                    'mode': 'broker',
-                    'broker_registry': connectivity.get('broker', {}).get('broker_registry', ''),
-                }
-            elif 'manual' in selected:
-                session['ipv6'] = {
-                    'mode': 'manual',
-                    'prefix': connectivity.get('manual', {}).get('prefix', ''),
-                    'allocation_size': connectivity.get('manual', {}).get('allocation_size', 64),
-                }
-            elif 'onion' in selected:
+            elif mode == 'onion':
                 session['ipv6'] = {'mode': 'onion'}
             else:
                 session['ipv6'] = {'mode': 'none'}
 
-            session['connectivity'] = connectivity
             return redirect(url_for(_NEXT_STEP.get('connectivity', 'wizard_admin_commands')))
 
         # Build exclusion map: all three modes are mutually exclusive
@@ -967,59 +886,19 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
-        all_finalization_steps = [
-            {'id': 'keypair', 'label': 'Generating server keypair'},
-        ]
+        network_mode = session.get('ipv6', {}).get('mode', 'none')
+        all_finalization_steps = get_step_metadata(_provisioner, _engine, network_mode)
 
-        # Engine pre-steps
-        if _engine and _engine.get('module'):
-            eng_mod = _engine['module']
-            if hasattr(eng_mod, 'get_finalization_steps'):
-                for step in eng_mod.get_finalization_steps():
-                    meta = {'id': step[0], 'label': step[1]}
-                    if len(step) > 3:
-                        meta['hint'] = step[3]
-                    all_finalization_steps.append(meta)
-
-        # Provisioner steps
+        # Provisioner-only subset (used by the summary template's provisioner section)
         provisioner_steps_meta = []
         if _provisioner and _provisioner.get('module'):
             prov_mod = _provisioner['module']
             if hasattr(prov_mod, 'get_finalization_steps'):
                 for step in prov_mod.get_finalization_steps():
-                    meta = {'id': step[0], 'label': step[1]}
+                    m = {'id': step[0], 'label': step[1]}
                     if len(step) > 3:
-                        meta['hint'] = step[3]
-                    provisioner_steps_meta.append(meta)
-        all_finalization_steps.extend(provisioner_steps_meta)
-
-        # Installer post-steps — skip ipv6/https for onion mode
-        network_mode = session.get('ipv6', {}).get('mode', 'none')
-        if network_mode != 'onion':
-            all_finalization_steps.extend([
-                {'id': 'ipv6', 'label': 'Configuring IPv6'},
-                {'id': 'https', 'label': 'Configuring HTTPS'},
-            ])
-        all_finalization_steps.extend([
-            {'id': 'signup', 'label': 'Generating signup page'},
-            {'id': 'nginx', 'label': 'Setting up nginx reverse proxy'},
-        ])
-
-        # Engine post-steps
-        if _engine and _engine.get('module'):
-            eng_mod = _engine['module']
-            if hasattr(eng_mod, 'get_post_finalization_steps'):
-                for step in eng_mod.get_post_finalization_steps():
-                    meta = {'id': step[0], 'label': step[1]}
-                    if len(step) > 3:
-                        meta['hint'] = step[3]
-                    all_finalization_steps.append(meta)
-
-        # Final steps
-        all_finalization_steps.extend([
-            {'id': 'finalize', 'label': 'Finalizing setup'},
-            {'id': 'validate', 'label': 'Validating system', 'hint': 'testing only'},
-        ])
+                        m['hint'] = step[3]
+                    provisioner_steps_meta.append(m)
 
         return render_template('wizard/summary.html',
                              summary=summary,
@@ -1092,7 +971,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if not wallet:
             return jsonify({'success': False, 'error': 'No wallet connected'}), 400
 
-        testing = Path('/etc/blockhost/.testing-mode').exists()
+        testing = TESTING_MARKER.exists()
         fetch_fn = getattr(_broker['module'], 'fetch_registry', None)
         if not fetch_fn:
             return jsonify({'success': False, 'error': 'Broker module has no fetch_registry'}), 500
@@ -1142,11 +1021,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
         """Start VM template build (async)."""
         job_id = f"template-{secrets.token_hex(4)}"
 
-        _jobs[job_id] = {
+        _record_job(job_id, {
             'status': 'running',
             'progress': 0,
             'message': 'Starting template build...',
-        }
+        })
 
         thread = threading.Thread(
             target=_build_vm_template,
@@ -1165,6 +1044,15 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'error': 'Job not found'}), 404
         return jsonify(job)
 
+    def _spawn_finalization(setup_state, config: dict, message: str, **extra):
+        """Run finalization in a background thread; return the JSON response."""
+        thread = threading.Thread(
+            target=run_finalization_with_state,
+            args=(setup_state, config, _provisioner, _engine),
+        )
+        thread.start()
+        return jsonify({'status': 'running', 'message': message, **extra})
+
     # CI/CD test setup endpoint (testing mode only)
     @app.route('/api/setup-test', methods=['POST'])
     def api_setup_test():
@@ -1173,8 +1061,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
         finalization. Only available when the ISO was built with --testing.
         Returns 404 on production systems.
         """
-        testing_marker = Path('/etc/blockhost/.testing-mode')
-        if not testing_marker.exists():
+        if not TESTING_MARKER.exists():
             abort(404)
 
         data = request.get_json()
@@ -1227,18 +1114,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
             })
 
         setup_state.start(config)
-
-        thread = threading.Thread(
-            target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner, _engine)
+        return _spawn_finalization(
+            setup_state, config,
+            'Test setup started — finalization running',
+            poll_url='/api/finalize/status',
         )
-        thread.start()
-
-        return jsonify({
-            'status': 'running',
-            'message': 'Test setup started — finalization running',
-            'poll_url': '/api/finalize/status',
-        })
 
     # Finalization API endpoints
     @app.route('/api/finalize', methods=['POST'])
@@ -1271,20 +1151,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
             setup_state.state['status'] = 'running'
             setup_state.save()
 
-        # Start the finalization process
         setup_state.start(config)
-
-        # Run in background thread
-        thread = threading.Thread(
-            target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner, _engine)
-        )
-        thread.start()
-
-        return jsonify({
-            'status': 'running',
-            'message': 'Finalization started',
-        })
+        return _spawn_finalization(setup_state, config, 'Finalization started')
 
     @app.route('/api/finalize/status')
     @require_auth
@@ -1302,7 +1170,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
         if not config:
             return jsonify({'error': 'No configuration available'}), 404
 
-        import yaml
         plaintext = yaml.dump(config, default_flow_style=False, sort_keys=False)
 
         admin_signature = config.get('admin_signature', '')
@@ -1360,22 +1227,8 @@ def create_app(config: Optional[dict] = None) -> Flask:
         setup_state.state['status'] = 'running'
         setup_state.save()
 
-        # Get stored config
-        config = setup_state.state.get('config', {})
-        if not config:
-            config = _gather_session_config()
-
-        # Run in background thread
-        thread = threading.Thread(
-            target=run_finalization_with_state,
-            args=(setup_state, config, _provisioner, _engine)
-        )
-        thread.start()
-
-        return jsonify({
-            'status': 'running',
-            'message': 'Retry started',
-        })
+        config = setup_state.state.get('config') or _gather_session_config()
+        return _spawn_finalization(setup_state, config, 'Retry started')
 
     @app.route('/api/finalize/reset', methods=['POST'])
     @require_auth
@@ -1390,11 +1243,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
     def api_install_start():
         """Start installation process."""
         # Hypervisor already installed, just mark setup complete
-        marker_dir = Path('/var/lib/blockhost')
-        marker_file = marker_dir / '.setup-complete'
         try:
-            marker_dir.mkdir(parents=True, exist_ok=True)
-            marker_file.touch()
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (DATA_DIR / '.setup-complete').touch()
         except Exception:
             pass
         return jsonify({'status': 'started', 'job_id': 'install-001'})
@@ -1415,12 +1266,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_complete():
         """Mark setup as complete."""
-        marker_dir = Path('/var/lib/blockhost')
-        marker_file = marker_dir / '.setup-complete'
-
         try:
-            marker_dir.mkdir(parents=True, exist_ok=True)
-            marker_file.touch()
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (DATA_DIR / '.setup-complete').touch()
             return jsonify({'success': True})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
@@ -1439,7 +1287,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_validation_output():
         """Get the validation output (testing mode only)."""
-        output_file = Path('/var/lib/blockhost/validation-output.txt')
+        output_file = DATA_DIR / 'validation-output.txt'
         if output_file.exists():
             return jsonify({
                 'success': True,
@@ -1514,13 +1362,13 @@ def run_server(host: str = '0.0.0.0', port: int = 80, use_https: bool = False):
             app.config['SESSION_COOKIE_SECURE'] = True
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(cert_path), str(key_path))
-            testing_mode = Path('/etc/blockhost/.testing-mode').exists()
+            testing_mode = TESTING_MARKER.exists()
             app.run(host=host, port=443, ssl_context=context,
                     debug=testing_mode, use_reloader=testing_mode)
             return
 
     # HTTP mode
-    testing_mode = Path('/etc/blockhost/.testing-mode').exists()
+    testing_mode = TESTING_MARKER.exists()
     app.run(host=host, port=port, debug=testing_mode, use_reloader=testing_mode)
 
 
