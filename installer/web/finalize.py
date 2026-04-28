@@ -110,30 +110,8 @@ def run_finalization_with_state(setup_state, config: dict, provisioner, engine=N
                 success, error = step_func(config)
 
                 if success:
-                    # Step data convention: step functions set
-                    # config['_step_result_<step_id>'] for UI display data
+                    # Each step sets config['_step_result_<step_id>'] for UI display data.
                     step_data = config.pop(f'_step_result_{step_id}', None)
-
-                    # Installer step data (stays here — these steps are ours)
-                    if not step_data:
-                        if step_id == 'ipv6':
-                            ipv6_cfg = config.get('ipv6', {})
-                            prefix = ipv6_cfg.get('prefix', '')
-                            if not prefix:
-                                alloc_file = CONFIG_DIR / BROKER_ALLOCATION_FILE
-                                if alloc_file.exists():
-                                    try:
-                                        alloc = json.loads(alloc_file.read_text())
-                                        prefix = alloc.get('prefix', '')
-                                    except (json.JSONDecodeError, IOError):
-                                        pass
-                            if prefix:
-                                step_data = {'prefix': prefix, 'mode': ipv6_cfg.get('mode', '')}
-                        elif step_id == 'https':
-                            https_cfg = config.get('https', {})
-                            if https_cfg.get('hostname'):
-                                step_data = {'hostname': https_cfg['hostname']}
-
                     setup_state.mark_step_completed(step_id, data=step_data)
                 else:
                     setup_state.mark_step_failed(step_id, error or f'{step_name} failed')
@@ -493,6 +471,7 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 _create_host_dummy_iface(network)
                 _add_bridge_gateway(network)
                 _persist_db_yaml_and_reserve_ipv6(network, prefix)
+            config['_step_result_ipv6'] = {'prefix': prefix, 'mode': ipv6.get('mode', '')}
 
         network_mode_file.write_text(f'{ipv6.get("mode", "none")}\n')
         return True, None
@@ -654,6 +633,7 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
 
         # Store in running config for other steps
         config['https'] = https_config
+        config['_step_result_https'] = {'hostname': hostname}
 
         return True, None
     except Exception as e:
