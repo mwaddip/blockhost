@@ -92,27 +92,35 @@ def parse_pam_ciphertext(output: str) -> Optional[str]:
     return None
 
 
-def _run_openssl_selfsigned(cert_path: str, key_path: str, cn: str) -> bool:
-    """Run openssl to generate a self-signed certificate. Returns True on success."""
+def generate_self_signed_cert(
+    cert_path: Union[str, Path],
+    key_path: Union[str, Path],
+    cn: str = 'blockhost-installer',
+    set_owner: bool = False,
+) -> bool:
+    """Generate a self-signed certificate. Returns True on success.
+
+    set_owner=True chmods the key to 0o640 and sets root:blockhost ownership
+    (used by finalization for HTTPS fallback so nginx-as-blockhost can read it).
+    """
     try:
         subprocess.run([
             'openssl', 'req', '-x509', '-newkey', 'rsa:4096',
-            '-keyout', key_path, '-out', cert_path,
+            '-keyout', str(key_path), '-out', str(cert_path),
             '-days', '365', '-nodes', '-subj', f'/CN={cn}',
         ], check=True, capture_output=True, timeout=60)
-        return True
     except Exception:
         return False
+    if set_owner:
+        set_blockhost_ownership(key_path, 0o640)
+    return True
 
 
 def generate_self_signed_cert_for_finalization(hostname: str, ssl_dir: Path):
     """Generate a self-signed certificate for fallback HTTPS (used by finalization)."""
-    cert_path = ssl_dir / 'cert.pem'
-    key_path = ssl_dir / 'key.pem'
-    _run_openssl_selfsigned(str(cert_path), str(key_path), hostname)
-    set_blockhost_ownership(key_path, 0o640)
-
-
-def generate_self_signed_cert(cert_path: str, key_path: str) -> bool:
-    """Generate self-signed SSL certificate (used by run_server)."""
-    return _run_openssl_selfsigned(cert_path, key_path, 'blockhost-installer')
+    generate_self_signed_cert(
+        ssl_dir / 'cert.pem',
+        ssl_dir / 'key.pem',
+        cn=hostname,
+        set_owner=True,
+    )
