@@ -308,6 +308,9 @@ def update_admin_path(new_path):
     # Normalize
     new_path = "/" + new_path.strip("/")
 
+    # Defense-in-depth: this rule is duplicated in admin/root-agent-actions/admin_panel.py.
+    # The root-agent socket is a privilege boundary; both sides validate independently.
+    # If you change one regex, change the other.
     if not re.match(r'^/[a-z0-9][a-z0-9/-]{0,62}[a-z0-9]$', new_path):
         return False, "invalid path (lowercase letters, numbers, hyphens, slashes only)"
 

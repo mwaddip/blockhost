@@ -19,6 +19,9 @@ def update_admin_path(params):
     # Normalize
     new_path = "/" + new_path.strip("/")
 
+    # Defense-in-depth: this rule is duplicated in admin/system.py.
+    # The root-agent socket is a privilege boundary; do not trust the caller's validation.
+    # If you change one regex, change the other.
     if not re.match(r"^/[a-z0-9][a-z0-9/-]{0,62}[a-z0-9]$", new_path):
         return {"ok": False, "error": "invalid path"}
 
