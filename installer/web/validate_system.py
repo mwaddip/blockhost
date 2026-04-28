@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 
+import yaml
+
 from installer.common.engine_manifest import load_engine_manifest
 
 _manifest = load_engine_manifest()
@@ -143,87 +145,60 @@ def _check_file_permissions(path: Path, expected_mode: int, category: str, name:
     return ValidationResult(category, name, False, f"Wrong permissions on {path}: expected {oct(expected_mode)}, got {oct(actual_mode)}")
 
 
-def _check_json_syntax(path: Path, category: str, name: str, required_keys: list[str] = None) -> ValidationResult:
-    """Check if a JSON file is valid and optionally has required keys."""
+def _walk_required_keys(data, required_keys: list[str]) -> list[str]:
+    """Return required keys missing from data. Dotted keys (e.g. 'blockchain.chain_id') walk nested dicts."""
+    missing = []
+    for key in required_keys:
+        if '.' in key:
+            obj = data
+            found = True
+            for part in key.split('.'):
+                if isinstance(obj, dict) and part in obj:
+                    obj = obj[part]
+                else:
+                    found = False
+                    break
+            if not found:
+                missing.append(key)
+        elif not isinstance(data, dict) or key not in data:
+            missing.append(key)
+    return missing
+
+
+def _check_structured_syntax(
+    path: Path, parser: Callable, format_name: str,
+    category: str, name: str, required_keys: Optional[list[str]] = None,
+) -> ValidationResult:
+    """Validate a structured-text file by parsing it and checking required keys.
+
+    parser is called with the file's text contents; any exception is treated
+    as a parse failure. A None result is treated as an empty file.
+    """
     if not path.exists():
         return ValidationResult(category, name, False, f"Missing: {path}")
 
     try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        return ValidationResult(category, name, False, f"Invalid JSON in {path}: {e}")
+        data = parser(path.read_text())
+    except Exception as e:
+        return ValidationResult(category, name, False, f"Invalid {format_name} in {path}: {e}")
+
+    if data is None:
+        return ValidationResult(category, name, False, f"Empty {format_name} file: {path}")
 
     if required_keys:
-        missing = []
-        for key in required_keys:
-            if '.' in key:
-                # Nested key like "blockchain.chain_id"
-                parts = key.split('.')
-                obj = data
-                found = True
-                for part in parts:
-                    if isinstance(obj, dict) and part in obj:
-                        obj = obj[part]
-                    else:
-                        found = False
-                        break
-                if not found:
-                    missing.append(key)
-            elif key not in data:
-                missing.append(key)
-
+        missing = _walk_required_keys(data, required_keys)
         if missing:
             return ValidationResult(category, name, False, f"Missing keys in {path}: {', '.join(missing)}")
 
-    return ValidationResult(category, name, True, f"Valid JSON: {path}")
+    return ValidationResult(category, name, True, f"Valid {format_name}: {path}")
+
+
+def _check_json_syntax(path: Path, category: str, name: str, required_keys: list[str] = None) -> ValidationResult:
+    return _check_structured_syntax(path, json.loads, "JSON", category, name, required_keys)
 
 
 def _check_yaml_syntax(path: Path, category: str, name: str, required_keys: list[str] = None) -> ValidationResult:
-    """Check if a YAML file is valid and optionally has required keys."""
-    if not path.exists():
-        return ValidationResult(category, name, False, f"Missing: {path}")
-
-    try:
-        import yaml
-        data = yaml.safe_load(path.read_text())
-    except ImportError:
-        # Fallback: basic syntax check without full parsing
-        try:
-            content = path.read_text()
-            if not content.strip():
-                return ValidationResult(category, name, False, f"Empty file: {path}")
-            return ValidationResult(category, name, True, f"File exists (yaml module unavailable): {path}")
-        except Exception as e:
-            return ValidationResult(category, name, False, f"Cannot read {path}: {e}")
-    except Exception as e:
-        return ValidationResult(category, name, False, f"Invalid YAML in {path}: {e}")
-
-    if data is None:
-        return ValidationResult(category, name, False, f"Empty YAML file: {path}")
-
-    if required_keys:
-        missing = []
-        for key in required_keys:
-            if '.' in key:
-                # Nested key like "blockchain.chain_id"
-                parts = key.split('.')
-                obj = data
-                found = True
-                for part in parts:
-                    if isinstance(obj, dict) and part in obj:
-                        obj = obj[part]
-                    else:
-                        found = False
-                        break
-                if not found:
-                    missing.append(key)
-            elif key not in data:
-                missing.append(key)
-
-        if missing:
-            return ValidationResult(category, name, False, f"Missing keys in {path}: {', '.join(missing)}")
-
-    return ValidationResult(category, name, True, f"Valid YAML: {path}")
+    return _check_structured_syntax(path, yaml.safe_load, "YAML", category, name, required_keys)
 
 
 def _check_private_key(path: Path, category: str, name: str, expected_hex_length: int = None) -> ValidationResult:
