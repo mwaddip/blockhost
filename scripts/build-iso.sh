@@ -203,10 +203,12 @@ add_blockhost_files() {
     cp "${PROJECT_DIR}/scripts/first-boot.sh" "${ISO_EXTRACT}/blockhost/"
     chmod +x "${ISO_EXTRACT}/blockhost/first-boot.sh"
 
-    # Copy install-packages script
+    # Copy preseed late_command body + first-boot helper scripts
     mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
     cp "${PROJECT_DIR}/scripts/install-packages.sh" "${ISO_EXTRACT}/blockhost/scripts/"
+    cp "${PROJECT_DIR}/scripts/late-install.sh" "${ISO_EXTRACT}/blockhost/scripts/"
     chmod +x "${ISO_EXTRACT}/blockhost/scripts/install-packages.sh"
+    chmod +x "${ISO_EXTRACT}/blockhost/scripts/late-install.sh"
 
     # Copy systemd services
     cp "${PROJECT_DIR}/systemd/blockhost-firstboot.service" "${ISO_EXTRACT}/blockhost/"
@@ -317,91 +319,23 @@ configure_testing_mode() {
         log "Set apt proxy to: $APT_PROXY"
     fi
 
-    # Add late_command to enable SSH root login
-    # We need to append to the existing late_command or create a new one
-    if [ -f "$PRESEED_FILE" ]; then
-        # Create a script that will be run during late_command to configure SSH
-        mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
-        cat > "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh" << TESTING_EOF
-#!/bin/bash
-# Testing mode configuration
+    # Add testing-mode helper scripts. late-install.sh detects late-testing.sh
+    # on the CDROM and invokes it; no preseed surgery needed.
+    mkdir -p "${ISO_EXTRACT}/blockhost/scripts"
+    cp "${PROJECT_DIR}/scripts/late-testing.sh" "${ISO_EXTRACT}/blockhost/scripts/"
+    cp "${PROJECT_DIR}/scripts/configure-testing.sh" "${ISO_EXTRACT}/blockhost/scripts/"
+    cp "${PROJECT_DIR}/scripts/setup-btrfs-snapshots.sh" "${ISO_EXTRACT}/blockhost/scripts/"
+    chmod +x "${ISO_EXTRACT}/blockhost/scripts/late-testing.sh"
+    chmod +x "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh"
+    chmod +x "${ISO_EXTRACT}/blockhost/scripts/setup-btrfs-snapshots.sh"
 
-# Enable SSH root login with password
-if [ -f /etc/ssh/sshd_config ]; then
-    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    # Also handle sshd_config.d directory if it exists
-    if [ -d /etc/ssh/sshd_config.d ]; then
-        echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/99-testing.conf
-    fi
-fi
+    # Build-time values for configure-testing.sh (sourced inside the chroot).
+    cat > "${ISO_EXTRACT}/blockhost/scripts/late-testing.env" <<EOF
+SSH_PUBKEY="${SSH_PUBKEY}"
+APT_PROXY="${APT_PROXY}"
+EOF
 
-# Add SSH public key for passwordless access
-if [ -n "${SSH_PUBKEY}" ]; then
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    echo "${SSH_PUBKEY}" >> /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
-    echo "SSH public key added to /root/.ssh/authorized_keys" >> /var/log/blockhost-install.log
-fi
-
-# Set apt proxy for post-install (only if provided at build time)
-if [ -n "${APT_PROXY}" ]; then
-    mkdir -p /etc/apt/apt.conf.d
-    echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/00proxy
-fi
-
-# Ensure SSH is always accessible in testing mode (bypass pve-firewall)
-# Persist across reboots via /etc/network/interfaces post-up or iptables-persistent
-mkdir -p /etc/iptables
-iptables -I INPUT -p tcp --dport 22 -j ACCEPT -m comment --comment "blockhost-testing" 2>/dev/null || true
-iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-
-# Create testing mode marker for validation script
-mkdir -p /etc/blockhost
-touch /etc/blockhost/.testing-mode
-chmod 0644 /etc/blockhost/.testing-mode
-
-echo "Testing mode configured" >> /var/log/blockhost-install.log
-TESTING_EOF
-        chmod +x "${ISO_EXTRACT}/blockhost/scripts/configure-testing.sh"
-
-        # --- Btrfs @snapshots directory setup (runs via in-target in late_command) ---
-        # Creates the @snapshots directory on the btrfs top-level so first-boot
-        # can take snapshots at each stage. Works with Debian's native @rootfs layout.
-        # Runs via in-target because the installer env lacks bash/findmnt/btrfs-progs.
-        cat > "${ISO_EXTRACT}/blockhost/scripts/setup-btrfs-snapshots.sh" << 'BTRFS_EOF'
-#!/bin/bash
-# Btrfs snapshot directory setup — runs via in-target (chroot into installed system)
-
-LOG="/var/log/blockhost-install.log"
-
-# Detect the root device (strip btrfs [/subvol] suffix)
-ROOT_DEV=$(findmnt -no SOURCE / | sed 's/\[.*$//')
-FSTYPE=$(stat -f -c %T /)
-
-if [ -z "$ROOT_DEV" ] || [ "$FSTYPE" != "btrfs" ]; then
-    echo "btrfs-setup: root is ${FSTYPE:-unknown}, not btrfs — skipping" >> "$LOG"
-    exit 0
-fi
-
-# Mount the top-level subvolume (subvolid=5)
-mkdir -p /mnt/btrfs-top
-mount -o subvolid=5 "$ROOT_DEV" /mnt/btrfs-top
-
-# Create @snapshots directory on the top-level (sibling of @rootfs)
-mkdir -p /mnt/btrfs-top/@snapshots
-echo "btrfs-setup: created @snapshots on top-level (dev=$ROOT_DEV)" >> "$LOG"
-
-umount /mnt/btrfs-top
-BTRFS_EOF
-        chmod +x "${ISO_EXTRACT}/blockhost/scripts/setup-btrfs-snapshots.sh"
-
-        # Add to the late_command - append script execution
-        # Order: copy files → configure-testing (in-target) → btrfs setup (NOT in-target) → revert script
-        sed -i "s|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log|echo \"Files copied successfully\" >> /target/var/log/blockhost-install.log; if [ -f \"\$CDROM/blockhost/scripts/configure-testing.sh\" ]; then cp \"\$CDROM/blockhost/scripts/configure-testing.sh\" /target/tmp/; in-target /bin/bash /tmp/configure-testing.sh; fi; if [ -f \"\$CDROM/blockhost/scripts/setup-btrfs-snapshots.sh\" ]; then cp \"\$CDROM/blockhost/scripts/setup-btrfs-snapshots.sh\" /target/tmp/; in-target /bin/bash /tmp/setup-btrfs-snapshots.sh; fi; if [ -f \"\$CDROM/blockhost/scripts/blockhost-revert\" ]; then cp \"\$CDROM/blockhost/scripts/blockhost-revert\" /target/usr/local/bin/revert; chmod +x /target/usr/local/bin/revert; fi; if [ -f \"\$CDROM/blockhost/scripts/blockhost-resume\" ]; then cp \"\$CDROM/blockhost/scripts/blockhost-resume\" /target/usr/local/bin/resume; chmod +x /target/usr/local/bin/resume; fi|" "$PRESEED_FILE"
-
-        log "Added SSH root login, apt proxy, btrfs snapshot setup, and revert script"
-    fi
+    log "Added testing-mode scripts and env file"
 }
 
 rebuild_iso() {
