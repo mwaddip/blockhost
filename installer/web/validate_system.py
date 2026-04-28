@@ -14,8 +14,10 @@ This module verifies:
 - Terraform is initialized
 """
 
+import grp
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -799,7 +801,6 @@ def run_full_validation() -> ValidationReport:
     state_dir = Path('/var/lib/blockhost')
     if state_dir.exists():
         try:
-            import pwd
             dir_stat = state_dir.stat()
             owner = pwd.getpwuid(dir_stat.st_uid).pw_name
             if owner == 'blockhost':
@@ -817,7 +818,6 @@ def run_full_validation() -> ValidationReport:
     # /etc/blockhost directory permissions (750 root:blockhost)
     if etc_blockhost.exists():
         try:
-            import grp
             dir_stat = etc_blockhost.stat()
             dir_mode = stat.S_IMODE(dir_stat.st_mode)
             if dir_mode == 0o750:
@@ -842,7 +842,6 @@ def run_full_validation() -> ValidationReport:
     tf_state_dir = Path('/var/lib/blockhost/terraform')
     if tf_state_dir.exists() and provisioner_name in (None, 'proxmox'):
         try:
-            import pwd
             tf_stat = tf_state_dir.stat()
             tf_owner = pwd.getpwuid(tf_stat.st_uid).pw_name
             if tf_owner == 'blockhost':

@@ -353,7 +353,7 @@ def _save_manual_allocation(ipv6: dict) -> str:
     return prefix
 
 
-def _create_host_dummy_iface(prefix: str):
+def _create_host_dummy_iface(network: ipaddress.IPv6Network):
     """Give the host its own routable /128 on dummy0; persist via systemd oneshot.
 
     The host's wg-broker address (::201) has routing issues from the WG topology;
@@ -361,7 +361,6 @@ def _create_host_dummy_iface(prefix: str):
     Proxmox bypasses ifupdown, so interfaces.d/ isn't reliable — use systemd.
     """
     try:
-        network = ipaddress.IPv6Network(prefix, strict=False)
         host_addr = str(network.network_address + 2)
 
         # ip link add type dummy auto-loads the kernel module; explicit modprobe
@@ -396,14 +395,13 @@ WantedBy=multi-user.target
         print(f"Warning: Could not create dummy interface: {e}")
 
 
-def _add_bridge_gateway(prefix: str):
+def _add_bridge_gateway(network: ipaddress.IPv6Network):
     """Add the VM-facing IPv6 gateway address to the host bridge and persist it."""
     try:
         bridge_dev = _discover_bridge()
         if not bridge_dev:
             print("Warning: No bridge found for IPv6 gateway — skipping")
             return
-        network = ipaddress.IPv6Network(prefix, strict=False)
         gw_addr = str(network.network_address + 1)
 
         # /128 to avoid conflicting with the /120 on wg-broker
@@ -421,10 +419,9 @@ def _add_bridge_gateway(prefix: str):
         print(f"Warning: Could not add IPv6 gateway to bridge: {e}")
 
 
-def _persist_db_yaml_and_reserve_ipv6(prefix: str):
+def _persist_db_yaml_and_reserve_ipv6(network: ipaddress.IPv6Network, prefix: str):
     """Single pass: read db.yaml once, reserve host IPv6 addrs in vm-db, write ipv6_pool."""
     try:
-        network = ipaddress.IPv6Network(prefix, strict=False)
         reserved = [
             str(network.network_address + 1),  # bridge gateway
             str(network.network_address + 2),  # dummy0 host address
@@ -488,9 +485,14 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
 
         prefix = config.get('ipv6', {}).get('prefix', '')
         if prefix:
-            _create_host_dummy_iface(prefix)
-            _add_bridge_gateway(prefix)
-            _persist_db_yaml_and_reserve_ipv6(prefix)
+            try:
+                network = ipaddress.IPv6Network(prefix, strict=False)
+            except ValueError as e:
+                print(f"Warning: Invalid IPv6 prefix '{prefix}': {e}")
+            else:
+                _create_host_dummy_iface(network)
+                _add_bridge_gateway(network)
+                _persist_db_yaml_and_reserve_ipv6(network, prefix)
 
         network_mode_file.write_text(f'{ipv6.get("mode", "none")}\n')
         return True, None
