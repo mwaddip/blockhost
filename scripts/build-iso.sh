@@ -136,19 +136,21 @@ add_preseed() {
     # Copy preseed file
     cp "${PROJECT_DIR}/preseed/blockhost.preseed" "${ISO_EXTRACT}/preseed.cfg"
 
-    # Copy pre-install disclaimer script (invoked by preseed/early_command)
-    cp "${PROJECT_DIR}/preseed/disclaimer.sh" "${ISO_EXTRACT}/disclaimer.sh"
-    chmod +x "${ISO_EXTRACT}/disclaimer.sh"
+    # Copy pre-install disclaimer text (shown by isolinux's `display` directive
+    # before the boot prompt — pre-d-i, pre-ncurses).
+    mkdir -p "${ISO_EXTRACT}/isolinux"
+    cp "${PROJECT_DIR}/preseed/disclaimer.txt" "${ISO_EXTRACT}/isolinux/disclaimer.txt"
 
-    # Modify GRUB to use preseed
+    # Modify GRUB to use preseed.
+    # UEFI grub doesn't support the isolinux-style typed-label confirmation,
+    # so the disclaimer rides in the menuentry title and there's no auto-boot
+    # — the operator has to actively select the entry to proceed.
     GRUB_CFG="${ISO_EXTRACT}/boot/grub/grub.cfg"
     if [ -f "$GRUB_CFG" ]; then
-        # Add auto-install menu entry at the top
         cat > "${GRUB_CFG}.new" << 'EOF'
-set timeout=5
-set default=0
+set timeout=-1
 
-menuentry "BlockHost Auto Install" {
+menuentry "WARNING: this WIPES the disk. Press Enter to install BlockHost; ESC to cancel." {
     linux /install.amd/vmlinuz auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
     initrd /install.amd/initrd.gz
 }
@@ -159,29 +161,37 @@ EOF
         log "Updated GRUB configuration"
     fi
 
-    # Modify isolinux for BIOS boot
+    # Modify isolinux for BIOS boot.
+    # Prompt-mode boot: display the disclaimer, require the operator to type
+    # `Understood` (case-insensitive — syslinux LABELs are matched that way)
+    # at the boot prompt. Pressing Enter alone tries to load the non-existent
+    # `read-the-disclaimer` label and bounces back to the prompt, so accidental
+    # confirmation isn't possible. IMPLICIT 0 blocks treating typed input as
+    # arbitrary kernel filenames.
     ISOLINUX_CFG="${ISO_EXTRACT}/isolinux/isolinux.cfg"
     if [ -f "$ISOLINUX_CFG" ]; then
         cat > "$ISOLINUX_CFG" << 'EOF'
-default blockhost
-timeout 50
-prompt 0
+default read-the-disclaimer
+prompt 1
+timeout 0
+implicit 0
+display disclaimer.txt
 
-label blockhost
-    menu label ^BlockHost Auto Install
+label Understood
     kernel /install.amd/vmlinuz
     append auto=true priority=critical preseed/file=/cdrom/preseed.cfg initrd=/install.amd/initrd.gz --- quiet
 EOF
         log "Updated isolinux configuration"
     fi
 
-    # Also update txt.cfg if it exists
+    # Also update txt.cfg if it exists (Debian's stock isolinux.cfg INCLUDEs
+    # this; ours is self-contained, but keep txt.cfg consistent as a hedge).
     TXT_CFG="${ISO_EXTRACT}/isolinux/txt.cfg"
     if [ -f "$TXT_CFG" ]; then
         cat > "$TXT_CFG" << 'EOF'
-default blockhost
-label blockhost
-    menu label ^BlockHost Auto Install
+default read-the-disclaimer
+
+label Understood
     kernel /install.amd/vmlinuz
     append auto=true priority=critical preseed/file=/cdrom/preseed.cfg initrd=/install.amd/initrd.gz --- quiet
 EOF

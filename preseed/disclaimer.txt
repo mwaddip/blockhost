@@ -1,0 +1,18 @@
+
+  ===============================================================
+
+                   !!  WARNING -- READ CAREFULLY  !!
+
+  Continuing will WIPE the connected hard drive and install
+  BlockHost.
+
+  All existing data on the target disk will be lost permanently.
+
+  To proceed, type the following word at the boot prompt below:
+
+                             Understood
+
+  To cancel, power off the machine.
+
+  ===============================================================
+
