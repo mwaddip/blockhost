@@ -7,9 +7,7 @@ Admin identity resolved via NFT ownership: `bw who admin` queries the chain
 for the current holder of the admin credential NFT.
 """
 
-import json
 import os
-import re
 import secrets
 import socket
 import subprocess
@@ -19,35 +17,14 @@ from pathlib import Path
 
 from flask import current_app, redirect, request, session
 
+from installer.common.engine_manifest import load_engine_manifest
 from installer.common.otp import OTP_CHARS, OTP_LENGTH
 
 KNOCK_ACTIVE_PATH = Path("/run/blockhost/knock.active")
-ENGINE_MANIFEST_PATH = Path("/usr/share/blockhost/engine.json")
 
-# Engine-supplied format constraints (loaded once at startup)
-_address_re = None
-_signature_re = None
-
-
-def _load_engine_constraints():
-    """Load address/signature format patterns from engine manifest."""
-    global _address_re, _signature_re
-    if not ENGINE_MANIFEST_PATH.is_file():
-        return
-    try:
-        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
-        constraints = manifest.get('constraints', {})
-        ap = constraints.get('address_pattern')
-        if ap:
-            _address_re = re.compile(ap)
-        sp = constraints.get('signature_pattern')
-        if sp:
-            _signature_re = re.compile(sp)
-    except (json.JSONDecodeError, re.error, OSError):
-        pass
-
-
-_load_engine_constraints()
+_manifest = load_engine_manifest()
+_address_re = _manifest.address_re
+_signature_re = _manifest.signature_re
 
 CHALLENGE_TTL = 300  # 5 minutes
 SESSION_TTL = 3600  # 1 hour

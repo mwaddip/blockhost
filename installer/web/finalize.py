@@ -280,7 +280,16 @@ def _extract_prefix_from_broker_stdout(stdout: str) -> str:
 def _request_broker_allocation_step(config: dict, ipv6: dict) -> tuple[Optional[str], Optional[str]]:
     """Run broker-client request + install. Returns (prefix, error)."""
     registry = ipv6.get('broker_registry')
-    nft_contract = config.get('blockchain', {}).get('nft_contract', '')
+
+    # Engine declares its session key in the manifest; fall back to 'blockchain'
+    # for engines that don't declare one (legacy).
+    session_key = 'blockchain'
+    engine = config.get('_engine')
+    if engine and engine.get('manifest'):
+        declared = engine['manifest'].get('config_keys', {}).get('session_key')
+        if declared:
+            session_key = declared
+    nft_contract = config.get(session_key, {}).get('nft_contract', '')
 
     if not nft_contract:
         return None, 'NFT contract address not available for broker request'

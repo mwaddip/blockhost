@@ -23,28 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 
+from installer.common.engine_manifest import load_engine_manifest
 
-ENGINE_MANIFEST_PATH = Path('/usr/share/blockhost/engine.json')
-
-# Engine-supplied address format (loaded once at startup)
-_address_re = None
-_engine_name = None
-
-
-def _load_engine_manifest():
-    """Load engine name and address format pattern from engine manifest."""
-    global _address_re, _engine_name
-    try:
-        manifest = json.loads(ENGINE_MANIFEST_PATH.read_text())
-        _engine_name = manifest.get('name')
-        ap = manifest.get('constraints', {}).get('address_pattern')
-        if ap:
-            _address_re = re.compile(ap)
-    except (OSError, json.JSONDecodeError, re.error):
-        pass
-
-
-_load_engine_manifest()
+_manifest = load_engine_manifest()
+_address_re = _manifest.address_re
+_engine_name = _manifest.name
 
 
 @dataclass

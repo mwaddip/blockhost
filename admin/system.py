@@ -12,37 +12,17 @@ import shutil
 import socket
 import subprocess
 
+from installer.common.engine_manifest import load_engine_manifest
+
 ADMIN_CONFIG_PATH = "/etc/blockhost/admin.json"
 ADMIN_COMMANDS_PATH = "/etc/blockhost/admin-commands.json"
 ADDRESSBOOK_PATH = "/etc/blockhost/addressbook.json"
 BW_ENV_PATH = "/opt/blockhost/.env"
-ENGINE_MANIFEST_PATH = "/usr/share/blockhost/engine.json"
 
-# Engine-supplied format constraints (loaded once at startup)
-_address_re = None
-_token_re = None
-_native_token = None
-
-
-def _load_engine_constraints():
-    """Load format patterns from engine manifest for input validation."""
-    global _address_re, _token_re, _native_token
-    try:
-        with open(ENGINE_MANIFEST_PATH) as f:
-            manifest = json.load(f)
-        constraints = manifest.get('constraints', {})
-        ap = constraints.get('address_pattern')
-        if ap:
-            _address_re = re.compile(ap)
-        tp = constraints.get('token_pattern')
-        if tp:
-            _token_re = re.compile(tp)
-        _native_token = constraints.get('native_token')
-    except (OSError, json.JSONDecodeError, re.error):
-        pass
-
-
-_load_engine_constraints()
+_manifest = load_engine_manifest()
+_address_re = _manifest.address_re
+_token_re = _manifest.token_re
+_native_token = _manifest.native_token
 
 
 def _valid_token(token):
