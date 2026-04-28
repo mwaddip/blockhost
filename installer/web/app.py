@@ -814,11 +814,16 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 ports_str = request.form.get('knock_ports', '22')
                 ports = [int(p.strip()) for p in ports_str.split(',') if p.strip().isdigit()]
 
+                try:
+                    knock_timeout = int(request.form.get('knock_timeout', 300))
+                except (ValueError, TypeError):
+                    knock_timeout = 300
+
                 admin_commands.update({
                     'destination_mode': request.form.get('destination_mode', 'self'),
                     'knock_command': request.form.get('knock_command', ''),
                     'knock_ports': ports,
-                    'knock_timeout': max(30, min(3600, int(request.form.get('knock_timeout', 300)))),
+                    'knock_timeout': max(30, min(3600, knock_timeout)),
                 })
 
             session['admin_commands'] = admin_commands

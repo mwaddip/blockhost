@@ -19,6 +19,8 @@ from pathlib import Path
 
 from flask import current_app, redirect, request, session
 
+from installer.common.otp import OTP_CHARS, OTP_LENGTH
+
 KNOCK_ACTIVE_PATH = Path("/run/blockhost/knock.active")
 ENGINE_MANIFEST_PATH = Path("/usr/share/blockhost/engine.json")
 
@@ -49,8 +51,6 @@ _load_engine_constraints()
 
 CHALLENGE_TTL = 300  # 5 minutes
 SESSION_TTL = 3600  # 1 hour
-OTP_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L
-OTP_LENGTH = 6
 
 # Module-level state (same pattern as broker-manager)
 _challenges = {}  # code → expiry timestamp
