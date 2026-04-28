@@ -195,6 +195,7 @@ def _get_finalization_step_ids() -> list[str]:
 
 # Global job storage for async operations
 _jobs: dict = {}
+_jobs_lock = threading.Lock()
 _JOBS_TTL_SECONDS = 3600
 
 
@@ -202,12 +203,27 @@ def _record_job(job_id: str, initial: dict):
     """Insert a new job, dropping any entries older than _JOBS_TTL_SECONDS."""
     now = time.monotonic()
     initial.setdefault('created_at', now)
-    stale = [jid for jid, j in _jobs.items()
-             if j.get('status') in ('completed', 'failed')
-             and (now - j.get('created_at', now)) > _JOBS_TTL_SECONDS]
-    for jid in stale:
-        _jobs.pop(jid, None)
-    _jobs[job_id] = initial
+    with _jobs_lock:
+        stale = [jid for jid, j in _jobs.items()
+                 if j.get('status') in ('completed', 'failed')
+                 and (now - j.get('created_at', now)) > _JOBS_TTL_SECONDS]
+        for jid in stale:
+            _jobs.pop(jid, None)
+        _jobs[job_id] = initial
+
+
+def _jobs_update(job_id: str, **fields):
+    """Atomically update fields on an existing job."""
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id].update(fields)
+
+
+def _jobs_snapshot(job_id: str) -> Optional[dict]:
+    """Return a shallow copy of a job's state, or None if missing."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        return dict(job) if job else None
 
 # Setup state file for persistent tracking
 SETUP_STATE_FILE = DATA_DIR / 'setup-state.json'
@@ -1032,7 +1048,7 @@ def create_app(config: Optional[dict] = None) -> Flask:
     @require_auth
     def api_template_build_status(job_id):
         """Check template build progress."""
-        job = _jobs.get(job_id)
+        job = _jobs_snapshot(job_id)
         if not job:
             return jsonify({'error': 'Job not found'}), 404
         return jsonify(job)
@@ -1274,14 +1290,12 @@ def create_app(config: Optional[dict] = None) -> Flask:
 def _build_vm_template(job_id: str):
     """Build VM template in background."""
     try:
-        _jobs[job_id]['message'] = 'Downloading base image...'
-        _jobs[job_id]['progress'] = 10
+        _jobs_update(job_id, message='Downloading base image...', progress=10)
 
         # Run template build script via provisioner manifest
         build_cmd = _provisioner['manifest']['commands']['build-template'] if _provisioner else None
         if not build_cmd:
-            _jobs[job_id]['status'] = 'failed'
-            _jobs[job_id]['error'] = 'No provisioner installed'
+            _jobs_update(job_id, status='failed', error='No provisioner installed')
             return
 
         result = subprocess.run(
@@ -1292,16 +1306,14 @@ def _build_vm_template(job_id: str):
         )
 
         if result.returncode == 0:
-            _jobs[job_id]['progress'] = 100
-            _jobs[job_id]['status'] = 'completed'
-            _jobs[job_id]['message'] = 'Template built successfully'
+            _jobs_update(job_id, progress=100, status='completed',
+                         message='Template built successfully')
         else:
-            _jobs[job_id]['status'] = 'failed'
-            _jobs[job_id]['error'] = result.stderr or 'Template build failed'
+            _jobs_update(job_id, status='failed',
+                         error=result.stderr or 'Template build failed')
 
     except Exception as e:
-        _jobs[job_id]['status'] = 'failed'
-        _jobs[job_id]['error'] = str(e)
+        _jobs_update(job_id, status='failed', error=str(e))
 
 
 def run_server(host: str = '0.0.0.0', port: int = 80, use_https: bool = False):

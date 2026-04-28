@@ -28,9 +28,18 @@ def set_blockhost_ownership(path, mode=0o640):
 
 
 def write_blockhost_file(path: Union[str, Path], content: str, mode: int = 0o640):
-    """Write content to path then set root:blockhost ownership."""
-    Path(path).write_text(content)
-    set_blockhost_ownership(path, mode)
+    """Write content with restrictive mode at create time, then set root:blockhost ownership.
+
+    O_CREAT mode applies only when the file is new — chmod after handles existing
+    files. The point is to avoid the brief default-perm window between
+    Path.write_text() and chmod for sensitive keyfiles (deployer.key, server.key,
+    admin-signature.key, OTP).
+    """
+    path_str = str(path)
+    fd = os.open(path_str, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, 'w') as f:
+        f.write(content)
+    set_blockhost_ownership(path_str, mode)
 
 
 def detect_disks() -> list[dict]:
