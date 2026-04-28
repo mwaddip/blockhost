@@ -833,7 +833,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                     knock_timeout = 300
 
                 admin_commands.update({
-                    'destination_mode': request.form.get('destination_mode', 'self'),
                     'knock_command': request.form.get('knock_command', ''),
                     'knock_ports': ports,
                     'knock_timeout': max(30, min(3600, knock_timeout)),
@@ -871,7 +870,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
             'admin': {
                 'wallet': session.get('admin_wallet', 'Not connected'),
                 'enabled': admin_commands.get('enabled', False),
-                'destination_mode': admin_commands.get('destination_mode', 'N/A'),
                 'command_count': 1 if admin_commands.get('enabled') else 0,
             },
         }

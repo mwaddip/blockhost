@@ -52,46 +52,6 @@
                 </div>
             </div>
 
-            <!-- Destination Mode -->
-            <div class="form-section">
-                <h3>Transaction Destination</h3>
-                <p class="text-muted mb-2" style="font-size: 0.875rem;">
-                    How the server filters incoming transactions. The command payload is always encrypted,
-                    this just controls which transactions are worth trying to decrypt.
-                </p>
-
-                <div class="radio-group mb-2">
-                    <label class="radio-option" onclick="selectRadio(this)">
-                        <input type="radio" name="destination_mode" value="self" checked>
-                        <div class="radio-label">
-                            <h4>Send to self</h4>
-                            <p>You send the transaction to your own address (tx.from === tx.to). Simple and clean.</p>
-                        </div>
-                    </label>
-                    <label class="radio-option" onclick="selectRadio(this)">
-                        <input type="radio" name="destination_mode" value="any">
-                        <div class="radio-label">
-                            <h4>Any destination</h4>
-                            <p>Server checks all transactions from your wallet. Easiest setup, slightly more processing.</p>
-                        </div>
-                    </label>
-                    <label class="radio-option" onclick="selectRadio(this)">
-                        <input type="radio" name="destination_mode" value="server">
-                        <div class="radio-label">
-                            <h4>Send to server address</h4>
-                            <p>Send to the server's Ethereum address (derived from its public key). Most explicit.</p>
-                        </div>
-                    </label>
-                    <label class="radio-option" onclick="selectRadio(this)">
-                        <input type="radio" name="destination_mode" value="null">
-                        <div class="radio-label">
-                            <h4>Send to burn address</h4>
-                            <p>Send to 0x...dEaD. Unambiguous but costs gas with no recovery.</p>
-                        </div>
-                    </label>
-                </div>
-            </div>
-
             <!-- Port Knock Command -->
             <div class="form-section">
                 <h3>Port Knock Command</h3>

@@ -623,7 +623,6 @@ def run_full_validation() -> ValidationReport:
 
     # Validate admin wallet address from blockhost.yaml
     blockhost_yaml_admin = etc_blockhost / 'blockhost.yaml'
-    admin_enabled = False
     if blockhost_yaml_admin.exists():
         try:
             import yaml
@@ -631,28 +630,20 @@ def run_full_validation() -> ValidationReport:
             admin_section = bh_data.get('admin', {})
             admin_wallet = admin_section.get('wallet_address', '')
             report.add(_check_address(admin_wallet, "Admin", "Admin wallet address"))
-
-            # Check if admin commands are enabled (has destination_mode means enabled)
-            if admin_section.get('destination_mode'):
-                admin_enabled = True
         except ImportError:
             report.add(ValidationResult("Admin", "Admin wallet validation", True,
                                         "Skipped (yaml module unavailable)", critical=False))
         except Exception as e:
             report.add(ValidationResult("Admin", "Admin wallet validation", False, f"Error: {e}"))
 
-    # admin-commands.json (only present when admin commands enabled)
+    # admin-commands.json — its presence is the "admin commands enabled" sentinel.
     admin_cmds_file = etc_blockhost / 'admin-commands.json'
-    if admin_enabled:
+    if admin_cmds_file.exists():
         report.add(_check_json_syntax(admin_cmds_file, "Admin", "admin-commands.json",
                                       required_keys=['commands']))
     else:
-        if admin_cmds_file.exists():
-            report.add(ValidationResult("Admin", "admin-commands.json", False,
-                                        "File exists but admin commands not enabled in blockhost.yaml"))
-        else:
-            report.add(ValidationResult("Admin", "admin-commands.json", True,
-                                        "Not present (OK - admin commands not enabled)", critical=False))
+        report.add(ValidationResult("Admin", "admin-commands.json", True,
+                                    "Not present (OK - admin commands not enabled)", critical=False))
 
     # ========== CONTRACT ADDRESSES ==========
 

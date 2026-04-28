@@ -538,7 +538,6 @@ session = {
 
     'admin_commands': {                 # from /wizard/admin_commands
         'enabled': bool,
-        'destination_mode': 'self'|'external',
         'knock_command': 'blockhost',
         'knock_ports': [22],
         'knock_timeout': 300,
@@ -597,7 +596,7 @@ deployer: {key_file: '/etc/blockhost/deployer.key'}
 proxmox: {node: str, storage: str, bridge: str}
 server_public_key: '0x04...'
 public_secret: 'blockhost-access'
-admin: {wallet_address: '0x...', credential_nft_id: 0, max_command_age: 300, destination_mode: 'self'}
+admin: {wallet_address: '0x...', credential_nft_id: 0, max_command_age: 300}
 ```
 `credential_nft_id`: Written by engine's `mint_nft` post-step after minting. Maps the `admin` alias in `bw who admin` to an NFT token ID. Default 0 (first mint).
 
@@ -1036,7 +1035,7 @@ Three distinct encryption contexts:
 ```python
 summary.network.{ip, gateway}
 summary.ipv6.{mode, prefix, broker_node, broker_registry}
-summary.admin.{wallet, enabled, destination_mode, command_count}
+summary.admin.{wallet, enabled, command_count}
 
 engine_summary           # dict from engine module's get_summary_data(session), or None
 engine_summary_template  # template path from engine module's get_summary_template(), or None
