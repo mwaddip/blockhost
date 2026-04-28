@@ -30,7 +30,7 @@ import yaml
 
 from flask import (
     Flask, Response, render_template, request, redirect, url_for,
-    session, flash, jsonify, abort
+    session, flash, jsonify, abort, send_from_directory
 )
 
 # Import common modules
@@ -1265,6 +1265,15 @@ def create_app(config: Optional[dict] = None) -> Flask:
             return jsonify({'success': True})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
+
+    @app.route('/.well-known/acme-challenge/<path:filename>')
+    def acme_challenge(filename):
+        """Serve Let's Encrypt HTTP-01 challenge files placed by certbot --webroot.
+        Unauthenticated — the LE validation server fetches these without auth.
+        Used by _finalize_https while the wizard owns port 80; nginx takes over
+        the same /.well-known/acme-challenge/ root once it starts on reboot.
+        """
+        return send_from_directory('/var/www/certbot/.well-known/acme-challenge', filename)
 
     @app.route('/api/validation-output')
     @require_auth

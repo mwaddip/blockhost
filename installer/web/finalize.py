@@ -549,20 +549,24 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
         if use_dns_zone or use_sslip or (hostname and '.' in hostname and not hostname.endswith('.local')):
             # Try to get Let's Encrypt certificate
             try:
-                # Install certbot if missing (wizard binds :443; port 80 is free)
                 if not shutil.which('certbot'):
                     subprocess.run(
                         ['apt-get', 'install', '-y', 'certbot'],
                         capture_output=True, timeout=300,
                     )
 
-                # Bind certbot directly to port 80 — the wizard is on 443 during
-                # finalization, and nginx hasn't been started yet.
+                # Webroot mode: the Flask wizard owns port 80 right now and
+                # serves /.well-known/acme-challenge/ from /var/www/certbot.
+                # After reboot, nginx takes over the same webroot path, so
+                # the renewal config produced by this run is reusable as-is.
+                certbot_webroot = Path('/var/www/certbot')
+                certbot_webroot.mkdir(parents=True, exist_ok=True)
+
                 result = subprocess.run(
                     [
                         'certbot', 'certonly',
-                        '--standalone',
-                        '--http-01-port', '80',
+                        '--webroot',
+                        '--webroot-path', str(certbot_webroot),
                         '--non-interactive',
                         '--agree-tos',
                         '--register-unsafely-without-email',
@@ -581,28 +585,6 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
                     if le_path.exists():
                         https_config['cert_file'] = str(le_path / 'fullchain.pem')
                         https_config['key_file'] = str(le_path / 'privkey.pem')
-
-                    # Switch renewal to webroot so certbot renews through nginx
-                    # without needing to stop anything (standalone won't work
-                    # post-reboot since nginx owns port 80)
-                    certbot_webroot = Path('/var/www/certbot')
-                    certbot_webroot.mkdir(parents=True, exist_ok=True)
-                    renewal_conf = Path(f'/etc/letsencrypt/renewal/{hostname}.conf')
-                    if renewal_conf.exists():
-                        txt = renewal_conf.read_text()
-                        txt = txt.replace(
-                            'authenticator = standalone',
-                            'authenticator = webroot',
-                        )
-                        if 'webroot_path' not in txt:
-                            # certbot needs webroot_path in [renewalparams] AND
-                            # the [[webroot]] domain mapping section
-                            txt = txt.replace(
-                                'authenticator = webroot',
-                                'authenticator = webroot\nwebroot_path = /var/www/certbot,',
-                            )
-                            txt += f'\n[[webroot]]\n{hostname} = /var/www/certbot\n'
-                        renewal_conf.write_text(txt)
 
                     # Deploy hook: reload nginx after renewal to pick up new cert
                     deploy_dir = Path('/etc/letsencrypt/renewal-hooks/deploy')
