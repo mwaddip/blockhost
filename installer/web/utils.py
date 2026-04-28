@@ -61,22 +61,6 @@ def detect_disks() -> list[dict]:
     return disks
 
 
-def is_valid_evm_address(address: str) -> bool:
-    """Check if string is a valid Ethereum address (used for broker registry)."""
-    if not address:
-        return False
-    address = address.strip()
-    if not address.startswith('0x'):
-        return False
-    if len(address) != 42:
-        return False
-    try:
-        int(address, 16)
-        return True
-    except ValueError:
-        return False
-
-
 def is_valid_ipv6_prefix(prefix: str) -> bool:
     """Validate IPv6 prefix format."""
     match = re.match(r'^([0-9a-fA-F:]+)/(\d{1,3})$', prefix)
@@ -84,48 +68,6 @@ def is_valid_ipv6_prefix(prefix: str) -> bool:
         return False
     prefix_len = int(match.group(2))
     return 32 <= prefix_len <= 128
-
-
-def request_broker_allocation(registry: str) -> dict:
-    """Request IPv6 allocation from broker network."""
-    try:
-        # Call blockhost-broker-client
-        result = subprocess.run(
-            ['blockhost-broker-client', 'request', '--registry', registry, '--json'],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return {
-                'success': True,
-                'prefix': data.get('prefix'),
-                'broker_node': data.get('broker_node'),
-                'tunnel_active': data.get('tunnel_active', False),
-                'wg_config': data.get('wg_config'),
-            }
-        else:
-            return {
-                'success': False,
-                'error': result.stderr or 'Broker request failed',
-            }
-    except FileNotFoundError:
-        return {
-            'success': False,
-            'error': 'blockhost-broker-client not installed',
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            'success': False,
-            'error': 'Broker request timed out',
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e),
-        }
 
 
 def write_yaml(path: Path, data: dict):

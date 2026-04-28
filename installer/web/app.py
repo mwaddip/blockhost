@@ -45,17 +45,14 @@ from installer.common.detection import detect_boot_medium, BootMedium
 # Import extracted modules
 from installer.web.utils import (
     detect_disks,
-    is_valid_evm_address,
     is_valid_ipv6_prefix,
     parse_pam_ciphertext,
-    request_broker_allocation,
     generate_self_signed_cert,
 )
 from installer.web.finalize import (
     get_finalization_steps,
     get_step_metadata,
     run_finalization_with_state,
-    run_finalization,
 )
 
 
@@ -883,12 +880,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
             if hasattr(prov_mod, 'get_summary_template'):
                 provisioner_summary_template = prov_mod.get_summary_template()
 
-        if request.method == 'POST':
-            if request.form.get('confirm') == 'yes':
-                return redirect(url_for('wizard_install'))
-            else:
-                flash('Installation cancelled', 'info')
-                return redirect(url_for('wizard_network'))
+        if request.method == 'POST' and request.form.get('confirm') != 'yes':
+            flash('Installation cancelled', 'info')
+            return redirect(url_for('wizard_network'))
 
         # Build finalization step metadata for the progress UI
         network_mode = session.get('ipv6', {}).get('mode', 'none')
@@ -913,12 +907,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
                              provisioner_summary_template=provisioner_summary_template,
                              all_finalization_steps=all_finalization_steps,
                              provisioner_steps=provisioner_steps_meta)
-
-    @app.route('/wizard/install')
-    @require_auth
-    def wizard_install():
-        """Execute installation."""
-        return render_template('wizard/install.html')
 
     # API routes
     @app.route('/api/status')
@@ -1242,30 +1230,6 @@ def create_app(config: Optional[dict] = None) -> Flask:
         setup_state = SetupState()
         setup_state.reset()
         return jsonify({'status': 'reset', 'message': 'State reset successfully'})
-
-    @app.route('/api/install/start', methods=['POST'])
-    @require_auth
-    def api_install_start():
-        """Start installation process."""
-        # Hypervisor already installed, just mark setup complete
-        try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            (DATA_DIR / '.setup-complete').touch()
-        except Exception:
-            pass
-        return jsonify({'status': 'started', 'job_id': 'install-001'})
-
-    @app.route('/api/install/status/<job_id>')
-    @require_auth
-    def api_install_status(job_id):
-        """Get installation status."""
-        # Already complete, return immediately
-        return jsonify({
-            'job_id': job_id,
-            'status': 'completed',
-            'progress': 100,
-            'message': 'Setup complete!',
-        })
 
     @app.route('/api/complete', methods=['POST'])
     @require_auth

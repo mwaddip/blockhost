@@ -5,7 +5,6 @@ The finalization pipeline: step functions, orchestration, and helpers.
 All step functions are private to this module. The public API is:
 - get_finalization_steps(provisioner, engine) — returns step tuples
 - run_finalization_with_state(setup_state, config, provisioner, engine) — orchestration loop
-- run_finalization(job_id, config, jobs, provisioner, engine) — legacy wrapper
 
 Chain-specific steps (wallet, contracts, config, mint_nft, plan,
 revenue_share) are provided by the engine wizard plugin. This module
@@ -155,21 +154,6 @@ def run_finalization_with_state(setup_state, config: dict, provisioner, engine=N
         else:
             setup_state.state['status'] = 'failed'
             setup_state.save()
-
-
-def run_finalization(job_id: str, config: dict, jobs: dict, provisioner, engine=None):
-    """Legacy wrapper - run finalization with job-based tracking."""
-    # Import SetupState here to avoid circular import at module level
-    from installer.web.app import SetupState
-
-    setup_state = SetupState()
-    setup_state.start(config)
-    run_finalization_with_state(setup_state, config, provisioner, engine)
-
-    # Update job status from setup state
-    if job_id in jobs:
-        state_response = setup_state.to_api_response()
-        jobs[job_id].update(state_response)
 
 
 # ---------------------------------------------------------------------------
