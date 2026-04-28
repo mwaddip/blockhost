@@ -45,8 +45,7 @@ blockhost/
 │               ├── admin_commands.html
 │               └── summary.html      # Review + finalization progress UI
 ├── testing/
-│   ├── integration-test-proxmox.sh     # E2E test (Proxmox: PVE API + Terraform cleanup)
-│   ├── integration-test-libvirt.sh     # E2E test (libvirt: vm-status + vm-destroy cleanup)
+│   ├── integration-test.sh             # E2E test (provisioner-agnostic via blockhost-vm-* CLI)
 │   ├── ci-config-proxmox.json         # CI config for Proxmox backend
 │   ├── ci-config-libvirt.json         # CI config for libvirt backend
 │   ├── ipv6-login-test.sh             # IPv6 PAM web3 SSH login test

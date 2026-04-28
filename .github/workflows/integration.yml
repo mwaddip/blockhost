@@ -115,7 +115,7 @@ jobs:
         run: |
           sshpass -p blockhost scp \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            testing/integration-test-${BACKEND}.sh \
+            testing/integration-test.sh \
             "root@${VM_IP}:/tmp/integration-test.sh"
 
       - name: Run integration test

@@ -204,37 +204,10 @@ def api_vms():
     return jsonify(system.get_vms())
 
 
-@bp.route("/api/vms/<name>/start", methods=["POST"])
+@bp.route("/api/vms/<name>/<action>", methods=["POST"])
 @login_required
-def api_vm_start(name):
-    ok, err = system.vm_action(name, "start")
-    if not ok:
-        return jsonify({"ok": False, "error": err}), 500
-    return jsonify({"ok": True})
-
-
-@bp.route("/api/vms/<name>/stop", methods=["POST"])
-@login_required
-def api_vm_stop(name):
-    ok, err = system.vm_action(name, "stop")
-    if not ok:
-        return jsonify({"ok": False, "error": err}), 500
-    return jsonify({"ok": True})
-
-
-@bp.route("/api/vms/<name>/kill", methods=["POST"])
-@login_required
-def api_vm_kill(name):
-    ok, err = system.vm_action(name, "kill")
-    if not ok:
-        return jsonify({"ok": False, "error": err}), 500
-    return jsonify({"ok": True})
-
-
-@bp.route("/api/vms/<name>/destroy", methods=["POST"])
-@login_required
-def api_vm_destroy(name):
-    ok, err = system.vm_action(name, "destroy")
+def api_vm_action(name, action):
+    ok, err = system.vm_action(name, action)
     if not ok:
         return jsonify({"ok": False, "error": err}), 500
     return jsonify({"ok": True})

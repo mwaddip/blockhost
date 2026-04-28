@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# BlockHost End-to-End Integration Test (libvirt backend)
+# BlockHost End-to-End Integration Test
+#
+# Provisioner-agnostic — uses the blockhost-vm-* CLI contract for all VM
+# lifecycle operations. Works with any provisioner that implements the
+# contract (libvirt, proxmox, ...).
 #
 # Exercises the full subscription → provisioning → NFT minting flow:
 #   1. Generate test wallet
@@ -9,7 +13,7 @@
 #   4. Wait for monitor to detect event + provision VM
 #   5. Verify VM running, NFT minted, connection details decryptable
 #
-# Run as: sudo -u blockhost ./testing/integration-test-libvirt.sh [--cleanup]
+# Run as: sudo -u blockhost ./testing/integration-test.sh [--cleanup]
 #
 # Prerequisites: finalized system with blockhost-monitor running
 # =============================================================================
@@ -300,7 +304,7 @@ fi
 pass "VM provisioned: $FOUND_NAME (VMID $FOUND_VMID, IP $FOUND_IP)"
 
 # =============================================================================
-# Phase 6 — Verify VM (libvirt: use provisioner status command)
+# Phase 6 — Verify VM
 # =============================================================================
 info "Phase 6: Verify VM"
 
