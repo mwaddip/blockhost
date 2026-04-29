@@ -47,6 +47,7 @@ def _wait_hostname(svc_dir: Path) -> str | None:
 def _add(params: dict) -> dict:
     vm_name = params.get("vm_name", "")
     port = int(params.get("port", 22))
+    target_ip = params.get("target_ip", "127.0.0.1")
     if not vm_name:
         return {"ok": False, "error": "vm_name required"}
 
@@ -65,7 +66,7 @@ def _add(params: dict) -> dict:
             f.write(
                 f"\n{marker}\n"
                 f"HiddenServiceDir {svc_dir}\n"
-                f"HiddenServicePort {port} 127.0.0.1:{port}\n"
+                f"HiddenServicePort {port} {target_ip}:{port}\n"
             )
         _reload_tor()
 
