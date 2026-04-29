@@ -24,13 +24,15 @@ The operator boots an ISO, walks through a setup wizard, and the system runs its
 
 **OS-level auth.** A custom PAM module verifies wallet signatures at SSH login. Not an application-layer wrapper — it's in the authentication stack itself.
 
+**Optional Tor onion routing.** The wizard offers an onion-mode network plugin alongside the IPv6 broker and manual-prefix options. Each customer VM gets its own `.onion` hidden service for SSH and the wallet-signing endpoint, the host-side signup page is published as a `.onion` too. No public IP needed — the operator can run BlockHost behind NAT, on residential bandwidth, anywhere Tor reaches. Tor handles transport encryption end-to-end; libpam-web3's auth-svc binds plain HTTP under the hidden service. Network modes are pluggable (apache `available`/`enabled` symlink pattern), so adding more is a matter of dropping a plugin under `installer/network/`.
+
 ---
 
 ## How it works
 
 ### For the operator
 
-Boot the ISO on dedicated hardware (or a VM). Debian auto-installs, packages deploy on first boot, and a web wizard walks through network, storage, blockchain, and hypervisor configuration. Finalization deploys smart contracts, configures IPv6 tunneling, builds a VM template, and enables all services. After a reboot, the system is live.
+Boot the ISO on dedicated hardware (or a VM). Debian auto-installs, packages deploy on first boot, and a web wizard walks through network, storage, blockchain, and hypervisor configuration. Finalization deploys smart contracts, sets up connectivity (IPv6 broker, manual prefix, or onion routing), builds a VM template, and enables all services. After a reboot, the system is live.
 
 An admin panel (NFT-gated, wallet-authenticated) provides system monitoring, network management, certificate renewal, and VM oversight — but day-to-day operation requires zero intervention.
 
