@@ -1,0 +1,13 @@
+{
+  "name": "none",
+  "display_name": "No public access",
+  "description": "VMs are not publicly addressable. Subscriptions cannot connect remotely.",
+  "package": "blockhost-installer",
+  "exclusive_with": ["*"],
+  "commands": {
+    "public-address": "/usr/share/blockhost/network/none/public-address.sh",
+    "push-vm-config": "/usr/share/blockhost/network/none/push-vm-config.sh",
+    "cleanup":        "/usr/share/blockhost/network/none/cleanup.sh"
+  },
+  "validation": {}
+}

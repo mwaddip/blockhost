@@ -1,0 +1,14 @@
+{
+  "name": "manual",
+  "display_name": "Manual IPv6 Prefix",
+  "description": "Operator-configured IPv6 prefix; VMs get publicly-routable addresses from it.",
+  "package": "blockhost-installer",
+  "exclusive_with": ["*"],
+  "commands": {
+    "public-address": "/usr/share/blockhost/network/manual/public-address.py",
+    "push-vm-config": "/usr/share/blockhost/network/manual/push-vm-config.sh",
+    "cleanup":        "/usr/share/blockhost/network/manual/cleanup.sh"
+  },
+  "finalize_d": "/usr/share/blockhost/network/manual/finalize.d/",
+  "validation": {}
+}

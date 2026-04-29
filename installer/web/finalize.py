@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -215,16 +216,60 @@ def _finalize_keypair(config: dict) -> tuple[bool, Optional[str]]:
         return False, f'Failed to generate server keypair: {e}'
 
 
-def _setup_onion_host_service():
-    """Configure tor hidden service for host (admin/signup over .onion)."""
-    host_onion_dir = Path('/var/lib/tor/blockhost-host')
-    host_onion_dir.mkdir(parents=True, exist_ok=True)
-    _chown_recursive(str(host_onion_dir), 'debian-tor', 'debian-tor')
-    with open('/etc/tor/torrc', 'a') as f:
-        f.write('\n# BlockHost — host hidden service (admin/signup)\n')
-        f.write(f'HiddenServiceDir {host_onion_dir}\n')
-        f.write('HiddenServicePort 80 127.0.0.1:80\n')
-    _systemctl('enable', '--now', 'tor')
+def _enable_network_plugin(mode: str) -> None:
+    """Symlink the chosen mode into /etc/blockhost/network-modes.enabled/.
+
+    apache-style activation per facts/NETWORK_INTERFACE.md §2. Idempotent.
+    Doesn't validate exclusivity here — the wizard already constrained the
+    choice; here we just record it.
+    """
+    avail_dir = Path('/etc/blockhost/network-modes.available')
+    enabled_dir = Path('/etc/blockhost/network-modes.enabled')
+    enabled_dir.mkdir(parents=True, exist_ok=True)
+
+    target = enabled_dir / f'{mode}.json'
+    src = avail_dir / f'{mode}.json'
+    if not src.exists():
+        # Plugins not installed yet (e.g. running this old code path on an
+        # unmigrated host). Don't fail finalization for the symlink alone.
+        return
+
+    if target.is_symlink() or target.exists():
+        return
+    target.symlink_to(Path('..') / 'network-modes.available' / f'{mode}.json')
+
+
+def _run_network_finalize_d(mode: str, config: dict) -> tuple[bool, Optional[str]]:
+    """Walk /usr/share/blockhost/network/<mode>/finalize.d/ in lexical order.
+
+    Each executable runs as a finalization step. Failure stops the walk.
+    Modes without a finalize.d (broker, manual, none for now) are no-ops here.
+    """
+    finalize_d = Path(f'/usr/share/blockhost/network/{mode}/finalize.d')
+    if not finalize_d.is_dir():
+        return True, None
+
+    config_file = Path('/run/blockhost/finalize-config.json')
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    safe_config = {k: v for k, v in config.items() if not k.startswith('_')}
+    config_file.write_text(json.dumps(safe_config, default=str))
+
+    env = os.environ.copy()
+    env['BH_MODE'] = mode
+    env['BH_CONFIG_JSON'] = str(config_file)
+
+    for script in sorted(finalize_d.iterdir()):
+        if not script.is_file() or not os.access(script, os.X_OK):
+            continue
+        result = subprocess.run(
+            [str(script)], env=env, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or '').strip().splitlines()[-1:] or [
+                f'exited {result.returncode}'
+            ]
+            return False, f'{script.name}: {err[0]}'
+    return True, None
 
 
 def _enable_ipv6_forwarding():
@@ -433,32 +478,40 @@ def _persist_db_yaml_and_reserve_ipv6(network: ipaddress.IPv6Network, prefix: st
 
 
 def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
-    """Configure IPv6: onion service, broker-tunnel allocation, or manual prefix.
-
-    Sequences focused helpers; each step short-circuits or warns on failure
-    rather than failing the whole step. The broker request itself is the only
-    hard-fail.
+    """Configure connectivity: write the network-modes.enabled symlink, run
+    the plugin's finalize.d hooks (onion does its host setup here), then run
+    legacy in-process logic for modes that haven't migrated to plugins yet
+    (broker, manual).
     """
     ipv6 = config.get('ipv6', {})
+    mode = ipv6.get('mode', 'none')
     network_mode_file = CONFIG_DIR / 'network-mode'
 
-    if ipv6.get('mode') == 'onion':
-        network_mode_file.write_text('onion\n')
-        try:
-            _setup_onion_host_service()
-        except Exception as e:
-            return False, f'Failed to set up onion host service: {e}'
-        return True, None  # Tor handles connectivity, no IPv6 needed
+    # Step 1 — activate the chosen mode (apache-style symlink).
+    _enable_network_plugin(mode)
 
+    # Step 2 — run any plugin finalize.d hooks (onion has these today).
+    ok, err = _run_network_finalize_d(mode, config)
+    if not ok:
+        return False, err
+
+    # Onion mode: plugin's finalize.d covered host hidden service + https.json.
+    # No IPv6 setup, no further work.
+    if mode == 'onion':
+        network_mode_file.write_text('onion\n')  # legacy file kept until consumers migrate
+        return True, None
+
+    # Legacy in-process path for broker/manual/none. Will migrate to each
+    # mode's finalize.d as a follow-up.
     try:
         _enable_ipv6_forwarding()
 
-        if ipv6.get('mode') == 'broker':
+        if mode == 'broker':
             prefix, err = _request_broker_allocation_step(config, ipv6)
             if err:
                 return False, err
             config['ipv6']['prefix'] = prefix
-        elif ipv6.get('mode') == 'manual':
+        elif mode == 'manual':
             config['ipv6']['prefix'] = _save_manual_allocation(ipv6)
 
         prefix = config.get('ipv6', {}).get('prefix', '')
@@ -471,9 +524,9 @@ def _finalize_ipv6(config: dict) -> tuple[bool, Optional[str]]:
                 _create_host_dummy_iface(network)
                 _add_bridge_gateway(network)
                 _persist_db_yaml_and_reserve_ipv6(network, prefix)
-            config['_step_result_ipv6'] = {'prefix': prefix, 'mode': ipv6.get('mode', '')}
+            config['_step_result_ipv6'] = {'prefix': prefix, 'mode': mode}
 
-        network_mode_file.write_text(f'{ipv6.get("mode", "none")}\n')
+        network_mode_file.write_text(f'{mode}\n')
         return True, None
     except subprocess.TimeoutExpired:
         return False, 'Broker request timed out (180s)'
@@ -485,7 +538,14 @@ def _finalize_https(config: dict) -> tuple[bool, Optional[str]]:
     """Configure HTTPS using dns_zone (preferred) or sslip.io fallback, with Let's Encrypt."""
     ipv6 = config.get('ipv6', {})
     if ipv6.get('mode') == 'onion':
-        return True, None  # Tor provides end-to-end encryption, no TLS needed
+        # Onion plugin's finalize.d/ already wrote /etc/blockhost/https.json
+        # during the connectivity step. Nothing left to do here.
+        https_file = CONFIG_DIR / 'https.json'
+        if https_file.exists():
+            data = json.loads(https_file.read_text())
+            config['https'] = data
+            config['_step_result_https'] = {'hostname': data.get('hostname', '')}
+        return True, None
     try:
         ssl_dir = CONFIG_DIR / 'ssl'
         ssl_dir.mkdir(parents=True, exist_ok=True)
@@ -641,13 +701,23 @@ def _finalize_signup(config: dict) -> tuple[bool, Optional[str]]:
         if result.returncode != 0:
             return False, f"Failed to generate signup page: {result.stderr}"
 
+        https_cfg = config.get('https', {})
+        hostname = https_cfg.get('hostname', '')
+        scheme = 'http' if https_cfg.get('tls_mode') == 'onion' else 'https'
+        if hostname:
+            config['_step_result_signup'] = {'url': f'{scheme}://{hostname}/'}
+
         return True, None
     except Exception as e:
         return False, str(e)
 
 
 def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
-    """Install and configure nginx as TLS reverse proxy for signup + admin panel."""
+    """Install and configure nginx for signup + admin panel.
+
+    TLS reverse proxy in IPv6/manual modes; plaintext localhost-only in
+    onion mode (Tor handles transport encryption end-to-end).
+    """
     try:
         # Install nginx
         result = subprocess.run(
@@ -659,16 +729,7 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
         if result.returncode != 0:
             return False, f"Failed to install nginx: {result.stderr}"
 
-        # Read HTTPS config for cert paths and hostname
-        https_config = config.get('https', {})
-        if not https_config:
-            https_file = CONFIG_DIR / 'https.json'
-            if https_file.exists():
-                https_config = json.loads(https_file.read_text())
-
-        hostname = https_config.get('hostname', socket.gethostname())
-        cert_file = https_config.get('cert_file', str(CONFIG_DIR / 'ssl/cert.pem'))
-        key_file = https_config.get('key_file', str(CONFIG_DIR / 'ssl/key.pem'))
+        ipv6_mode = config.get('ipv6', {}).get('mode')
 
         # Read admin panel path prefix
         admin_config_file = CONFIG_DIR / 'admin.json'
@@ -698,8 +759,44 @@ def _finalize_nginx(config: dict) -> tuple[bool, Optional[str]]:
                     # Indent each line for nginx block nesting
                     engine_locations = '\n' + extra.rstrip('\n') + '\n'
 
-        # Write nginx config
-        nginx_config = f"""server {{
+        if ipv6_mode == 'onion':
+            # Bind to 127.0.0.1 only — the host's hidden service forwards
+            # :80 → 127.0.0.1:80, plaintext never crosses the LAN.
+            nginx_config = f"""server {{
+    listen 127.0.0.1:80 default_server;
+
+    # Signup page (static)
+    root /var/www/blockhost;
+    index signup.html;
+
+    location / {{
+        try_files $uri $uri/ /signup.html;
+    }}
+
+    # Admin panel — prefix strip proxies to Flask
+    location {admin_prefix} {{
+        proxy_pass http://127.0.0.1:8443/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }}
+{engine_locations}
+}}
+"""
+        else:
+            # Read HTTPS config for cert paths and hostname
+            https_config = config.get('https', {})
+            if not https_config:
+                https_file = CONFIG_DIR / 'https.json'
+                if https_file.exists():
+                    https_config = json.loads(https_file.read_text())
+
+            hostname = https_config.get('hostname', socket.gethostname())
+            cert_file = https_config.get('cert_file', str(CONFIG_DIR / 'ssl/cert.pem'))
+            key_file = https_config.get('key_file', str(CONFIG_DIR / 'ssl/key.pem'))
+
+            nginx_config = f"""server {{
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name {hostname};

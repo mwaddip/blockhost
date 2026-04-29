@@ -404,9 +404,21 @@ def create_app(config: Optional[dict] = None) -> Flask:
                 template_folder='templates',
                 static_folder='static')
 
+    # SECRET_KEY persists for the boot lifetime in /run (tmpfs, cleared on
+    # reboot). Stable across Flask debug-reloader restarts, so sessions don't
+    # die when source files change.
+    secret_file = Path('/run/blockhost/flask-secret')
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    if secret_file.exists():
+        secret_key = secret_file.read_text().strip()
+    else:
+        secret_key = secrets.token_hex(32)
+        secret_file.write_text(secret_key)
+        secret_file.chmod(0o600)
+
     # Default configuration
     app.config.update(
-        SECRET_KEY=secrets.token_hex(32),
+        SECRET_KEY=secret_key,
         SESSION_COOKIE_SECURE=False,  # Will be set based on HTTPS
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Lax',

@@ -1,0 +1,16 @@
+{
+  "name": "onion",
+  "display_name": "Onion Routing (Tor)",
+  "description": "Each VM gets its own .onion hidden service; subscribers connect via Tor.",
+  "package": "blockhost-installer",
+  "exclusive_with": ["*"],
+  "commands": {
+    "public-address": "/usr/share/blockhost/network/onion/public-address.py",
+    "push-vm-config": "/usr/share/blockhost/network/onion/push-vm-config.py",
+    "cleanup":        "/usr/share/blockhost/network/onion/cleanup.py"
+  },
+  "finalize_d": "/usr/share/blockhost/network/onion/finalize.d/",
+  "validation": {
+    "required_packages": ["tor"]
+  }
+}

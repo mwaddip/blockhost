@@ -499,11 +499,20 @@ def run_full_validation() -> ValidationReport:
     else:
         report.add(ValidationResult("Config", "broker-allocation.json", True, "Not present (OK if not using broker)", critical=False))
 
-    # https.json
+    # https.json — onion mode legitimately has no cert_file/key_file
+    https_json_path = etc_blockhost / 'https.json'
+    https_required = ['hostname', 'cert_file', 'key_file']
+    if https_json_path.exists():
+        try:
+            _hd = json.loads(https_json_path.read_text())
+            if _hd.get('tls_mode') == 'onion':
+                https_required = ['hostname', 'tls_mode']
+        except (json.JSONDecodeError, OSError):
+            pass
     report.add(_check_json_syntax(
-        etc_blockhost / 'https.json',
+        https_json_path,
         "Config", "https.json",
-        required_keys=['hostname', 'cert_file', 'key_file']
+        required_keys=https_required
     ))
 
     # addressbook.json (always written — admin and server at minimum)

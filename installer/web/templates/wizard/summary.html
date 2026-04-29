@@ -58,7 +58,7 @@
         <h3>Connectivity</h3>
         <div class="summary-item">
             <span class="summary-label">Source</span>
-            <span class="summary-value">{{ 'Tunnel Broker' if summary.ipv6.mode == 'broker' else ('Manual' if summary.ipv6.mode == 'manual' else 'None') }}</span>
+            <span class="summary-value">{{ {'broker': 'Tunnel Broker', 'manual': 'Manual', 'onion': 'Onion Routing'}.get(summary.ipv6.mode, 'None') }}</span>
         </div>
         {% if summary.ipv6.mode == 'broker' %}
         <div class="summary-item">

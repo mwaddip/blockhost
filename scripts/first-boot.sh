@@ -214,6 +214,56 @@ else
 fi
 
 #
+# Step 2d: Install network-mode plugins
+#
+# Manifests go to /etc/blockhost/network-modes.available/, scripts to
+# /usr/share/blockhost/network/<mode>/, and any plugin-owned root-agent
+# action modules to /usr/share/blockhost/root-agent-actions/. The wizard's
+# connectivity step lists available/, manages enabled/ symlinks. See
+# facts/NETWORK_INTERFACE.md.
+#
+log "Step 2d: Installing network-mode plugins..."
+
+NETWORK_PLUGIN_SRC="${BLOCKHOST_DIR}/installer/network"
+AVAILABLE_DIR="/etc/blockhost/network-modes.available"
+ENABLED_DIR="/etc/blockhost/network-modes.enabled"
+SHARE_NETWORK_DIR="/usr/share/blockhost/network"
+ROOT_AGENT_ACTIONS_DIR="/usr/share/blockhost/root-agent-actions"
+
+mkdir -p "$AVAILABLE_DIR" "$ENABLED_DIR" "$SHARE_NETWORK_DIR" "$ROOT_AGENT_ACTIONS_DIR"
+
+if [ -d "$NETWORK_PLUGIN_SRC" ]; then
+    # Manifests: <mode>.json -> available/<mode>.json
+    for manifest in "$NETWORK_PLUGIN_SRC"/*.json; do
+        [ -f "$manifest" ] || continue
+        cp "$manifest" "$AVAILABLE_DIR/"
+    done
+
+    # Plugin scripts: <mode>/* -> /usr/share/blockhost/network/<mode>/*
+    # (excluding root-agent-actions/ subtree, handled separately)
+    for mode_dir in "$NETWORK_PLUGIN_SRC"/*/; do
+        [ -d "$mode_dir" ] || continue
+        mode_name=$(basename "$mode_dir")
+        target="$SHARE_NETWORK_DIR/$mode_name"
+        mkdir -p "$target"
+        rsync -a --exclude='root-agent-actions' "$mode_dir" "$target/"
+        chmod -R a+rx "$target"
+
+        # Plugin's own root-agent-actions, if any
+        if [ -d "$mode_dir/root-agent-actions" ]; then
+            cp "$mode_dir"/root-agent-actions/*.py "$ROOT_AGENT_ACTIONS_DIR/" 2>/dev/null || true
+        fi
+    done
+
+    log "Step 2d complete - installed manifests for: $(ls "$AVAILABLE_DIR" | tr '\n' ' ')"
+else
+    log "Step 2d WARNING - $NETWORK_PLUGIN_SRC not found (no network plugins installed)"
+fi
+
+# Restart root agent to pick up any new action modules just dropped in.
+systemctl restart blockhost-root-agent || log "WARNING: failed to restart root agent"
+
+#
 # Step 3: Run provisioner first-boot hook
 #
 # The provisioner hook handles installing hypervisor-specific software

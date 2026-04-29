@@ -1,0 +1,16 @@
+{
+  "name": "broker",
+  "display_name": "IPv6 Tunnel Broker",
+  "description": "Each VM gets a publicly-routable IPv6 from a broker-allocated prefix.",
+  "package": "blockhost-installer",
+  "exclusive_with": ["*"],
+  "commands": {
+    "public-address": "/usr/share/blockhost/network/broker/public-address.py",
+    "push-vm-config": "/usr/share/blockhost/network/broker/push-vm-config.sh",
+    "cleanup":        "/usr/share/blockhost/network/broker/cleanup.sh"
+  },
+  "finalize_d": "/usr/share/blockhost/network/broker/finalize.d/",
+  "validation": {
+    "required_files": ["/etc/blockhost/broker-allocation.json"]
+  }
+}
